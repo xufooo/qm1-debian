@@ -46,6 +46,10 @@ require_root
 need_cmd debootstrap "apt install debootstrap"
 need_cmd mount
 
+# debootstrap 内部会 cd 进目标目录，相对路径会失败（"can't cd to build"）→ 一律转绝对路径
+mkdir -p "$(dirname "$OUT")"
+OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
+
 case "$ARCH" in
     amd64|i386) ;;
     *) die "仅支持 amd64 / i386（i386 仅作救援兜底，不能承载现代 agent 运行时）" ;;
