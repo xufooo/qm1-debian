@@ -1,5 +1,39 @@
 name: build-image
 
+# ============================================================================
+# QM1 (ASUS QM1-B002 / Intel Atom Z3735F / Bay Trail) 硬件 → 驱动与固件 对应表
+#
+# 一、内核自带（in-tree，无额外驱动包）
+#   硬件              模块                     用途 / 备注
+#   eMMC/SD 控制器     sdhci_pci / sdhci_acpi   两条枚举路径（PCI / ACPI），必有其一生效；
+#                                               上游依据：mmc: sdhci-pci: fix eMMC controller
+#                                               issue on Intel Baytrail SoCs (Kurt Kanzenbach, 2018)
+#                                               mmc: sdhci-acpi: Add some DMI quirks ... Bay Trail
+#                                               (Hans de Goede, 2024, spinics msg80147)
+#                                               commit 6e1c7d6103fe sdhci-acpi: Reduce Baytrail hangs
+#   根盘/ESP          mmc_block / vfat / ext4  vfat=ESP, ext4=根文件系统
+#   USB 2.0 / 3.0     ehci_pci / xhci_hcd       microSD 读卡器、U 盘、USB 网卡
+#   显卡              i915                     Intel HD Graphics Gen7
+#   声卡              snd_hda_intel            + snd_hda_codec_realtek
+#   蓝牙              btusb                    Intel 无线模组的蓝牙部分
+#   RTC / 电源         rtc_cmos / intel_idle / acpi_cpufreq / intel_powerclamp
+#
+# 二、只读固件 blob（需要 firmware 包，Debian 13 在 non-free-firmware 组件）
+#   firmware-linux-free      main：常用 blob
+#   firmware-brcm80211       Broadcom brcmfmac（BCM4352/4356/4365/4366/4366b…）
+#   firmware-realtek         Realtek 8723*/8812* 家族 blob
+#   firmware-atheros         Qualcomm Atheros
+#   firmware-iwlwifi         Intel 无线
+#   intel-microcode          平台微码（i915 等）
+#
+# 三、需 out-of-tree（DKMS，主线无驱动）
+#   Realtek RTL8723AU / RTL8812AU / RTL8812BU —— QM1 具体无线芯片型号尚未确认，
+#   构建期不内置源码；如识别为上述型号，需对同一内核版本编译 DKMS 后重装，
+#   或改用 USB 以太网适配器兜底（见 scripts/install-drivers.sh 的 QM1_DKMS_DEB_DIR）。
+#
+# 判定策略：上面第一类（启动关键路径）缺一即构建失败；第二、三类缺失只告警并写进清单。
+# ============================================================================
+
 on:
   workflow_dispatch:
     inputs:
@@ -41,6 +75,13 @@ jobs:
     container:
       image: debian:trixie-slim
       options: --privileged
+    env:
+      # 启动关键路径：缺任一项都意味着 QM1 认不到 eMMC/ESP，插电起不来 → CI 必须失败
+      QM1_CRITICAL_MODULES: sdhci_pci sdhci_acpi mmc_block vfat ext4
+      # 硬件相关的非关键驱动：缺失只告警（写进 driver-manifest.txt）
+      QM1_OPTIONAL_MODULES: i915 snd_hda_intel btusb ehci_pci xhci_hcd usb_storage r8152 rtc_cmos
+      # 必须装进镜像的 firmware 包（non-free-firmware 组件）
+      QM1_REQUIRED_FIRMWARE: firmware-linux-free firmware-brcm80211 firmware-realtek firmware-atheros firmware-iwlwifi
     steps:
       - uses: actions/checkout@v4
 
@@ -85,6 +126,65 @@ jobs:
             grep -q "$f" build/out/esp-listing.txt || { echo "::error::ESP 缺少 $f"; exit 1; }
           done
           grep -q 'vmlinuz' build/out/esp-listing.txt || { echo "::error::ESP 缺少内核"; exit 1; }
+
+      - name: Assert QM1 hardware driver & firmware coverage
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          rc=0
+          # 驱动清单由 install-drivers.sh 在 chroot 内生成，这里先取出来再断言
+          cp "$ROOT/usr/local/share/qm1/driver-manifest.txt" build/out/driver-manifest.txt
+
+          # 1) 启动关键驱动必须存在于本镜像内核
+          for m in $QM1_CRITICAL_MODULES; do
+            if grep -qE "^${m}[[:space:]]+present$" build/out/driver-manifest.txt; then
+              echo "OK   关键驱动 $m"
+            else
+              echo "::error::启动关键驱动缺失：$m（QM1 会认不到 eMMC/ESP，插电起不来）"
+              rc=1
+            fi
+          done
+
+          # 2) initramfs 里必须真的塞进了这些模块（模块文件名用连字符：sdhci-pci.ko）
+          initrd="$(ls "$ROOT"/boot/initrd.img-* 2>/dev/null | head -1 || true)"
+          if [ -z "$initrd" ]; then
+            echo "::error::镜像里没有 initrd.img-*"; rc=1
+          else
+            echo "initramfs: $initrd"
+            for m in sdhci-pci sdhci-acpi mmc-block; do
+              if zstd -dc "$initrd" 2>/dev/null | grep -aq "$m"; then
+                echo "OK   initramfs 含 $m"
+              else
+                echo "::error::initramfs 里没有 $m —— 根盘/ESP 阶段会挂不上"
+                rc=1
+              fi
+            done
+          fi
+
+          # 3) 非关键硬件驱动（缺失只告警，但必须写进清单）
+          for m in $QM1_OPTIONAL_MODULES; do
+            if grep -qE "^${m}[[:space:]]+present$" build/out/driver-manifest.txt; then
+              echo "OK   硬件驱动 $m"
+            else
+              echo "::warning::硬件驱动缺失：$m（不影响启动，但对应外设不可用）"
+            fi
+          done
+
+          # 4) firmware 包必须装进镜像
+          for p in $QM1_REQUIRED_FIRMWARE; do
+            if chroot "$ROOT" dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed"; then
+              echo "OK   firmware 包 $p"
+            else
+              echo "::error::firmware 包未装进镜像：$p"
+              rc=1
+            fi
+          done
+
+          # 5) 汇总固件 blob 落盘情况（无线芯片型号待上机确认，这里只报事实）
+          echo "--- firmware blob ---"
+          sed -n '/firmware blob/,$p' build/out/driver-manifest.txt | tee -a build/out/firmware-blobs.txt
+
+          exit $rc
 
       - name: Driver manifest review
         run: |

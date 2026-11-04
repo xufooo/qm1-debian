@@ -72,6 +72,19 @@ if [ -n "$missing_fw" ]; then
     warn "若 Wi-Fi/蓝牙固件缺失，需在 sources 里启用 non-free-firmware 组件后重建"
 fi
 
+# ---------- 2b. firmware 落盘核对（blob 必须在 /lib/firmware 里） ----------
+FWDIR=/lib/firmware
+fw_blob_summary=""
+for blob in brcmfmac4352-pcie.bin brcmfmac4356-pcie.bin brcmfmac4365-pcie.bin \
+            rtl8723a_fw.bin rtl8723befw.bin; do
+    if [ -e "$FWDIR/$blob" ] || find "$FWDIR" -name "$blob" -print -quit 2>/dev/null | grep -q .; then
+        fw_blob_summary="$fw_blob_summary $blob:ok"
+    else
+        fw_blob_summary="$fw_blob_summary $blob:-"
+    fi
+done
+log "firmware blob 核对：$fw_blob_summary"
+
 # ---------- 3. initramfs：启动关键模块必须在内核启动早期可用 ----------
 # MODULES=most：把大部分驱动编进 initramfs，避免根盘驱动缺失导致"起不来"。
 mkdir -p /etc/initramfs-tools
@@ -160,18 +173,40 @@ EOF
 log "驱动清单：$MANIFEST"
 
 # 汇总：本镜像内实际存在哪些模块（modinfo 能查到 = 内核包里有）
+# 注意：必须用 modinfo -k <本镜像内核版本>，否则会去查宿主 running kernel 的模块目录。
+KVER="$(ls /lib/modules 2>/dev/null | head -1)"
+[ -n "$KVER" ] || die "镜像内没有 /lib/modules 目录（内核包安装失败？）"
+log "镜像内核版本：$KVER"
+
+# 启动关键路径：缺任何一个都可能导致"通电起不来"（根盘/ESP 认不到）
+CRITICAL_MODULES="sdhci_pci sdhci_acpi mmc_block vfat ext4"
+missing_critical=""
 {
     echo ""
-    echo "--- 本镜像内核实际提供的模块 ---"
+    echo "--- 本镜像内核实际提供的模块（kernel=$KVER）---"
     for m in sdhci_pci sdhci_acpi mmc_block vfat ext4 ehci_pci xhci_hcd usb_storage \
              usbnet cdc_ether r8152 i915 snd_hda_intel snd_hda_codec_realtek btusb \
              brcmfmac iwlwifi rt2x00 rtc_cmos intel_idle acpi_cpufreq intel_powerclamp; do
-        if modinfo "$m" >/dev/null 2>&1; then
+        if modinfo -k "$KVER" "$m" >/dev/null 2>&1; then
             printf '%-26s present\n' "$m"
         else
             printf '%-26s MISSING\n' "$m"
+            case " $CRITICAL_MODULES " in
+                *" $m "*) missing_critical="$missing_critical $m" ;;
+            esac
         fi
     done
+    echo ""
+    echo "--- firmware blob 核对 ---"
+    echo "$fw_blob_summary"
+    echo "--- 已装 firmware 包 ---"
+    echo "installed:${installed_fw:-none}"
+    echo "missing:${missing_fw:-none}"
 } >> "$MANIFEST"
+
+if [ -n "$missing_critical" ]; then
+    die "启动关键驱动缺失：$missing_critical —— 这会让 QM1 认不到 eMMC/ESP，插电也起不来"
+fi
+log "启动关键驱动齐全：$CRITICAL_MODULES"
 
 log "完成"
