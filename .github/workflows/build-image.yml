@@ -55,6 +55,7 @@ on:
     branches: [main]
     paths:
       - "scripts/**"
+      - "hooks/**"
       - "overlay/**"
       - ".github/workflows/build-image.yml"
   schedule:
@@ -85,12 +86,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # runner 磁盘默认只有 ~14G 可用，mmdebstrap + 解包 + ext4 镜像会吃满
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: true
+          docker-images: true
+          swap-storage: false
+
       - name: Install build dependencies
         run: |
           set -eux
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
-            debootstrap mtools dosfstools e2fsprogs fdisk util-linux \
+            mmdebstrap debian-archive-keyring mtools dosfstools e2fsprogs fdisk util-linux \
             grub2-common file ca-certificates curl wget gnupg gpgv xz-utils zstd procps kmod
           # 两个架构的 EFI 模块：grub-mkimage 与 .mod 必须同版本，
           # 所以直接用 trixie 仓库里的同一套 grub2-common + grub-efi-*-bin
@@ -99,7 +112,7 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             grub-efi-ia32-bin:i386 grub-efi-amd64-bin:amd64
 
-      - name: Build root filesystem (debootstrap)
+      - name: Build root filesystem (mmdebstrap + hooks)
         run: |
           bash scripts/build-rootfs.sh \
             --out build/rootfs \
@@ -186,6 +199,10 @@ jobs:
 
           exit $rc
 
+      - name: Verify ext4 image contents (debugfs, no mount)
+        run: |
+          bash scripts/verify-image.sh build/out/rootfs.img
+
       - name: Driver manifest review
         run: |
           set -eux
@@ -196,8 +213,20 @@ jobs:
 
       - name: Package inventory
         run: |
-          cp build/rootfs.manifest.txt build/out/rootfs-manifest.txt 2>/dev/null || true
+          cp build/rootfs-manifest.txt build/out/rootfs-manifest.txt 2>/dev/null || true
+          cp build/rootfs.mmdebstrap.log build/out/mmdebstrap.log 2>/dev/null || true
           du -sh build/rootfs | tee build/out/rootfs-size.txt
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-build-log
+          path: |
+            build/rootfs.mmdebstrap.log
+            build/out/manifest.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Upload metadata artifacts
         uses: actions/upload-artifact@v4

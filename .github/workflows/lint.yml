@@ -26,17 +26,29 @@ jobs:
             echo "ok: $f"
           done
 
+      - name: Hooks syntax check (POSIX sh)
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(hooks/*.sh)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::没有找到 hooks"; exit 1; }
+          for f in "${files[@]}"; do
+            sh -n "$f"
+            echo "ok: $f"
+          done
+
       - name: ShellCheck
         run: |
           set -euo pipefail
           sudo apt-get update -qq
           sudo apt-get install -y -qq shellcheck
           shellcheck -x -S warning scripts/*.sh scripts/lib/*.sh
+          shellcheck -s sh -S warning hooks/*.sh
 
       - name: Scripts are executable
         run: |
           set -euo pipefail
-          for f in scripts/*.sh; do
+          for f in scripts/*.sh hooks/*.sh; do
             [ -x "$f" ] || { echo "::error::$f 不可执行（需 chmod +x）"; exit 1; }
           done
           echo "all scripts executable"
