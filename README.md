@@ -55,6 +55,30 @@ sudo dd if=build/qm1-debian13-amd64.img of=/dev/mmcblk0 bs=4M conv=fsync status=
 
 产物清单见 `build/out/manifest.txt`（尺寸、UUID、内核版本、SHA-256）。
 
+### 固定内核 point release（可选）
+
+默认镜像里的内核跟着发行版的元包走（Debian 13 当前给 `6.12.107+deb13-amd64`）。
+但 `rtl8723bs` 的 2026-07/08 那批安全修复（`kfree_sensitive`、WMM IE 长度校验、
+WPA IE 越界读、监控帧长度校验等）是从 **6.12.111** 才回移进 6.12.y 的 ——
+trixie stable 当前的 6.12.107-1 **不含**这批修复。定向 6.12.113-1：
+
+```bash
+sudo bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
+     --kernel-version 6.12.113
+```
+
+固定版本时构建脚本**不装**发行版内核元包（避免 `/lib/modules` 里出现两个版本、
+initramfs 和 GRUB 挑错），改由 `hooks/customize02-drivers.sh` 精确安装
+`linux-image-6.12.113+deb13-amd64-unsigned`（**用 `-unsigned` 变体**：signed 变体
+`linux-image-6.12.113+deb13-amd64` 会拉 `grub-efi-amd64-signed`，和本项目自带的
+`BOOTIA32.EFI` / `BOOTX64.EFI` 双引导器抢 EFI 目录）；该 point release 若不在主仓库，
+hook 会临时挂 `<suite>-proposed-updates` 精确安装，装完即撤，
+**装不上直接失败，不静默回退到旧内核**。
+`/etc/qm1-build-info` 与 `rootfs-manifest.txt` 会记录 `kernel_mode=pinned-point-release`、
+`kernel_requested`、`kernel_abi` 与实际装上的版本。
+（i386 变体固定用 Debian 12 的 `686-pae`，不受此选项影响。
+镜像内不装 `linux-headers-*`：外部模块在 CI 里编，不需要在镜像里带编译头文件。）
+
 ## 安装（把镜像装到 QM1）
 
 镜像**自带引导链**：ESP 里有 `BOOTIA32.EFI` + `BOOTX64.EFI` + 内核 + initrd + `grub.cfg`，
@@ -139,14 +163,82 @@ Debian 13 的 6.12 内核对本机全部外设驱动都已是模块，因此无�
 
 | 类别 | 内容 | 来源 |
 |------|------|------|
-| **内核模块（`=m`）** | eMMC/SD（`sdhci-pci` / `sdhci-acpi` / `mmc_block`）、USB（`ehci-pci`/`xhci-hcd`/`usb-storage`）、显卡 `i915`、Intel HDA（`snd-hda-intel` + `snd-hda-codec-realtek`）、蓝牙 `btusb`、无线 `brcmfmac`/`iwlwifi`/`rtw88` | Debian `linux-image-amd64` |
+| **内核模块（`=m`）** | eMMC/SD（`sdhci-pci` / `sdhci-acpi` / `mmc_block`）、USB（`ehci-pci`/`xhci-hcd`/`usb-storage`）、显卡 `i915`、Intel HDA（`snd-hda-intel` + `snd-hda-codec-realtek`）、蓝牙 `btusb`、无线 `r8723bs`（内置 RTL8723BS）/ `brcmfmac`/`iwlwifi`/`rtw88` | Debian `linux-image-amd64` |
 | **内置（`=y`）** | ACPI、EFI stub（含 handover）、串口控制台、RTC（`CONFIG_RTC_DRV_CMOS`）、thermal、intel_idle | 同上（无法改成模块，属发行版正常形态） |
-| **需 firmware** | Broadcom brcmfmac、Realtek 8723*/8812*、Atheros、Intel 无线、Intel 微码、SOF 音频固件 | `firmware-brcm80211` / `firmware-realtek` / `firmware-atheros` / `firmware-iwlwifi` / `firmware-sof-signed` / `intel-microcode`（**位于 non-free-firmware 组件**，mmdebstrap 必须带 `--components=main,non-free-firmware`） |
-| **需 out-of-tree（DKMS）** | Realtek RTL8723AU / 8812AU / 8812BU 等消费级无线芯片（主线内核无驱动） | 通过 `QM1_DKMS_DEB_DIR` 注入预编译 .deb，或改用 USB 以太网适配器 |
+| **需 firmware** | Broadcom brcmfmac、Realtek 8723*/8812*、MediaTek mt76、Atheros、Intel 无线、Intel 微码、SOF 音频固件 | `firmware-brcm80211` / `firmware-realtek` / `firmware-mediatek` / `firmware-atheros` / `firmware-iwlwifi` / `firmware-sof-signed` / `intel-microcode`（**位于 non-free-firmware 组件**，mmdebstrap 必须带 `--components=main,non-free-firmware`） |
+| **需 out-of-tree（DKMS）** | Realtek RTL8723AU / 8812AU / 8812BU 等 **USB** 消费级无线芯片（主线内核无驱动） | 通过 `QM1_DKMS_DEB_DIR` 注入预编译 .deb，或改用 USB 以太网适配器 |
 
 启动关键路径（eMMC 控制器 + 根文件系统）会被写进 initramfs：`MODULES=most` + `COMPRESS=zstd`，并显式声明 `sdhci_pci sdhci_acpi mmc_block vfat ext4 usb_storage xhci_hcd ehci_pci`。
 `modules-load.d` 只放 `i915`（HDMI 首屏）、`snd_hda_intel`、`btusb`；其余靠 udev 自动加载。
 构建产物里的 `driver-manifest.txt` 会用 `modinfo -k <版本>` 与 `/boot/config-*` 判定每个驱动是 `module` / `builtin` / `absent`，CI 对启动关键项做硬断言。
+
+### 内置无线：RTL8723BS（SDIO）
+
+QM1 内置无线已实测确认为 **Realtek RTL8723BS**（SDIO 模组，AzureWave，SDIO ID `0x024c:0xb723`），不是常见资料里说的 USB 型号。这个区别决定了整条链路：
+
+| 环节 | 结论 |
+|------|------|
+| 内核驱动 | Debian 13（6.12）**和** Debian 12（6.1 / 686-pae）都自带主线 staging 驱动 `r8723bs`（`CONFIG_RTL8723BS=m`），模块随 `linux-image-*` 一起发布 → **不需要 DKMS** |
+| 固件 | `firmware-realtek` 提供 `/usr/lib/firmware/rtlwifi/rtl8723bs_nic.bin`（驱动实际请求的文件名）。`rtl8723bs_fw.bin` 是蓝牙固件（`rtl_bt/`），别拿它当 Wi-Fi blob 核对 |
+| 加密 | 仅 WPA2-PSK，无 WPA3/SAE（staging 版仍是 Realtek 私有协议栈） |
+| 上游路线 | staging 版已被上游在 7.4 删除，官方并入 `rtw88`（`CONFIG_RTW88_8723BS`，需内核 ≥ 7.4；Debian 尚无 7.4 内核包，trixie 也缺 `rtw88/rtw8723b_fw.bin`） |
+| 稳定性 | staging 版是 Realtek 私有栈，**没有逐包发送反馈**：数据帧无 report、无主机超时、无重传反馈，速率是关联时查表定死的 → 弱信号下固件内部丢弃对主机不可见，表现为 TCP 超时重传。同时存在多条**永久卡死路径**（见下） |
+
+镜像侧对应处理：驱动表纳入 `r8723bs`，firmware blob 核对改查 `rtl8723bs_nic.bin`，`/etc/modprobe.d/qm1-rtl8723bs-in-tree.conf` 关掉驱动的省电与 40MHz 带宽（`rtw_power_mgnt=0 rtw_smart_ps=0 rtw_ips_mode=0 rtw_bw_mode=0`）；打了补丁的外部模块另用 `/etc/modprobe.d/qm1-rtl8723bs.conf`（blacklist 内置 `r8723bs`，改用 `r8723bs_qm1`），`drv-selfcheck.sh` 报出真实绑定驱动并在检测到 `r8723bs` 时给出稳定性告警。
+
+staging 版已确认的**永久卡死路径**（丢失 SDIO 中断后不会自愈，只能靠模块重载）：
+
+| 现象 | 位置 | 触发条件 |
+|------|------|----------|
+| TX 队列停下后 worker 再不被踢 | `hal/rtl8723bs_xmit.c` 取不到 TX free page 时把 buffer 塞回队头却不上报 | 丢一次 SDIO 中断即永久断流 |
+| TX 线程无限自旋 | `rtw_sdio_wait_enough_TxOQT_space()` 无超时轮询 | 固件停止消费 TX OQT |
+| 子队列停掉后不再 restart | `os_dep/xmit_linux.c` 停的是新 skb 的队列号，恢复时唤醒的是已释放 skb 的队列号，且全树没有 `netif_start_subqueue` | 队列资源紧张时 |
+| TX 线程忙等（completion 计数残留） | v5.9 起 `complete()` 是计数型信号量，驱动从不 `reinit_completion`，计数不配平时 wait 立即返回 | 潜在风险；2026-11-05 实机测线程 CPU 仅 0.2 %，未复现 |
+
+这四条用 `patches/rtl8723bs/` 下的补丁修掉（外部模块方式，见 `scripts/rtl8723bs-module.README.md`）。参数层面的止血是关掉省电与 40MHz；结构性解（mac80211 化、有逐包反馈、支持 WPA3）只能等 rtw88 的 `CONFIG_RTW88_8723BS`（内核 ≥ 7.4，Debian 目前无此内核包）。
+
+#### 打了补丁的外部模块 `r8723bs_qm1`
+
+补丁做在**树外模块**上，不动发行版内核：
+
+| 文件 | 作用 |
+|------|------|
+| `patches/rtl8723bs/000[1-5]-*.patch` | P1 重新踢 TX worker + 超时重试 / P2 TxOQT 等待加超时 / P3 completion 配平 / P4 子队列 restart / P5 coalesce 失败释放 + `tx_drop++` |
+| `scripts/fetch-rtl8723bs-source.sh` | 逐文件抓 Debian 源包里那份 `drivers/staging/rtl8723bs/`（每个文件都做「非空 + 不是 HTML 错误页」体检，防把 404 页面当源码写进树） |
+| `scripts/build-rtl8723bs-module.sh` | 打补丁 → Kbuild 包装 Makefile → out-of-tree 编译 → 校验（`modinfo` name/license/alias/vermagic）→ 打 `.deb` |
+| `.github/workflows/build-wifi-module.yml` | CI 出包：Debian trixie 容器里编译并上传 `.deb` |
+| `scripts/rtl8723bs-module.README.md` | 安装、回滚、与内核版本的对应关系 |
+
+**为什么模块必须改名**：树内 `r8723bs` 与外部模块带**同一个 SDIO alias**
+`sdio:c*v024CdB723*`。modprobe 按 alias 加载时会把两个都插进内核，树内那个一旦先注册
+sdio driver，打补丁的模块就再也注册不上去（`-EBUSY`）。所以外部模块改名 `r8723bs_qm1`
+（Kbuild 包装 Makefile 换模块名，**驱动的 C 代码一行不改**），并由
+`/etc/modprobe.d/qm1-rtl8723bs.conf` 做 `blacklist r8723bs` + `options r8723bs_qm1 …`。
+
+本地出包（需要对应版本的内核头文件）：
+
+```bash
+bash scripts/build-rtl8723bs-module.sh --kver 6.12.113+deb13-amd64
+```
+
+产物 `build/wifi-module/qm1-rtl8723bs-module_*.deb`，装到设备上 `dpkg -i` 即可
+（postinst 会 `depmod -a` 并 enable `qm1-rtl8723bs.service`）。
+**模块与内核版本强绑定（vermagic）**：换内核 point release 后必须重跑 CI 重新出包。
+
+**直接装进镜像**：构建 rootfs 时用 `--wifi-module-deb` 把这个 deb 装进去，
+hook 会核对模块 vermagic 与镜像内核是否一致（不一致直接失败），并把
+`/etc/modules-load.d/qm1-hardware.conf` 里的 `r8723bs` 换成 `r8723bs_qm1`：
+
+```bash
+bash scripts/build-rtl8723bs-module.sh --kver 6.12.113+deb13-amd64
+bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
+     --kernel-version 6.12.113 \
+     --wifi-module-deb build/wifi-module/qm1-rtl8723bs-module_*.deb
+```
+
+CI 里 `build-image` 已经把这两步串起来了（先装 `6.12.113+deb13-amd64` 的内核头文件
+→ 编译模块 → 带着 `--kernel-version` 与 `--wifi-module-deb` 构建 rootfs），
+所以 CI 产出的镜像自带打了补丁的 Wi-Fi 驱动。
 
 ## 设备端自检
 
@@ -174,7 +266,8 @@ sudo /usr/local/bin/qm1-selftest --json   # 机读
 ## CI
 
 - `lint`：bash 语法检查、shellcheck、可执行位、隐私扫描（禁止本机路径/私人信息）、overlay 完整性。
-- `build-image`：在 `debian:trixie-slim`（privileged）里跑完整构建（mmdebstrap → hooks → 引导器 → ESP → ext4），校验 SHA-256、引导器文件类型、ESP 目录清单、驱动清单，并用 `debugfs` 直接检查 ext4 镜像里的属主/权限与定制文件；手动触发时可选择上传镜像。
+- `build-image`：在 `debian:trixie-slim`（privileged）里跑完整构建（装固定内核头文件 → 编译打了补丁的 Wi-Fi 模块 → mmdebstrap → hooks → 引导器 → ESP → ext4），校验 SHA-256、引导器文件类型、ESP 目录清单、驱动清单，并用 `debugfs` 直接检查 ext4 镜像里的属主/权限与定制文件；手动触发时可选择上传镜像。amd64 变体会钉死内核 `6.12.113` 并把 `r8723bs_qm1` 装进镜像（i386 变体仍用 bookworm 的 `686-pae`，不装外部模块）。
+- `build-wifi-module`：编译打补丁的 `r8723bs_qm1` 外部模块并打成 `.deb`（upload-artifact 下载）。默认跟随 Debian 13 当前内核，钉死的 point release（`6.12.113+deb13-amd64`）装不上时退回元包；手动触发可指定 `kernel_version`。
 
 最近一次全绿构建的实测结果（amd64 / runtime profile）：
 
@@ -197,18 +290,23 @@ sudo /usr/local/bin/qm1-selftest --json   # 机读
 scripts/
   lib/common.sh          公共函数
   build-bootloaders.sh   构建双架构 EFI 引导器（grub-mkimage）
-  build-rootfs.sh        mmdebstrap 生成根文件系统（--hook-dir=hooks/）
+  build-rootfs.sh        mmdebstrap 生成根文件系统（--hook-dir=hooks/，--kernel-version 可钉内核 point release）
   make-esp.sh            组装 FAT32 ESP（mtools，无需 root）
   build-image.sh         生成 esp.img + rootfs.img + manifest
   assemble-disk.sh       合成 GPT 整盘镜像
   verify-image.sh        debugfs 直接校验 ext4 镜像（属主/权限/文件）
   drv-selfcheck.sh       设备端硬件自检
+  fetch-rtl8723bs-source.sh  抓 Debian 源包里的 drivers/staging/rtl8723bs/ 子树
+  build-rtl8723bs-module.sh  打补丁 + 编译 out-of-tree 模块 + 打 .deb
+  rtl8723bs-module.README.md 外部模块的安装 / 回滚说明
   grub.cfg.example       ESP 引导菜单模板（64 位 + 32 位两个启动项）
+patches/rtl8723bs/       RTL8723BS 永久卡死路径的修复补丁（P1–P5）
 hooks/                   mmdebstrap customize 钩子（在宿主执行，$1 = chroot 目录）
   customize01-base.sh    主机名/locale/时区/fstab/服务开关
   customize02-drivers.sh 内核+firmware+initramfs+模块清单（启动关键驱动缺失即失败）
   customize03-overlay.sh 应用 overlay/ 与设备端自检脚本
 overlay/                 随镜像分发的定制层
+  etc/modprobe.d/        驱动参数（qm1-rtl8723bs-in-tree.conf 给发行版内置模块）
 ```
 
 ## 构建期踩过的坑（都已在脚本里处理）
@@ -223,7 +321,19 @@ overlay/                 随镜像分发的定制层
 
 ## 已知限制
 
-- **Wi-Fi 芯片型号待实测确认**：QM1 的无线芯片公开资料查不到型号，若为 Realtek 8723AU/8812AU/8812BU 则需 DKMS 驱动（主线内核没有）。设备端 `lsusb` / `lspci -kn` 可确认；在此之前建议常驻使用 USB 以太网适配器。若识别为 Broadcom，注意 brcmfmac 的 PCIe 型号还需要对应的 NVRAM（`.txt`）文件，`firmware-brcm80211` 未包含全部型号。
+- **内置 Wi-Fi 是 Realtek RTL8723BS（SDIO），不是 USB 型号**：实测确认（AzureWave 模组，SDIO ID `0x024c:0xb723`，MAC OUI `[withheld]`）。
+  - Debian 13（6.12）与 Debian 12（6.1 / 686-pae）**都自带主线 staging 驱动 `r8723bs`**（`CONFIG_RTL8723BS=m`），固件 `rtl8723bs_nic.bin` 由 `firmware-realtek` 提供 → **不需要 DKMS**。（注意 `rtl8723bs_fw.bin` 是蓝牙固件，不是 Wi-Fi blob。）
+  - Debian 13 稳定仓当前内核是 **6.12.107-1**，它**不含**上游 2026-07/08 回移到 6.12.y 的那批安全修复（kfree_sensitive 等要到 6.12.111 才有）；**6.12.113-1 已全部包含**（见 `trixie-proposed-updates`）。构建时固定内核版本可避免带上有已知 OOB 读取的旧内核。
+  - 但 `r8723bs` 是 Realtek 私有协议栈（未迁到 mac80211），只支持 **WPA2-PSK，无 WPA3/SAE**；上游已在 7.4 删除该驱动，官方路线是并入 `rtw88`（`CONFIG_RTW88_8723BS`，需内核 ≥ 7.4，而 Debian 尚无 7.4 内核包，且 trixie 缺 `rtw88/rtw8723b_fw.bin`）。
+  - **断流根因（源码级核实结论）**：
+    - staging 版**没有** rtw88 那套 tx report 机制（源码 `grep -rn CSTAT` 零命中），所以「固件缺 tx report → 主机栈判丢包 → TCP 吞吐塌陷」这个说法只适用于 rtw88 新驱动，**不适用于本镜像实际加载的 staging 驱动**。
+    - staging 版真正的病根有两类：① **没有逐包反馈** —— 数据帧不回报 sent/retry/failed，主机侧没有超时也没有重传反馈，速率是关联时按 wireless_mode/bw_mode **静态查表**定死（`networktype_to_raid_ex()`），主机从不请求速率变更；弱信号下固件内部 ARQ 静默丢弃对主机不可见 → 表现为 TCP 超时重传与吞吐塌陷。② **多条永久卡死路径** —— 丢一次 SDIO 中断就可能让 TX 队列永久停下（worker 不再被踢）、TxOQT 等待无超时自旋、子队列停掉后永不 restart；另外 v5.9 起 `complete()` 是计数型信号量而驱动从不 `reinit_completion`，计数不配平时 TX 线程会忙等（2026-11-05 实机测得 0.2 % CPU，未复现忙等）。
+    - 这与现役设备实测到的「ping 抖动 18–168 ms、SSH 偶发拿不到 host key、ping 路由器 0% 丢包而 ping 盒子 5% 丢包」一致：**问题集中在 QM1 侧的无线链路，不是 AP 或网线**。
+  - 镜像侧对策：`patches/rtl8723bs/` 提供 5 个修复永久卡死路径的补丁（外部模块 `r8723bs_qm1` 方式安装，见 `scripts/rtl8723bs-module.README.md`）；`/etc/modprobe.d/qm1-rtl8723bs-in-tree.conf` 关掉省电与 40MHz 带宽；`drv-selfcheck.sh` 报出真实绑定驱动并对 `r8723bs` 给出稳定性告警。
+  - 结论：**内置 Wi-Fi 可以做主链路**，前提是打上补丁并关掉省电；无法根治的是弱信号下的吞吐塌陷与 WPA3 缺失 —— 前者要靠固定信道 20MHz + 靠近 AP，后者要等 rtw88 内核（≥ 7.4）。
+  - **2026-11-04/05 实机只读侦察**（[withheld]，主机名 [withheld]，SSH 凭据由用户提供）：该机当前跑的是 **Void Linux、内核 6.18.60_1、PID 1 为 runit**，加载的是 **staging 的 `r8723bs`**（`/sys/class/net/wlan0/device/driver -> ../../bus/sdio/drivers/rtl8723bs`，dmesg 无 `failed to get tx report from firmware`，进一步印证不是 rtw88）。实时参数全是坏默认值：`rtw_power_mgnt=1 rtw_smart_ps=2 rtw_ips_mode=1 rtw_bw_mode=1`（40MHz），设备 `/etc/modprobe.d/` 为空。链路本身正常（signal −55 dBm、tx bitrate 150 Mbit/s、到网关 0% 丢包），但**抖动全在 QM1 侧**：到网关 30 包 rtt min/avg/max/mdev = 6.4/25.8/87.9/20.3 ms，而同 AP 上另一台机器只有 3.3 ms 均值。staging 驱动无运行时开关（iwpriv 层已移除、无 cfg80211 `.set_power_save`），参数只能在模块加载时给，改参数必须 reload 模块或重启。
+  - **硬件拓扑核实（同期）**：eMMC 为 **SanDisk S10032 28.5 GiB**，manfid `0x000070`，CID `[withheld]`，serial `[withheld]`，rev 0x7，走 `mmc1` = **SDHCI on ACPI [80860F14:00]**（HS200）；分区 p1 200M vfat → `/boot/efi`、p2 1G swap、p3 27.3G f2fs → `/`。**Wi-Fi 走 mmc0（INT33BB:00）且与 eMMC 不共用 SD 主机**（mmc2 = 80860F14:01 空）⇒ 不存在 SDIO 总线争用，不是断流原因。UEFI：`efi: EFI v2.4 by INSYDE Corp.`，`fw_platform_size`=32，efibootmgr `BootCurrent: 0001` → `\EFI\void_grub\grubia32.efi`，ESP 下只有 32 位 grub ⇒ **该固件实际以 32 位 IA32 EFI 引导**（是否支持 64 位 EFI 仍待实测）。
+  - 若识别为 Broadcom，注意 brcmfmac 的 PCIe 型号还需要对应的 NVRAM（`.txt`）文件，`firmware-brcm80211` 未包含全部型号。
 - **32 位变体用 Debian 12（bookworm）**：Debian 13 起不再提供 i386 内核包（`binary-i386` 里没有 `linux-image-*`，也没有 i386 安装器），所以 i386 变体固定用 bookworm 的 `linux-image-686-pae`（PAE flavour，适配 Bay Trail）。它只能当救援兜底 —— 32 位 x86 的 Node.js 自 v10 起为 Experimental，Hermes 要求的 Python 3.14 也没有 i686 预编译产物。
 - **Bay Trail 无 AVX**：本地 LLM（llama.cpp）会退化到 SSE 路径；无头 agent 编排逻辑几乎不受影响。
 - **这颗 Atom 没有 cpufreq 缩放驱动**（内核无 `CONFIG_ACPI_CPUFREQ`），不是缺驱动，是平台本身没有；长时间满载只能靠散热，长任务建议排队而非并发。
