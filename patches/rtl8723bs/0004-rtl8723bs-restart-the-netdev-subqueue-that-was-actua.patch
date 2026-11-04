@@ -1,0 +1,124 @@
+From b83732a7c84918b1064490a5b7e04df281d86a6b Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:21 +0800
+Subject: [PATCH 4/5] rtl8723bs: restart the netdev subqueue that was actually
+ stopped
+
+rtw_check_xmit_resource() stops the netdev subqueue of the queue the
+skb belongs to, but rtw_os_pkt_complete() only wakes the subqueue of the
+skb that is completed.  The stopped subqueue is therefore never woken
+again, the driver does not call netif_start_subqueue() either, and the
+traffic of that queue is not sent anymore.
+
+Track the subqueues that were stopped by the xmit resource check and
+restart them as soon as the resource that stopped them is available
+again.  netif_wake_subqueue() is used instead of netif_start_subqueue(),
+because it also reschedules the queue, so that the queued packets are
+sent immediately.
+---
+ drivers/staging/rtl8723bs/include/rtw_xmit.h  |  4 ++
+ drivers/staging/rtl8723bs/os_dep/xmit_linux.c | 54 ++++++++++++++++++-
+ 2 files changed, 57 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/staging/rtl8723bs/include/rtw_xmit.h b/drivers/staging/rtl8723bs/include/rtw_xmit.h
+index 0e48475..4de1eeb 100644
+--- a/drivers/staging/rtl8723bs/include/rtw_xmit.h
++++ b/drivers/staging/rtl8723bs/include/rtw_xmit.h
+@@ -388,6 +388,10 @@ struct	xmit_priv {
+ 	struct hw_xmit *hwxmits;
+ 	u8 hwxmit_entry;
+ 
++	/*  bitmap of the netdev tx queues that were stopped by the xmit
++	 *  resource check */
++	u8 stopped_xmit_queues;
++
+ 	u8 wmm_para_seq[4];/* sequence for wmm ac parameter strength from large to small. it's value is 0->vo, 1->vi, 2->be, 3->bk. */
+ 
+ 	void *SdioXmitThread;
+diff --git a/drivers/staging/rtl8723bs/os_dep/xmit_linux.c b/drivers/staging/rtl8723bs/os_dep/xmit_linux.c
+index 944b9c7..e9be8c2 100644
+--- a/drivers/staging/rtl8723bs/os_dep/xmit_linux.c
++++ b/drivers/staging/rtl8723bs/os_dep/xmit_linux.c
+@@ -64,6 +64,53 @@ void rtw_os_xmit_resource_free(struct adapter *padapter, struct xmit_buf *pxmitb
+ 
+ #define WMM_XMIT_THRESHOLD	(NR_XMITFRAME * 2 / 5)
+ 
++/*  max number of netdev tx queues whose stopped state is tracked */
++#define MAX_TRACKED_XMIT_QUEUES	8
++
++static void rtw_mark_xmit_queue_stopped(struct xmit_priv *pxmitpriv, u16 queue)
++{
++	if (queue >= MAX_TRACKED_XMIT_QUEUES)
++		return;
++
++	pxmitpriv->stopped_xmit_queues |= (u8)(1 << queue);
++}
++
++/*
++ * Restart the netdev subqueue that was stopped by rtw_check_xmit_resource().
++ * The skb that is completed here may belong to another queue than the
++ * stopped one, so the stopped queue is tracked and restarted explicitly.
++ * Otherwise the stopped queue stays stopped forever and the traffic of
++ * that queue is never sent again.
++ */
++static void rtw_restart_stopped_xmit_queues(struct adapter *padapter)
++{
++	struct xmit_priv *pxmitpriv = &padapter->xmitpriv;
++	u16 queue;
++
++	for (queue = 0; queue < MAX_TRACKED_XMIT_QUEUES; queue++) {
++		if (!(pxmitpriv->stopped_xmit_queues & (1 << queue)))
++			continue;
++
++		/*  netif_wake_subqueue() has no bounds check */
++		if (queue >= adapter->pnetdev->num_tx_queues)
++			continue;
++
++		if (padapter->registrypriv.wifi_spec) {
++			if (queue >= pxmitpriv->hwxmit_entry)
++				continue;
++
++			if (pxmitpriv->hwxmits[queue].accnt > WMM_XMIT_THRESHOLD)
++				continue;
++		} else {
++			if (pxmitpriv->free_xmitframe_cnt <= 4)
++				continue;
++		}
++
++		pxmitpriv->stopped_xmit_queues &= ~(1 << queue);
++		netif_wake_subqueue(adapter->pnetdev, queue);
++	}
++}
++
+ void rtw_os_pkt_complete(struct adapter *padapter, struct sk_buff *pkt)
+ {
+ 	u16 queue;
+@@ -79,6 +126,8 @@ void rtw_os_pkt_complete(struct adapter *padapter, struct sk_buff *pkt)
+ 			netif_wake_subqueue(padapter->pnetdev, queue);
+ 	}
+ 
++	rtw_restart_stopped_xmit_queues(padapter);
++
+ 	dev_kfree_skb_any(pkt);
+ }
+ 
+@@ -109,12 +158,15 @@ static void rtw_check_xmit_resource(struct adapter *padapter, struct sk_buff *pk
+ 	queue = skb_get_queue_mapping(pkt);
+ 	if (padapter->registrypriv.wifi_spec) {
+ 		/* No free space for Tx, tx_worker is too slow */
+-		if (pxmitpriv->hwxmits[queue].accnt > WMM_XMIT_THRESHOLD)
++		if (pxmitpriv->hwxmits[queue].accnt > WMM_XMIT_THRESHOLD) {
+ 			netif_stop_subqueue(padapter->pnetdev, queue);
++			rtw_mark_xmit_queue_stopped(pxmitpriv, queue);
++		}
+ 	} else {
+ 		if (pxmitpriv->free_xmitframe_cnt <= 4) {
+ 			if (!netif_tx_queue_stopped(netdev_get_tx_queue(padapter->pnetdev, queue)))
+ 				netif_stop_subqueue(padapter->pnetdev, queue);
++			rtw_mark_xmit_queue_stopped(pxmitpriv, queue);
+ 		}
+ 	}
+ }
+-- 
+2.50.1 (Apple Git-155)
+

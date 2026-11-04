@@ -1,0 +1,54 @@
+From a4d42419306103554011dbb4a1a9067a61dc5dab Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:21 +0800
+Subject: [PATCH 5/5] rtl8723bs: release the frame and account the drop when
+ xmit coalescing fails
+
+rtw_xmitframe_coalesce() can fail, e.g. when the wlan header cannot be
+built.  The frame is then neither sent nor released: it is not counted
+in the tx statistics and it is not freed, so the xmit frame and its skb
+are leaked and the tx accounting of the netdev is broken.  A leaked skb
+keeps its slot in the netdev queue occupied, so the queue stops sending.
+
+Release the frame and account the drop.  The release of the frame is
+moved into the success path, so that the frame is not released twice.
+---
+ drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c | 14 ++++++++++----
+ 1 file changed, 10 insertions(+), 4 deletions(-)
+
+diff --git a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+index f8a56a5..840c727 100644
+--- a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
++++ b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+@@ -340,7 +340,13 @@ static s32 xmit_xmitframes(struct adapter *padapter, struct xmit_priv *pxmitpriv
+ 					netdev_err(padapter->pnetdev,
+ 						   "%s: coalesce FAIL!",
+ 						   __func__);
+-					/*  Todo: error handler */
++					/*  The frame is not sent, so release it and account the
++					 *  drop. Otherwise the xmit frame and the skb are leaked
++					 *  and the tx accounting of the netdev is broken. */
++					if (k == 0)
++						pxmitbuf->priv_data = NULL;
++					pxmitpriv->tx_drop++;
++					rtw_free_xmitframe(pxmitpriv, pxmitframe);
+ 				} else {
+ 					k++;
+ 					if (k != 1)
+@@ -352,10 +358,10 @@ static s32 xmit_xmitframes(struct adapter *padapter, struct xmit_priv *pxmitpriv
+ 					pxmitbuf->pg_num += (txlen + 127) / 128;
+ 					pxmitbuf->ptail += _RND(txlen, 8); /*  round to 8 bytes alignment */
+ 					pxmitbuf->len = _RND(pxmitbuf->len, 8) + txlen;
+-				}
+ 
+-				if (k != 1)
+-					rtw_free_xmitframe(pxmitpriv, pxmitframe);
++					if (k != 1)
++						rtw_free_xmitframe(pxmitpriv, pxmitframe);
++				}
+ 				pxmitframe = NULL;
+ 			}
+ 
+-- 
+2.50.1 (Apple Git-155)
+

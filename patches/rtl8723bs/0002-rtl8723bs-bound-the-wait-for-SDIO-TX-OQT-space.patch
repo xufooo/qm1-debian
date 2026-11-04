@@ -1,0 +1,58 @@
+From abd3b2b500866148d060cd9ec270d3f03440696b Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:21 +0800
+Subject: [PATCH 2/5] rtl8723bs: bound the wait for SDIO TX OQT space
+
+rtw_sdio_wait_enough_TxOQT_space() waits until the firmware reports
+enough free tx OQT space.  The loop is unbounded, so if the firmware
+stops consuming the tx OQT, the tx thread stays in it forever and no
+frame is sent anymore.
+
+Give the wait a deadline.  On timeout an error is logged and the
+function fails, so that the caller aborts the xmitbuf and the tx path
+recovers instead of wedging.
+---
+ drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c | 15 +++++++++++++++
+ 1 file changed, 15 insertions(+)
+
+diff --git a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+index e97950d..cc53c91 100644
+--- a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
++++ b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+@@ -16,11 +16,17 @@
+  *  again */
+ #define RTL8723BS_XMITBUF_MAX_RETRY	3
+ 
++/*  timeout in ms to wait for the tx OQT space of the firmware */
++#define RTL8723BS_TX_OQT_WAIT_MS	1000
++
+ static u8 rtw_sdio_wait_enough_TxOQT_space(struct adapter *padapter, u8 agg_num)
+ {
+ 	u32 n = 0;
++	unsigned long expire;
+ 	struct hal_com_data *pHalData = GET_HAL_DATA(padapter);
+ 
++	expire = jiffies + msecs_to_jiffies(RTL8723BS_TX_OQT_WAIT_MS);
++
+ 	while (pHalData->SdioTxOQTFreeSpace < agg_num) {
+ 		if (
+ 			(padapter->bSurpriseRemoved) ||
+@@ -34,6 +40,15 @@ static u8 rtw_sdio_wait_enough_TxOQT_space(struct adapter *padapter, u8 agg_num)
+ 			msleep(1);
+ 			/* yield(); */
+ 		}
++
++		/*  The wait is bounded: if the firmware does not consume the tx
++		 *  OQT, the tx thread would be stuck here forever. */
++		if (time_after(jiffies, expire)) {
++			netdev_emerg(padapter->pnetdev,
++				     "%s: wait for Tx OQT space timeout!\n",
++				     __func__);
++			return false;
++		}
+ 	}
+ 
+ 	pHalData->SdioTxOQTFreeSpace -= agg_num;
+-- 
+2.50.1 (Apple Git-155)
+

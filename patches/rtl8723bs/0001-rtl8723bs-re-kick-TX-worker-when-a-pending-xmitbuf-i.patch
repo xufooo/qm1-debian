@@ -1,0 +1,128 @@
+From 7e836158fe4696bb042d3f4d2edc7aba036a03de Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:20 +0800
+Subject: [PATCH 1/5] rtl8723bs: re-kick TX worker when a pending xmitbuf is
+ put back
+
+rtl8723_dequeue_writeport() puts the xmitbuf back to the head of the
+pending queue when the hardware tx fifo has no free page.  The buffer is
+only re-listed, enqueue_pending_xmitbuf_to_head() does not complete
+xmit_comp, so the xmit worker is not kicked again.  If the kick that
+reports the free pages is lost, e.g. because of a missed SDIO interrupt,
+the pending xmitbuf is never sent and the tx path stalls permanently.
+
+Complete xmit_comp after the buffer has been put back, so that the xmit
+worker retries it.  The number of kicks is bounded by a retry counter,
+otherwise the worker retries the same xmitbuf forever.
+
+The wait for the kick is bounded by a timeout as well, so that a lost
+kick cannot stall the tx path permanently: on timeout the pending queue
+is re-checked and the frame is retried.  The completion is re-armed
+after the wait.  Since v5.9 complete() is a counting semaphore, i.e.
+complete() increments the counter and the waiter decrements it, and the
+driver never resets that count; a residue would make the wait return
+immediately and the xmit worker busy-loop.  The pending queue is checked
+right after the wait, so a kick that is consumed by the re-arm does not
+lose any xmitbuf.
+---
+ drivers/staging/rtl8723bs/core/rtw_xmit.c     |  1 +
+ .../staging/rtl8723bs/hal/rtl8723bs_xmit.c    | 31 ++++++++++++++++++-
+ drivers/staging/rtl8723bs/include/rtw_xmit.h  |  3 ++
+ 3 files changed, 34 insertions(+), 1 deletion(-)
+
+diff --git a/drivers/staging/rtl8723bs/core/rtw_xmit.c b/drivers/staging/rtl8723bs/core/rtw_xmit.c
+index 3e88f14..c8d6cc3 100644
+--- a/drivers/staging/rtl8723bs/core/rtw_xmit.c
++++ b/drivers/staging/rtl8723bs/core/rtw_xmit.c
+@@ -106,6 +106,7 @@ s32 _rtw_init_xmit_priv(struct xmit_priv *pxmitpriv, struct adapter *padapter)
+ 	spin_lock_init(&pxmitpriv->free_xmitbuf_queue.lock);
+ 	INIT_LIST_HEAD(&pxmitpriv->pending_xmitbuf_queue.queue);
+ 	spin_lock_init(&pxmitpriv->pending_xmitbuf_queue.lock);
++	pxmitpriv->xmitbuf_retry_cnt = 0;
+ 
+ 	pxmitpriv->pallocated_xmitbuf = vzalloc(NR_XMITBUFF * sizeof(struct xmit_buf) + 4);
+ 
+diff --git a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+index 78298e6..e97950d 100644
+--- a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
++++ b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+@@ -8,6 +8,14 @@
+ #include <drv_types.h>
+ #include <rtl8723b_hal.h>
+ 
++/*  timeout in ms to wait for the xmit worker to be kicked */
++#define RTL8723BS_XMITBUF_WAIT_MS	100
++
++/*  max number of times the xmitbuf at the head of the pending queue is
++ *  put back and retried before the xmit worker waits for the hardware
++ *  again */
++#define RTL8723BS_XMITBUF_MAX_RETRY	3
++
+ static u8 rtw_sdio_wait_enough_TxOQT_space(struct adapter *padapter, u8 agg_num)
+ {
+ 	u32 n = 0;
+@@ -83,6 +91,17 @@ query_free_page:
+ 		} else {
+ 			bUpdatePageNum = false;
+ 			enqueue_pending_xmitbuf_to_head(pxmitpriv, pxmitbuf);
++			/*  The xmitbuf is put back to the head of the pending queue,
++			 *  so the xmit worker has to be kicked to send it later.
++			 *  enqueue_pending_xmitbuf_to_head() does not do it, so a lost
++			 *  kick (e.g. a missed SDIO interrupt) would stall the tx path
++			 *  forever.
++			 *  The kick is bounded, otherwise the worker retries the same
++			 *  xmitbuf forever. */
++			pxmitpriv->xmitbuf_retry_cnt++;
++			if (pxmitpriv->xmitbuf_retry_cnt <=
++			    RTL8723BS_XMITBUF_MAX_RETRY)
++				complete(&pxmitpriv->xmit_comp);
+ 			return true;
+ 		}
+ 	}
+@@ -102,6 +121,9 @@ query_free_page:
+ 
+ 	rtw_hal_sdio_update_tx_freepage(pri_padapter, PageIdx, pxmitbuf->pg_num);
+ 
++	/*  the xmitbuf has been sent, the retry counter can be reset */
++	pxmitpriv->xmitbuf_retry_cnt = 0;
++
+ free_xmitbuf:
+ 	/* rtw_free_xmitframe(pxmitpriv, pframe); */
+ 	/* pxmitbuf->priv_data = NULL; */
+@@ -127,11 +149,18 @@ s32 rtl8723bs_xmit_buf_handler(struct adapter *padapter)
+ 
+ 	pxmitpriv = &padapter->xmitpriv;
+ 
+-	if (wait_for_completion_interruptible(&pxmitpriv->xmit_comp)) {
++	/*  The wait is bounded, so that a lost kick (e.g. a missed SDIO
++	 *  interrupt) cannot stall the tx path forever: on timeout the
++	 *  pending queue is re-checked and the frame is retried.
++	 *  The completion is re-armed after the wait, because complete() is
++	 *  a counting semaphore and the driver never resets the count. */
++	if (wait_for_completion_interruptible_timeout(&pxmitpriv->xmit_comp,
++			msecs_to_jiffies(RTL8723BS_XMITBUF_WAIT_MS)) < 0) {
+ 		netdev_emerg(padapter->pnetdev,
+ 			     "%s: down SdioXmitBufSema fail!\n", __func__);
+ 		return _FAIL;
+ 	}
++	reinit_completion(&pxmitpriv->xmit_comp);
+ 
+ 	ret = (padapter->bDriverStopped) || (padapter->bSurpriseRemoved);
+ 	if (ret)
+diff --git a/drivers/staging/rtl8723bs/include/rtw_xmit.h b/drivers/staging/rtl8723bs/include/rtw_xmit.h
+index 544468f..0e48475 100644
+--- a/drivers/staging/rtl8723bs/include/rtw_xmit.h
++++ b/drivers/staging/rtl8723bs/include/rtw_xmit.h
+@@ -396,6 +396,9 @@ struct	xmit_priv {
+ 
+ 	struct __queue free_xmitbuf_queue;
+ 	struct __queue pending_xmitbuf_queue;
++	/*  number of times the xmitbuf at the head of pending_xmitbuf_queue
++	 *  has been put back because the hardware tx fifo was not ready */
++	u8 xmitbuf_retry_cnt;
+ 	u8 *pallocated_xmitbuf;
+ 	u8 *pxmitbuf;
+ 	uint free_xmitbuf_cnt;
+-- 
+2.50.1 (Apple Git-155)
+

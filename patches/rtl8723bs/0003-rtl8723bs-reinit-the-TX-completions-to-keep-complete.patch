@@ -1,0 +1,42 @@
+From 4f91d7d1f0266517b2e851f59c72d449d6a40097 Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 00:15:21 +0800
+Subject: [PATCH 3/5] rtl8723bs: reinit the TX completions to keep
+ complete()/wait counts balanced
+
+The xmit thread waits for SdioXmitStart, which is completed every time a
+frame is enqueued.  Since v5.9 complete() is a counting semaphore, i.e.
+complete() increments the counter of the completion and the waiter
+decrements it.  The driver never re-arms the completion, so that count
+is never reset and a residue makes the wait return immediately instead
+of sleeping, which makes the xmit thread busy-loop.  The same applies to
+xmit_comp, which is re-armed by the previous patch in this series.
+
+Re-arm SdioXmitStart after the wait.  The pending state is checked right
+after the wait, so a kick that is consumed by the re-arm does not lose
+any frame.
+---
+ drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+index cc53c91..f8a56a5 100644
+--- a/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
++++ b/drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c
+@@ -413,6 +413,13 @@ static s32 rtl8723bs_xmit_handler(struct adapter *padapter)
+ 		return _FAIL;
+ 	}
+ 
++	/*  Re-arm the completion.  Since v5.9 complete() is a counting
++	 *  semaphore: complete() increments the counter, the waiter
++	 *  decrements it.  The driver never re-arms it, so a residue
++	 *  makes the wait above return immediately and the xmit thread
++	 *  busy-loops instead of sleeping. */
++	reinit_completion(&pxmitpriv->SdioXmitStart);
++
+ next:
+ 	if (
+ 		(padapter->bDriverStopped) ||
+-- 
+2.50.1 (Apple Git-155)
+
