@@ -1,0 +1,199 @@
+name: build-wifi-module
+
+# ============================================================================
+# 编译 QM1 内置 Realtek RTL8723BS（SDIO）的 out-of-tree 驱动并打成 .deb
+#
+# 背景：
+#   QM1 内置无线实测为 Realtek RTL8723BS（SDIO ID 0x024c:0xb723），
+#   Debian 13 内核自带主线 staging 驱动 r8723bs（CONFIG_RTL8723BS=m）。
+#   本工作流在 Debian trixie 容器里，把上游 rtl8723bs 源码 + 本仓库的补丁
+#   编译成改名的 out-of-tree 模块 r8723bs_qm1，并打包成 .deb。
+#
+# 为什么改名 + blacklist：
+#   两个模块带同一个 SDIO alias（sdio:c*v024CdB723*）。modprobe 按 alias
+#   加载时会把所有匹配项都插进内核；树内那个先注册 sdio driver，打补丁的
+#   那个就再也注册不上去（-EBUSY）。所以树内 r8723bs 用 blacklist 挡住。
+#
+# 为什么要按内核版本分别出包：
+#   内核模块与内核版本强绑定（vermagic + symbol version）。Debian 的
+#   6.12.x point release 会滚动，旧内核的头文件包会从主仓库消失，
+#   所以本工作流默认跟着发行版元包 linux-headers-amd64 走 ——
+#   那正是 build-image.yml 造镜像时装的同一套内核。
+#   要固定某个 point release，用 workflow_dispatch 的 kernel_version 输入。
+# ============================================================================
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: "目标内核版本：point release（6.12.113）或 ABI 名（6.12.113+deb13-amd64）；留空 = 自动跟随 Debian 13 当前内核"
+        type: string
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "scripts/fetch-rtl8723bs-source.sh"
+      - "scripts/build-rtl8723bs-module.sh"
+      - "scripts/rtl8723bs-module.README.md"
+      - "patches/rtl8723bs/**"
+      - ".github/workflows/build-wifi-module.yml"
+  schedule:
+    # 每周一 04:10 UTC —— Debian 仓库侧滚动（内核 point release 前移）后重新出包，
+    # 免得模块跟镜像里的内核对不上
+    - cron: "10 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-wifi-module-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # 容器作业里 GitHub 默认用 sh（dash），不支持 <(...) 进程替换等 bash 语法 →
+    # 显式声明 bash，脚本与校验步骤才能一致
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: debian:trixie-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential dpkg-dev curl patch kmod ca-certificates xz-utils
+
+      - name: Add trixie-backports and trixie-proposed-updates
+        run: |
+          set -eux
+          # 6.12.x 的 point release 会滚动：某个 point release 的内核 / 头文件包
+          # 可能只留在 backports 或 proposed-updates（仓库 build-rootfs.sh 里
+          # 「固定 point release」用的也是同一思路），所以把这两个源都挂上。
+          printf 'deb http://deb.debian.org/debian trixie-backports main\n' \
+            > /etc/apt/sources.list.d/trixie-backports.list
+          printf 'deb http://deb.debian.org/debian trixie-proposed-updates main\n' \
+            > /etc/apt/sources.list.d/trixie-proposed-updates.list
+          apt-get update -qq
+
+      - name: Resolve target kernel headers
+        id: kernel
+        run: |
+          set -eu
+          # 仓库钉住的 point release：与 scripts/build-rootfs.sh --kernel-version 6.12.113 对应
+          PINNED_ABI='6.12.113+deb13-amd64'
+          KVER=''
+
+          want="${{ inputs.kernel_version }}"
+          if [ -n "$want" ]; then
+            # 允许写 point release（6.12.113）或 ABI 名（6.12.113+deb13-amd64）
+            case "$want" in
+              *[!0-9.+-]*) echo "::error::kernel_version 只能含数字与 . + - ：$want"; exit 1 ;;
+            esac
+            case "$want" in
+              *+*) KVER="$want" ;;
+              *)   KVER="$want+deb13-amd64" ;;
+            esac
+            echo "调用方指定内核：$KVER"
+            if ! apt-get install -y --no-install-recommends "linux-headers-$KVER"; then
+              echo "::error::装不上 linux-headers-$KVER"
+              echo "::error::该 point release 可能已被 Debian 滚动替换（主仓库只留当前版本）。"
+              echo "::error::旧版本只留在 snapshot.debian.org：可手工下载对应的 .deb 后用 --kver 指定。"
+              exit 1
+            fi
+          else
+            # 先试仓库钉住的 point release；装不上再退回发行版元包
+            if apt-get install -y --no-install-recommends "linux-headers-$PINNED_ABI"; then
+              KVER="$PINNED_ABI"
+            else
+              echo "::warning::linux-headers-$PINNED_ABI 已不在 Debian 13 仓库（point release 会滚动）"
+              echo "::warning::改用发行版元包 linux-headers-amd64 —— 与 build-image.yml 造镜像用的是同一套元包"
+              apt-get install -y --no-install-recommends linux-headers-amd64
+              KVER="$(ls -d /lib/modules/*/build 2>/dev/null | sed 's#^/lib/modules/##; s#/build$##' | sort -V | tail -1)"
+              [ -n "$KVER" ] || { echo "::error::找不到已安装的内核头文件"; exit 1; }
+            fi
+          fi
+
+          [ -d "/lib/modules/$KVER/build" ] || { echo "::error::缺少 /lib/modules/$KVER/build"; exit 1; }
+          echo "目标内核：$KVER"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "kver_slug=${KVER//+/-}" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch rtl8723bs source
+        run: |
+          set -eux
+          # 上游 rtl8723bs 源码取自 Debian 的 linux 源包（sources.debian.org），
+          # 保证与发行版内核里的那一份同源。
+          # 第二个参数是目标内核：脚本据此挑对应的源包版本
+          # （6.12.113+deb13-amd64 → linux 6.12.113-1），
+          # 避免「用 A 的源码编 B 的头文件」。
+          sh scripts/fetch-rtl8723bs-source.sh \
+            "$GITHUB_WORKSPACE/build/rtl8723bs-src" \
+            "${{ steps.kernel.outputs.kver }}"
+          echo "抓取到的文件数：$(find build/rtl8723bs-src -type f | wc -l)"
+
+      - name: Build out-of-tree module and package .deb
+        run: |
+          set -eux
+          bash scripts/build-rtl8723bs-module.sh \
+            --kver "${{ steps.kernel.outputs.kver }}" \
+            --src-dir "$GITHUB_WORKSPACE/build/rtl8723bs-src" \
+            --work-dir "$GITHUB_WORKSPACE/build/rtl8723bs-work" \
+            --out-dir "$GITHUB_WORKSPACE/build/wifi-module" \
+            --patch-dir "$GITHUB_WORKSPACE/patches/rtl8723bs"
+
+      - name: Verify package contents
+        run: |
+          set -eux
+          KVER="${{ steps.kernel.outputs.kver }}"
+          DEB="$(ls build/wifi-module/*.deb | head -1)"
+          [ -n "$DEB" ]
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB" | tee build/wifi-module/contents.txt
+          grep -q "lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" build/wifi-module/contents.txt
+          grep -q "etc/modprobe.d/qm1-rtl8723bs.conf" build/wifi-module/contents.txt
+          grep -q "lib/systemd/system/qm1-rtl8723bs.service" build/wifi-module/contents.txt
+          # modprobe 配置必须同时有 blacklist 与四个参数，缺一个都会让行为跑偏
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO ./etc/modprobe.d/qm1-rtl8723bs.conf > build/wifi-module/modprobe.conf
+          grep -q '^blacklist r8723bs$' build/wifi-module/modprobe.conf
+          grep -q '^options r8723bs_qm1 rtw_power_mgnt=0 rtw_ips_mode=0 rtw_smart_ps=0 rtw_bw_mode=0$' \
+            build/wifi-module/modprobe.conf
+          echo "包内容校验通过"
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "### QM1 RTL8723BS out-of-tree 模块"
+            echo
+            echo "- 目标内核：${{ steps.kernel.outputs.kver }}"
+            echo "- 模块名：r8723bs_qm1（树内 r8723bs 由 /etc/modprobe.d 里的 blacklist 挡住）"
+            echo "- 软件包：$(ls build/wifi-module/*.deb 2>/dev/null || echo '（未产出）')"
+            echo "- SHA256：$(sha256sum build/wifi-module/*.deb 2>/dev/null | cut -d' ' -f1 || echo '-')"
+            echo
+            echo "安装：sudo dpkg -i <上面的 .deb>；回退见 scripts/rtl8723bs-module.README.md"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload module package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-wifi-module-${{ steps.kernel.outputs.kver_slug }}
+          path: build/wifi-module/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-wifi-module-log
+          path: build/wifi-module/
+          if-no-files-found: ignore
+          retention-days: 7
