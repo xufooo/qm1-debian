@@ -102,6 +102,15 @@ jobs:
       image: debian:trixie-slim
       options: --privileged
     env:
+      # 目标架构：workflow_dispatch 时取输入，push/schedule 时默认 amd64
+      QM1_TARGET_ARCH: ${{ inputs.arch || 'amd64' }}
+      # 固定内核 point release：Debian 13 元包当前给的是 6.12.107-1，
+      # 而 rtl8723bs 的 2026 安全修复（kfree_sensitive、WMM IE 长度校验、
+      # WPA IE 越界读、监控帧长度校验）从 6.12.111 才回移进 6.12.y。
+      # 钉死后由 hooks/customize02-drivers.sh 从 trixie-proposed-updates 精确安装，
+      # 装不上直接失败，不静默回退到元包。
+      QM1_KERNEL_VERSION: 6.12.113
+      QM1_KERNEL_ABI: 6.12.113+deb13-amd64
       # 启动关键路径：缺任一项都意味着 QM1 认不到 eMMC/ESP，插电起不来 → CI 必须失败
       # 名称与驱动清单（driver-manifest.txt）里的模块名一致（连字符形式）
       QM1_CRITICAL_MODULES: sdhci-pci sdhci-acpi mmc_block vfat ext4
@@ -141,12 +150,46 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             grub-efi-ia32-bin:i386 grub-efi-amd64-bin:amd64
 
+      - name: Install pinned kernel headers (for the patched Wi-Fi module)
+        if: env.QM1_TARGET_ARCH == 'amd64'
+        run: |
+          set -eux
+          # 6.12.113 还在 trixie-proposed-updates 里（主仓库当前是 6.12.107-1）
+          echo 'deb http://deb.debian.org/debian trixie-proposed-updates main' \
+            > /etc/apt/sources.list.d/qm1-proposed.list
+          apt-get update -qq
+          # 头文件 + 内核本体：装 -unsigned 变体，避免拉 grub-efi-amd64-signed
+          #（会跟本项目自带的 BOOTIA32/BOOTX64 双引导器抢 EFI 目录）
+          apt-get install -y -qq --no-install-recommends \
+            "linux-headers-${QM1_KERNEL_ABI}" \
+            "linux-image-${QM1_KERNEL_ABI}-unsigned" \
+            build-essential patch kmod dpkg curl
+          test -d "/lib/modules/${QM1_KERNEL_ABI}/build"
+
+      - name: Build patched RTL8723BS module (r8723bs_qm1)
+        if: env.QM1_TARGET_ARCH == 'amd64'
+        run: |
+          set -eux
+          # 模块的 vermagic 写死了目标内核版本，必须与镜像里的内核完全一致
+          bash scripts/build-rtl8723bs-module.sh --kver "${QM1_KERNEL_ABI}"
+          ls -l build/wifi-module/
+
       - name: Build root filesystem (mmdebstrap + hooks)
         run: |
+          set -eux
+          ARCH="${{ inputs.arch || 'amd64' }}"
+          EXTRA=()
+          if [ "$ARCH" = "amd64" ]; then
+            # 钉死内核 point release（6.12.113），并装上打了补丁的 Wi-Fi 模块
+            EXTRA+=(--kernel-version "${QM1_KERNEL_VERSION}")
+            MODDEB="$(ls build/wifi-module/*.deb | head -1)"
+            EXTRA+=(--wifi-module-deb "$MODDEB")
+          fi
           bash scripts/build-rootfs.sh \
             --out build/rootfs \
-            --arch "${{ inputs.arch || 'amd64' }}" \
-            --profile "${{ inputs.profile || 'runtime' }}"
+            --arch "$ARCH" \
+            --profile "${{ inputs.profile || 'runtime' }}" \
+            ${EXTRA[@]+"${EXTRA[@]}"}
 
       - name: Build image artifacts (ESP + rootfs + manifest)
         run: |
