@@ -161,10 +161,13 @@ jobs:
           file build/out/bootloaders/grub2ia32.efi build/out/bootloaders/grubx64.efi
           mdir -/ -i build/out/esp.img ::/EFI/BOOT | tee build/out/esp-listing.txt
           mdir -/ -i build/out/esp.img ::/ | tee -a build/out/esp-listing.txt
-          for f in BOOTIA32.EFI BOOTX64.EFI grub.cfg ; do
+          # mdir 按 8.3 短名显示（"BOOTIA32 EFI"、"grub     cfg"，点号被显示成空格），
+          # 所以按文件名主干断言，不按带点号的完整名。
+          for f in BOOTIA32 BOOTX64 grub ; do
             grep -q "$f" build/out/esp-listing.txt || { echo "::error::ESP 缺少 $f"; exit 1; }
           done
           grep -q 'vmlinuz' build/out/esp-listing.txt || { echo "::error::ESP 缺少内核"; exit 1; }
+          grep -q 'initrd' build/out/esp-listing.txt || { echo "::error::ESP 缺少 initrd"; exit 1; }
 
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
