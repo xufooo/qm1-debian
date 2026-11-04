@@ -74,3 +74,29 @@ kernel_pkgs_for_arch() {
         *) die "不支持的架构：$1" ;;
     esac
 }
+
+# 固定内核 point release 时用到的 ABI 命名。
+#
+# Debian 的内核包名、/lib/modules 目录名、uname -r 三者是同一个字符串：
+#   trixie 的 amd64 内核 6.12.113 → 6.12.113+deb13-amd64
+#     +deb13 = 发行版 ABI 后缀（Debian 13 = trixie）
+#     amd64  = 内核 flavour
+# 所以"固定某个 point release"等价于"装这个字符串对应的版本化包"：
+#   linux-image-6.12.113+deb13-amd64
+#   linux-headers-6.12.113+deb13-amd64
+# 顺带解释了 uname -r 为什么会带 +deb13：那是 Debian 自己的 ABI 标记。
+#
+# 注意 hooks/customize02-drivers.sh 里有一份等价实现（hook 拿不到仓库路径，
+# 不能 source 本文件），改这里必须同步改那边。
+#
+# 用法：kernel_abi_name <point-release> <flavour> <发行版ABI后缀>
+#   kernel_abi_name 6.12.113 amd64 deb13 → 6.12.113+deb13-amd64
+kernel_abi_name() {
+    printf '%s+%s-%s\n' "$1" "$3" "$2"
+}
+
+# 规范化 --kernel-version 的输入：接受 upstream point release（6.12.113）
+# 或 Debian ABI 名（6.12.113+deb13-amd64），统一返回 upstream point release。
+normalize_kernel_version() {
+    printf '%s\n' "${1%%+*}"
+}

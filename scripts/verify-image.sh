@@ -63,6 +63,7 @@ check_exists /etc/initramfs-tools/modules          "initramfs 关键模块清单
 check_exists /usr/local/share/qm1/driver-manifest.txt "驱动清单"
 check_exists /usr/local/lib/qm1/drv-selfcheck.sh    "设备端自检脚本"
 check_exists /etc/wpa_supplicant/wpa_supplicant.conf "Wi-Fi 配置"
+check_exists /etc/modprobe.d/qm1-rtl8723bs-in-tree.conf "RTL8723BS 驱动参数（关省电/20MHz）"
 check_exists /etc/hostname                           "主机名"
 
 echo "-- 内核与固件 --"
@@ -84,6 +85,14 @@ for blob in brcmfmac4365-pcie.bin brcmfmac4352-pcie.bin rtl8723a_fw.bin; do
         printf '  WARN %-46s (%s) —— 无线芯片型号尚未确认，缺 blob 不致命\n' "/lib/firmware/$blob" "固件 blob"
     fi
 done
+# 内置 Realtek RTL8723BS 的 Wi-Fi blob 是 staging 驱动实际请求的文件名。
+# 它在 rtlwifi/ 子目录下，上面的顶层 ls 看不到，必须单独 stat。
+if debugfs -R "stat /lib/firmware/rtlwifi/rtl8723bs_nic.bin" "$IMG" >/dev/null 2>&1; then
+    printf '  OK   %-46s (%s)\n' "/lib/firmware/rtlwifi/rtl8723bs_nic.bin" "内置 RTL8723BS Wi-Fi 固件"
+else
+    printf '  WARN %-46s (%s) —— 缺它则内置 Wi-Fi 无法工作（装 firmware-realtek）\n' \
+        "/lib/firmware/rtlwifi/rtl8723bs_nic.bin" "内置 RTL8723BS Wi-Fi 固件"
+fi
 
 echo "-- 伪文件系统应为��� --"
 for d in /dev /proc /sys /run; do

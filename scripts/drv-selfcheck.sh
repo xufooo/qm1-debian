@@ -114,20 +114,78 @@ fi
 
 ifs=""
 wlan_found=0
+wlan_drv=""
 for n in /sys/class/net/*; do
     [ -e "$n" ] || continue
     nm="$(basename "$n")"
     [ "$nm" = "lo" ] && continue
     ifs="$ifs $nm"
-    case "$nm" in wl*) wlan_found=1 ;; esac
+    case "$nm" in
+        wl*)
+            wlan_found=1
+            # 报出真实绑定驱动：只认接口名会把"驱动没起来"误判成"Wi-Fi 就绪"
+            d="$(readlink -f "/sys/class/net/$nm/device/driver" 2>/dev/null | xargs -r basename)"
+            [ -n "$d" ] && wlan_drv="$wlan_drv $nm:$d"
+            ;;
+    esac
 done
 
 if [ -n "$ifs" ]; then
     row PASS "网络接口" "$ifs"
     if [ "$wlan_found" = "1" ]; then
-        row PASS "无线接口" "存在（驱动与固件已就位）"
+        row PASS "无线接口" "存在（绑定驱动：${wlan_drv:-未知}）"
+        case "$wlan_drv" in
+            *r8723bs_qm1*)
+                # 打了补丁的外部模块（patches/rtl8723bs/），永久卡死路径已修
+                row PASS "无线驱动 r8723bs_qm1" "已打补丁的外部模块（永久卡死路径已修）"
+                fw8723=""
+                for p in /lib/firmware/rtlwifi/rtl8723bs_nic.bin \
+                         /usr/lib/firmware/rtlwifi/rtl8723bs_nic.bin; do
+                    [ -f "$p" ] && fw8723="$p"
+                done
+                if [ -n "$fw8723" ]; then
+                    row PASS "rtl8723bs 固件" "$fw8723"
+                else
+                    row FAIL "rtl8723bs 固件" "缺 rtl8723bs_nic.bin（装 firmware-realtek）"
+                fi
+                pm="$(cat /sys/module/r8723bs_qm1/parameters/rtw_power_mgnt 2>/dev/null || echo '?')"
+                ips="$(cat /sys/module/r8723bs_qm1/parameters/rtw_ips_mode 2>/dev/null || echo '?')"
+                bw="$(cat /sys/module/r8723bs_qm1/parameters/rtw_bw_mode 2>/dev/null || echo '?')"
+                if [ "$pm" = "0" ] && [ "$ips" = "0" ] && [ "$bw" = "0" ]; then
+                    row PASS "r8723bs_qm1 省电/带宽" "rtw_power_mgnt=$pm rtw_ips_mode=$ips rtw_bw_mode=$bw"
+                else
+                    row WARN "r8723bs_qm1 省电/带宽" \
+                        "rtw_power_mgnt=$pm rtw_ips_mode=$ips rtw_bw_mode=$bw —— 应为 0 0 0（见 /etc/modprobe.d/qm1-rtl8723bs.conf）"
+                fi
+                ;;
+            *r8723bs*)
+                # 发行版内置 staging 驱动：只支持 WPA2，且存在永久卡死路径
+                row WARN "无线驱动 r8723bs" \
+                    "发行版内置 staging 驱动：仅 WPA2-PSK（无 WPA3/SAE），数据帧无逐包反馈、速率静态查表，且存在永久卡死路径（丢一次 SDIO 中断即可能永久断流）—— 建议改用打了补丁的 r8723bs_qm1 外部模块"
+                fw8723=""
+                for p in /lib/firmware/rtlwifi/rtl8723bs_nic.bin \
+                         /usr/lib/firmware/rtlwifi/rtl8723bs_nic.bin; do
+                    [ -f "$p" ] && fw8723="$p"
+                done
+                if [ -n "$fw8723" ]; then
+                    row PASS "rtl8723bs 固件" "$fw8723"
+                else
+                    row FAIL "rtl8723bs 固件" "缺 rtl8723bs_nic.bin（装 firmware-realtek）"
+                fi
+                # 模块参数：省电会挡住 TX（离开省电看门狗 2 秒），40MHz 有随机断连报告
+                pm="$(cat /sys/module/r8723bs/parameters/rtw_power_mgnt 2>/dev/null || echo '?')"
+                ips="$(cat /sys/module/r8723bs/parameters/rtw_ips_mode 2>/dev/null || echo '?')"
+                bw="$(cat /sys/module/r8723bs/parameters/rtw_bw_mode 2>/dev/null || echo '?')"
+                if [ "$pm" = "0" ] && [ "$ips" = "0" ] && [ "$bw" = "0" ]; then
+                    row PASS "r8723bs 省电/带宽" "rtw_power_mgnt=$pm rtw_ips_mode=$ips rtw_bw_mode=$bw"
+                else
+                    row WARN "r8723bs 省电/带宽" \
+                        "rtw_power_mgnt=$pm rtw_ips_mode=$ips rtw_bw_mode=$bw —— 应为 0 0 0（见 /etc/modprobe.d/qm1-rtl8723bs-in-tree.conf）"
+                fi
+                ;;
+        esac
     else
-        row WARN "无线接口" "未发现 wlan* —— Wi-Fi 未启用或驱动缺失"
+        row WARN "无线接口" "未发现 wlan* —— Wi-Fi 未启用或驱动缺失（内置 RTL8723BS 需 r8723bs 模块 + rtl8723bs_nic.bin）"
     fi
 else
     row WARN "网络接口" "除 lo 外无接口"

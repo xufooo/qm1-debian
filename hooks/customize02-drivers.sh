@@ -6,9 +6,19 @@
 #   1) 内核自带（in-tree）：eMMC/SD、USB、显卡 i915、Intel HDA、蓝牙、RTC、ACPI/电源
 #   2) 需 firmware（只读固件 blob）：Wi-Fi/BT 芯片、Intel 微码
 #      —— 在 Debian 13 里位于 non-free-firmware 组件，mmdebstrap 必须带上该组件
-#   3) 需 out-of-tree（DKMS）：Realtek RTL8723AU/8812AU/8812BU
-#      —— 主线无驱动；QM1 具体无线芯片型号尚未确认，构建期不内置源码，
-#         可用 QM1_DKMS_DEB_DIR 传入自编译的 .deb；否则改用 USB 以太网适配器
+#   3) 需 out-of-tree（DKMS）：Realtek RTL8723AU/8812AU/8812BU 等 USB 无线芯片
+#      —— 主线无驱动；构建期不内置源码，可用 QM1_DKMS_DEB_DIR 传入自编译的 .deb
+#
+# QM1 内置无线（已实测确认）：Realtek RTL8723BS，SDIO 模组（AzureWave），
+#   SDIO ID 0x024c:0xb723。Debian 13 的 6.12 与 bookworm 的 6.1 都自带主线
+#   staging 驱动 r8723bs（CONFIG_RTL8723BS=m），固件为 rtl8723bs_nic.bin
+#   （firmware-realtek 提供）→ 内置 Wi-Fi **不需要 DKMS**。
+#   注意 rtl8723bs_fw.bin 是蓝牙固件（rtl_bt/），不是 Wi-Fi blob。
+#
+# 内核版本：默认跟发行版元包（linux-image-amd64）滚动；也可以用
+#   --kernel-version 6.12.113 钉死某个 point release（本 hook 负责精确安装）。
+#   钉死的原因是 rtl8723bs 的几项安全修复从 6.12.111 才回移进 6.12.y，
+#   而 Debian 13 当前元包给的是 6.12.107-1 —— 少了那批修复。
 # ============================================================================
 set -e
 
@@ -28,16 +38,124 @@ die()  { printf '[hook02][fail] %s\n' "$*" >&2; exit 1; }
 #   linux-image-686      "Linux for older PCs"（非 PAE）
 #   linux-image-686-pae  "Linux for modern PCs"（PAE）← Bay Trail 用这个
 # 且 Debian 13 起不再提供 i386 内核，所以 i386 变体的发行版固定用 bookworm。
+#
+# 固定内核 point release（可选，QM1_KERNEL_VERSION 非空时启用）：
+#   发行版元包（linux-image-amd64）跟着发行版滚动 —— Debian 13 当前给的是
+#   6.12.107-1，而 rtl8723bs 的几项安全修复（kfree_sensitive、WMM_param_handler
+#   越界读、监控帧长度校验）是从 6.12.111 才回移进 6.12.y 的。
+#   固定版本时：
+#     * 不装元包（否则 /lib/modules 会出现两个版本，initramfs/GRUB 都要挑，容易装错）；
+#     * 由本 hook 临时挂 <suite>-proposed-updates 源，精确安装
+#       linux-image-<ABI>-unsigned，装完立即撤掉临时源；
+#     * 装不上 → die，绝不静默回退到元包（静默回退 = 镜像里又少了那批修复）。
 case "$ARCH" in
     amd64) KERNEL_PKGS="linux-image-amd64 linux-headers-amd64" ;;
     i386)  KERNEL_PKGS="linux-image-686-pae linux-headers-686-pae" ;;
     *) die "不支持的架构：$ARCH" ;;
 esac
-log "安装内核：$KERNEL_PKGS"
-chroot "$TARGET" apt-get install -y -qq --no-install-recommends $KERNEL_PKGS
+
+# hook 拿不到仓库路径（不能 source scripts/lib/common.sh），
+# 下面这两份实现与 common.sh 里的 kernel_abi_name / normalize_kernel_version 等价，
+# 改一处必须同步改另一处。
+
+# Debian 内核 ABI 后缀：Debian 13 (trixie) → deb13，Debian 12 (bookworm) → deb12
+kernel_abi_suffix() {
+    case "$1" in
+        bookworm) printf 'deb12\n' ;;
+        *)        printf 'deb13\n' ;;
+    esac
+}
+
+# point release（6.12.113）→ Debian 内核 ABI 名（6.12.113+deb13-amd64）
+kernel_abi_name() {
+    printf '%s+%s-%s\n' "${1%%+*}" "$(kernel_abi_suffix "$2")" "$3"
+}
+
+# 探测发行版代号：优先用 build-rootfs.sh 导出的 QM1_SUITE，
+# 否则从 chroot 的 /etc/os-release 读 VERSION_CODENAME
+detect_suite() {
+    if [ -n "${QM1_SUITE:-}" ]; then
+        printf '%s\n' "$QM1_SUITE"
+        return 0
+    fi
+    if [ -f "$TARGET/etc/os-release" ]; then
+        sed -n 's/^VERSION_CODENAME=//p' "$TARGET/etc/os-release" | tr -d '"' | sed -n '1p'
+    fi
+}
+
+# 精确安装固定内核；成功返回 0，失败直接 die（不做任何回退）
+install_pinned_kernel() {
+    _abi="$1"
+    _suite="$2"
+    _mirror="${QM1_MIRROR:-http://deb.debian.org/debian}"
+    _src="$TARGET/etc/apt/sources.list.d/qm1-pinned-kernel.list"
+
+    mkdir -p "$TARGET/etc/apt/sources.list.d"
+    {
+        for _comp in "${_suite}-proposed-updates" "${_suite}-updates"; do
+            printf 'deb %s %s main\n' "$_mirror" "$_comp"
+        done
+    } > "$_src"
+    log "临时挂源：${_suite}-proposed-updates / ${_suite}-updates（装完即撤）"
+
+    if ! chroot "$TARGET" apt-get update -qq; then
+        rm -f "$_src"
+        die "apt-get update 失败（临时源 ${_suite}-proposed-updates）"
+    fi
+
+    # 装 -unsigned 变体：signed 变体（linux-image-<ABI>）会拉 grub-efi-amd64-signed，
+    # 和本项目自带的 BOOTIA32/BOOTX64 双引导器抢 EFI 目录。
+    if ! chroot "$TARGET" apt-cache show "linux-image-${_abi}-unsigned" >/dev/null 2>&1; then
+        rm -f "$_src"
+        die "源 ${_suite}-proposed-updates 里没有 linux-image-${_abi}-unsigned —— 固定内核不可用"
+    fi
+
+    if chroot "$TARGET" apt-get install -y -qq --no-install-recommends "linux-image-${_abi}-unsigned"; then
+        rm -f "$_src"
+        log "已安装固定内核：linux-image-${_abi}-unsigned"
+    else
+        rm -f "$_src"
+        die "固定内核 ${_abi} 安装失败（已尝试 ${_suite}-proposed-updates）—— 拒绝静默回退到发行版元包"
+    fi
+
+    [ -d "$TARGET/lib/modules/$_abi" ] \
+        || die "固定内核装完但 $TARGET/lib/modules/$_abi 不存在，镜像不可用"
+
+    # 镜像里只应有一个内核版本：多个会让 initramfs/GRUB 挑错
+    _others=""
+    for _d in "$TARGET"/lib/modules/*; do
+        [ -e "$_d" ] || continue
+        _bn="$(basename "$_d")"
+        if [ "$_bn" != "$_abi" ]; then
+            _others="$_others $_bn"
+        fi
+    done
+    if [ -n "$_others" ]; then
+        warn "镜像里还存在其他内核版本：$_others（固定内核模式下不应出现）"
+    fi
+}
+
+PINNED_KERNEL_ABI=""
+if [ -n "${QM1_KERNEL_VERSION:-}" ]; then
+    [ "$ARCH" = "amd64" ] || die "固定内核版本只支持 amd64（$ARCH 没有 trixie 内核，也没有对应的 point release）"
+    SUITE_CODENAME="$(detect_suite)"
+    [ -n "$SUITE_CODENAME" ] \
+        || die "无法确定发行版代号（QM1_SUITE 未设置，/etc/os-release 也没有 VERSION_CODENAME）"
+    PINNED_KERNEL_ABI="$(kernel_abi_name "$QM1_KERNEL_VERSION" "$SUITE_CODENAME" amd64)"
+    log "固定内核 point release：$QM1_KERNEL_VERSION → ABI $PINNED_KERNEL_ABI（不装元包）"
+    # 固定版本时装元包会把发行版当前内核一起拉进来，/lib/modules 出现两个版本
+    KERNEL_PKGS=""
+    install_pinned_kernel "$PINNED_KERNEL_ABI" "$SUITE_CODENAME"
+fi
+
+if [ -n "$KERNEL_PKGS" ]; then
+    log "安装内核：$KERNEL_PKGS"
+    # shellcheck disable=SC2086
+    chroot "$TARGET" apt-get install -y -qq --no-install-recommends $KERNEL_PKGS
+fi
 
 # ---------- 2. firmware（尽力而为，缺包只告警） ----------
-FIRMWARE_PKGS="firmware-linux-free firmware-brcm80211 firmware-realtek firmware-atheros firmware-iwlwifi intel-microcode"
+FIRMWARE_PKGS="firmware-linux-free firmware-brcm80211 firmware-realtek firmware-mediatek firmware-atheros firmware-iwlwifi intel-microcode"
 installed_fw=""
 missing_fw=""
 for p in $FIRMWARE_PKGS; do
@@ -88,7 +206,54 @@ cat > "$TARGET/etc/modules-load.d/qm1-hardware.conf" <<'EOF'
 i915
 snd_hda_intel
 btusb
+# 内置 Realtek RTL8723BS（SDIO）。通常 udev 也能按 modalias 自动加载，
+# 显式列出是为了在 SDIO 枚举晚于模块加载时仍能接管。
+# 注意：装了就打了补丁的 r8723bs_qm1 时，这个条目要改成 r8723bs_qm1 ——
+# 树内 r8723bs 会被 /etc/modprobe.d/qm1-rtl8723bs.conf 里的 blacklist 挡住。
+r8723bs
 EOF
+
+# ---------- 4b. 打了补丁的 RTL8723BS 外部模块（可选） ----------
+# QM1_WIFI_MODULE_DEB 指向一个本地 .deb（由 scripts/build-rtl8723bs-module.sh
+# 或 .github/workflows/build-wifi-module.yml 针对同一内核 ABI 产出）。
+# 装它 = 用打了 P1–P5 补丁的 r8723bs_qm1 取代发行版树内 r8723bs：
+#   * 树内 staging 驱动有 4 条永久卡死路径（丢一次 SDIO 中断即可能永久断流）；
+#   * 模块自带 /etc/modprobe.d/qm1-rtl8723bs.conf：
+#     blacklist r8723bs + options r8723bs_qm1 rtw_power_mgnt=0 rtw_ips_mode=0
+#     rtw_smart_ps=0 rtw_bw_mode=0（关省电 + 20MHz）；
+#   * 模块的 vermagic 写死了目标内核版本，和镜像内核对不上就装不了 ——
+#     所以这里必须核对，不一致直接失败。
+if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
+    _img_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
+    [ -n "$_img_kver" ] || die "镜像里没有 /lib/modules，无法核对 Wi-Fi 模块的 vermagic"
+    _deb_name="$(basename "$QM1_WIFI_MODULE_DEB")"
+    log "安装打了补丁的 Wi-Fi 模块：$_deb_name（镜像内核 $_img_kver）"
+    cp "$QM1_WIFI_MODULE_DEB" "$TARGET/tmp/$_deb_name"
+    if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_deb_name"; then
+        rm -f "$TARGET/tmp/$_deb_name"
+        die "Wi-Fi 模块 deb 安装失败：$_deb_name"
+    fi
+    rm -f "$TARGET/tmp/$_deb_name"
+    # vermagic 必须与镜像内核一致，否则模块根本加载不了
+    _vm="$(chroot "$TARGET" modinfo -F vermagic r8723bs_qm1 2>/dev/null | awk '{print $1}')"
+    if [ -z "$_vm" ]; then
+        die "装完 deb 仍读不到 r8723bs_qm1 的 vermagic（模块名或 .modinfo 不对）"
+    fi
+    case "$_vm" in
+        "$_img_kver"*) : ;;
+        *) die "Wi-Fi 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
+    esac
+    log "Wi-Fi 模块 vermagic：$_vm（与镜像内核一致）"
+    # modules-load.d 里要改成加载打了补丁的那个
+    sed -i 's/^r8723bs$/r8723bs_qm1/' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
+    WIFI_MODULE_STATE="installed:$_deb_name"
+else
+    if [ -n "${QM1_WIFI_MODULE_DEB:-}" ]; then
+        die "QM1_WIFI_MODULE_DEB 指向的文件不存在：$QM1_WIFI_MODULE_DEB"
+    fi
+    warn "未提供 QM1_WIFI_MODULE_DEB：镜像里用的是发行版树内 r8723bs（存在永久卡死路径）"
+    WIFI_MODULE_STATE="absent"
+fi
 
 # ---------- 5. out-of-tree / DKMS 驱动（可选） ----------
 if [ -n "${QM1_DKMS_DEB_DIR:-}" ] && [ -d "$QM1_DKMS_DEB_DIR" ]; then
@@ -102,7 +267,8 @@ if [ -n "${QM1_DKMS_DEB_DIR:-}" ] && [ -d "$QM1_DKMS_DEB_DIR" ]; then
         warn "目录内没有 .deb"
     fi
 else
-    warn "未提供 QM1_DKMS_DEB_DIR：Realtek 8723AU/8812AU/8812BU 等无主线驱动的芯片未被覆盖"
+    warn "未提供 QM1_DKMS_DEB_DIR：Realtek 8723AU/8812AU/8812BU 等无主线驱动的 USB 无线芯片未被覆盖"
+    warn "（QM1 内置的 RTL8723BS 不在此列：Debian 13 / 12 自带 staging 驱动 r8723bs，无需 DKMS）"
     warn "对策：改用 USB 以太网适配器（推荐），或自行编译对应 DKMS 驱动后重装本步骤"
 fi
 
@@ -153,6 +319,7 @@ i915|DRM_I915|Intel HD Graphics Gen7（HDMI 输出）|
 snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
+r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，主线 staging 驱动）|
 brcmfmac|BRCMFMAC|Broadcom Wi-Fi（主线驱动）|
 iwlwifi|IWLWIFI|Intel Wi-Fi（主线驱动）|
 rtw88|RTW88|Realtek 88xx Wi-Fi（主线驱动）|
@@ -174,7 +341,8 @@ missing_critical=""
 fw_blob_summary=""
 for blob in brcmfmac4350-pcie.bin brcmfmac4356-pcie.bin brcmfmac4358-pcie.bin \
             brcmfmac4366b-pcie.bin brcmfmac4366c-pcie.bin \
-            rtl8723a_fw.bin rtl8723befw.bin rtl8723bs_fw.bin; do
+            rtl8723a_fw.bin rtl8723befw.bin \
+            rtl8723bs_nic.bin mt7610u.bin mt7601u.bin; do
     # find -quit 会让上游管道出 SIGPIPE，这里直接取结果判断
     if [ -n "$(find "$TARGET/lib/firmware" -name "$blob" -print -quit 2>/dev/null)" ]; then
         fw_blob_summary="$fw_blob_summary $blob:ok"
@@ -203,6 +371,8 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
     echo "--- 已装 firmware 包 ---"
     echo "installed:${installed_fw:-none}"
     echo "missing:${missing_fw:-none}"
+    echo "--- Wi-Fi 模块 ---"
+    echo "${WIFI_MODULE_STATE:-absent}"
 } > "$MANIFEST"
 
 # 关键驱动判定：module 或 builtin 都算有，只有 absent 才致命
