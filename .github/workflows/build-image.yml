@@ -132,7 +132,8 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
             mmdebstrap debian-archive-keyring mtools dosfstools e2fsprogs fdisk util-linux \
-            grub2-common file ca-certificates curl wget gnupg gpgv xz-utils zstd procps kmod
+            grub2-common file ca-certificates curl wget gnupg gpgv xz-utils zstd procps kmod \
+            initramfs-tools cpio
           # 两个架构的 EFI 模块：grub-mkimage 与 .mod 必须同版本，
           # 所以直接用 trixie 仓库里的同一套 grub2-common + grub-efi-*-bin
           dpkg --add-architecture i386
@@ -194,16 +195,31 @@ jobs:
           # 2) initramfs 里必须真的塞进了这些模块
           #    注意模块文件名里 MMC 用下划线（mmc_block.ko），其余用连字符，
           #    所以两种写法都要匹配。
+          #
+          #    坑：initrd.img 可能是「early cpio（Intel 微码）+ zstd 主归档」的拼接格式，
+          #    直接 `zstd -dc` 会因为前缀不是 zstd 帧而解不出内容（grep 必然找不到）。
+          #    所以改用 initramfs-tools 的 lsinitramfs 列举，它认识所有这些格式。
           initrd="$(ls "$ROOT"/boot/initrd.img-* 2>/dev/null | head -1 || true)"
           if [ -z "$initrd" ]; then
             echo "::error::镜像里没有 initrd.img-*"; rc=1
           else
             echo "initramfs: $initrd"
+            listing="$(lsinitramfs "$initrd" 2>/dev/null || true)"
+            if [ -z "$listing" ]; then
+              echo "::warning::lsinitramfs 列举失败，回退到 unmkinitramfs"
+              tmpd="$(mktemp -d)"
+              unmkinitramfs "$initrd" "$tmpd" 2>/dev/null || true
+              listing="$(find "$tmpd" -type f -printf '%p\n' 2>/dev/null || true)"
+              rm -rf "$tmpd"
+            fi
+            printf '%s\n' "$listing" > build/out/initramfs-listing.txt
+            echo "initramfs 条目数：$(printf '%s\n' "$listing" | grep -c . || true)"
             for m in sdhci[-_]pci sdhci[-_]acpi mmc[-_]block; do
-              if zstd -dc "$initrd" 2>/dev/null | grep -aqE "$m"; then
+              if printf '%s\n' "$listing" | grep -aqE "$m"; then
                 echo "OK   initramfs 含 $m"
               else
                 echo "::error::initramfs 里没有 $m —— 根盘/ESP 阶段会挂不上"
+                printf '%s\n' "$listing" | grep -aE 'sdhci|mmc' | head -10 || true
                 rc=1
               fi
             done

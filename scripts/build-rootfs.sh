@@ -56,7 +56,7 @@ BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sud
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
-kmod,initramfs-tools,apt-transport-https"
+kmod,initramfs-tools,zstd,apt-transport-https"
 
 # 运行时（Hermes CLI + headless Chrome）
 # 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），
