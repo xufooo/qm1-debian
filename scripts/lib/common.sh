@@ -43,3 +43,34 @@ gen_uuid() {
 dir_bytes() {
     du -sb "$1" 2>/dev/null | awk '{print $1}' || echo 0
 }
+
+# 每个架构默认使用的 Debian 发行版。
+#
+#   amd64 → trixie（Debian 13，当前主线）
+#   i386  → bookworm（Debian 12）
+#
+# 为什么 32 位必须留在 bookworm：
+#   Debian 13 的 binary-i386 索引里已经没有任何 linux-image-* 包（实测命中数为 0），
+#   官方也不再提供 i386 安装器，trixie 的 i386 只用于"在 64 位 CPU 上跑 32 位用户态"。
+#   真正要启动一套 32 位系统（32 位内核 + 32 位用户态），只能用 bookworm 的
+#   linux-image-686-pae（PAE 内核，Bay Trail 支持 PAE）。
+default_suite_for_arch() {
+    case "$1" in
+        amd64) printf 'trixie\n' ;;
+        i386)  printf 'bookworm\n' ;;
+        *) die "不支持的架构：$1" ;;
+    esac
+}
+
+# 每个架构对应的内核包名。
+#
+# 注意 Debian 的 i386 内核 flavour 叫 686 / 686-pae，并没有 linux-image-i386 这个包：
+#   linux-image-686      "Linux for older PCs"（非 PAE，老 CPU 用）
+#   linux-image-686-pae  "Linux for modern PCs"（PAE，Bay Trail 选它）
+kernel_pkgs_for_arch() {
+    case "$1" in
+        amd64) printf 'linux-image-amd64,linux-headers-amd64\n' ;;
+        i386)  printf 'linux-image-686-pae,linux-headers-686-pae\n' ;;
+        *) die "不支持的架构：$1" ;;
+    esac
+}

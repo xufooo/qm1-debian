@@ -20,7 +20,7 @@ source "$SCRIPT_DIR/lib/common.sh"
 OUT="build/rootfs"
 ARCH="amd64"
 PROFILE="base"
-SUITE="trixie"
+SUITE=""
 MIRROR="http://deb.debian.org/debian"
 COMPONENTS="main,non-free-firmware"
 HOOKS_DIR="$REPO_ROOT/hooks"
@@ -37,6 +37,9 @@ while [ $# -gt 0 ]; do
         *) die "未知参数：$1" ;;
     esac
 done
+
+# 发行版默认值随架构走：i386 没有 trixie 内核，只能留在 bookworm。
+[ -n "$SUITE" ] || SUITE="$(default_suite_for_arch "$ARCH")"
 
 need_cmd mmdebstrap "apt install mmdebstrap"
 [ -d "$HOOKS_DIR" ] || die "hooks 目录不存在：$HOOKS_DIR"
@@ -55,22 +58,26 @@ lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
 kmod,initramfs-tools,apt-transport-https"
 
-# 运行时（Hermes CLI + headless Chrome）：Chromium 只有 amd64/arm64，32 位变体装不了
+# 运行时（Hermes CLI + headless Chrome）
+# 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），
+# 所以"32 位没有浏览器"并不成立。32 位变体不装 runtime profile 的真正原因是：
+#   * Hermes 要求 Python 3.14，而 uv 托管的 standalone CPython 只提供
+#     x86_64-unknown-linux-gnu 产物（pm/lock.json 里 python.artifacts 只有 linux-x64）；
+#   * 上游 Node.js 把 32 位 x86 标为 Experimental（Debian 自己构建了 nodejs 20.x i386，
+#     但不追主线）；
+#   * Debian 13 起不再提供 i386 内核。
+# 因此 i386 变体的定位是"救援兜底系统"：能起机、能上网、能维护，但承不了 agent 运行时。
 RUNTIME_PKGS_AMD64="chromium,chromium-driver,fonts-liberation,fonts-noto-cjk,\
 libnss3,libgbm1,libasound2,libasound2-plugins,libatk-bridge2.0-0,libgtk-3-0,\
 libx11-xcb1,libdrm2,libxshmfence1,libxkbcommon0,libpango-1.0-0,libcairo2"
 
-case "$ARCH" in
-    amd64) KERNEL_PKGS="linux-image-amd64,linux-headers-amd64" ;;
-    i386)  KERNEL_PKGS="linux-image-i386,linux-headers-i386" ;;
-    *) die "不支持的架构：$ARCH" ;;
-esac
+KERNEL_PKGS="$(kernel_pkgs_for_arch "$ARCH")"
 
 PKGS="$BASE_PKGS,$KERNEL_PKGS"
 if [ "$PROFILE" = "runtime" ] && [ "$ARCH" = "amd64" ]; then
     PKGS="$PKGS,$RUNTIME_PKGS_AMD64"
 elif [ "$PROFILE" = "runtime" ]; then
-    warn "profile=runtime 但 $ARCH 没有 Chromium 包 —— 32 位变体只能作为救援兜底"
+    warn "profile=runtime 但 $ARCH 承不了 agent 运行时（无 Python 3.14 standalone 构建）—— $ARCH 变体按救援兜底系统构建"
 fi
 
 log "suite=$SUITE arch=$ARCH profile=$PROFILE components=$COMPONENTS"
@@ -110,6 +117,16 @@ for d in dev proc sys run; do
     fi
 done
 mkdir -p "$OUT"/{dev,proc,sys,run}
+
+# ---------- 构建信息（供后续脚本读取发行版/架构/内核版本） ----------
+mkdir -p "$OUT/etc"
+{
+    echo "suite=$SUITE"
+    echo "arch=$ARCH"
+    echo "profile=$PROFILE"
+    echo "components=$COMPONENTS"
+    echo "kernel=$(ls -1 "$OUT/lib/modules" 2>/dev/null | sort -V | tail -1)"
+} > "$OUT/etc/qm1-build-info"
 
 # ---------- 清单 ----------
 MANIFEST="$OUT/../rootfs-manifest.txt"
