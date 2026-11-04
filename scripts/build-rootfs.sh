@@ -62,6 +62,7 @@ BASE_PKGS=(
     systemd-sysv systemd-resolved systemd-oomd dbus
     openssh-server sudo
     ca-certificates curl wget git gnupg apt-utils
+    kmod initramfs-tools          # modinfo（驱动清单核对）+ update-initramfs（预置启动关键模块）
     locales tzdata less file
     iproute2 iputils-ping ethtool dnsutils procps psmisc
     rsync xz-utils zstd bzip2 tar
@@ -100,12 +101,18 @@ if [ -e "$OUT" ]; then
 fi
 log "debootstrap $SUITE/$ARCH → $OUT（profile=$PROFILE）"
 
+# debootstrap 1.0.141 的位置参数顺序是 <suite> <target> [<mirror> [<script>]]
+# 架构必须用 --arch= 选项传；若把架构当第 3 个位置参数，它会被当成 mirror，
+# 于是报 "E: unknown location amd64/dists/trixie/InRelease"。
 COMPONENTS="main,non-free-firmware"
-if ! debootstrap --variant=minbase --components="$COMPONENTS" "$SUITE" "$OUT" "$ARCH"; then
+MIRROR="${QM1_MIRROR:-http://deb.debian.org/debian}"
+if ! debootstrap --arch="$ARCH" --variant=minbase --components="$COMPONENTS" \
+        "$SUITE" "$OUT" "$MIRROR"; then
     warn "带 non-free-firmware 组件的 debootstrap 失败，退回仅 main 组件"
     warn "（此时 firmware-brcm80211 / firmware-realtek 等 firmware 包不可用，Wi-Fi 需另行处理）"
     rm -rf "$OUT"
-    debootstrap --variant=minbase --components=main "$SUITE" "$OUT" "$ARCH"
+    debootstrap --arch="$ARCH" --variant=minbase --components=main \
+        "$SUITE" "$OUT" "$MIRROR"
 fi
 
 cleanup() {
