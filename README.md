@@ -106,6 +106,20 @@ sudo bash /usr/local/share/qm1/provision-agent.sh         # Hermes + Chrome + sy
 Hermes 本体由官方安装器安装（官方用 uv 托管 standalone CPython 3.14）——
 **不要**用系统的 python3（Debian 13 是 3.13.5）去装。
 
+### 变体：分区级安装（不用整盘镜像）
+
+不想覆盖整盘时，可以只用分区镜像：根文件系统的 UUID 在构建期固定（`mkfs.ext4 -U`），
+并已写进 `esp.img` 里的 `grub.cfg`（`root=UUID=`），所以只要把两个镜像写到正确的
+分区位置就能引导：
+
+```bash
+# 先用任意分区工具建 GPT：p1 = 512 MiB FAT32（卷标 QM1ESP），p2 = 其余 ext4（卷标 QM1ROOT）
+sudo dd if=build/out/esp.img   of=/dev/sdX1 bs=1M conv=fsync status=progress
+sudo dd if=build/out/rootfs.img of=/dev/sdX2 bs=1M conv=fsync status=progress
+```
+
+注意：**不要重新格式化 p2**，否则 UUID 变化会让 `grub.cfg` 里的 `root=UUID=` 失效。
+
 ### CI 产物
 
 `build-image` 工作流产出：整机镜像 `qm1-disk.img`（可选 zstd 压缩）、分区镜像
