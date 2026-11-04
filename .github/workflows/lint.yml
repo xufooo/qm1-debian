@@ -45,7 +45,7 @@ jobs:
         run: |
           set -euo pipefail
           if grep -rInE '(/home/[a-z]|/Users/|gmail\.com|qq\.com|viking://|OpenViking|BEGIN [A-Z ]*PRIVATE KEY)' \
-               --exclude-dir=.git . ; then
+               --exclude-dir=.git --exclude=lint.yml . ; then
             echo "::error::仓库中出现疑似本机路径或私人信息"
             exit 1
           fi
