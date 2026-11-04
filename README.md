@@ -34,12 +34,12 @@ part_gpt part_msdos fat ext2 normal linux search search_fs_uuid search_label cha
 
 ```bash
 # 依赖（Debian/Ubuntu）
-sudo apt install debootstrap mtools dosfstools e2fsprogs fdisk \
+sudo apt install mmdebstrap debian-archive-keyring mtools dosfstools e2fsprogs fdisk \
      grub2-common grub-efi-amd64-bin file curl zstd
 sudo dpkg --add-architecture i386
 sudo apt update && sudo apt install grub-efi-ia32-bin:i386
 
-# 1) 构建根文件系统（debootstrap，需要 root）
+# 1) 构建根文件系统（mmdebstrap + hooks/，需要 root）
 sudo bash scripts/build-rootfs.sh --out build/rootfs --profile runtime
 
 # 2) 生成 ESP + 根文件系统镜像（无需 root）
@@ -62,7 +62,7 @@ sudo dd if=build/qm1-debian13-amd64.img of=/dev/mmcblk0 bs=4M conv=fsync status=
 | 类别 | 内容 | 来源 |
 |------|------|------|
 | **内核自带** | eMMC/SD（`sdhci_pci` / `sdhci_acpi`）、USB（`xhci_hcd`/`ehci_pci`/`usb_storage`）、显卡 `i915`、Intel HDA、蓝牙 `btusb`、RTC、ACPI/电源管理 | Debian `linux-image-amd64` |
-| **需 firmware** | Broadcom brcmfmac、Realtek 8723*/8812*、Atheros、Intel 7 系无线、Intel 微码、SOF 音频固件 | `firmware-brcm80211` / `firmware-realtek` / `firmware-atheros` / `firmware-iwlwifi` / `firmware-sof-signed` / `intel-microcode`（**位于 non-free-firmware 组件**，debootstrap 必须带 `--components=main,non-free-firmware`） |
+| **需 firmware** | Broadcom brcmfmac、Realtek 8723*/8812*、Atheros、Intel 7 系无线、Intel 微码、SOF 音频固件 | `firmware-brcm80211` / `firmware-realtek` / `firmware-atheros` / `firmware-iwlwifi` / `firmware-sof-signed` / `intel-microcode`（**位于 non-free-firmware 组件**，mmdebstrap 必须带 `--components=main,non-free-firmware`） |
 | **需 out-of-tree（DKMS）** | Realtek RTL8723AU / 8812AU / 8812BU 等消费级无线芯片（主线内核无驱动） | 通过 `QM1_DKMS_DEB_DIR` 注入预编译 .deb，或改用 USB 以太网适配器 |
 
 启动关键路径（eMMC 控制器 + 根文件系统）会被写进 initramfs：`MODULES=most` + `COMPRESS=zstd`，并显式声明 `sdhci_pci sdhci_acpi mmc_block vfat ext4 usb_storage xhci_hcd ehci_pci`。
@@ -93,7 +93,7 @@ sudo /usr/local/bin/qm1-selftest --json   # 机读
 ## CI
 
 - `lint`：bash 语法检查、shellcheck、可执行位、隐私扫描（禁止本机路径/私人信息）、overlay 完整性。
-- `build-image`：在 `debian:trixie-slim`（privileged）里跑完整构建，校验 SHA-256、引导器文件类型、ESP 目录清单、驱动清单，并上传元数据产物；手动触发时可选择上传镜像。
+- `build-image`：在 `debian:trixie-slim`（privileged）里跑完整构建（mmdebstrap → hooks → 引导器 → ESP → ext4），校验 SHA-256、引导器文件类型、ESP 目录清单、驱动清单，并用 `debugfs` 直接检查 ext4 镜像里的属主/权限与定制文件；手动触发时可选择上传镜像。
 
 ## 目录结构
 
@@ -101,13 +101,17 @@ sudo /usr/local/bin/qm1-selftest --json   # 机读
 scripts/
   lib/common.sh          公共函数
   build-bootloaders.sh   构建双架构 EFI 引导器（grub-mkimage）
-  build-rootfs.sh        debootstrap 生成根文件系统
-  install-drivers.sh     chroot 内预置内核/firmware/模块/DKMS
+  build-rootfs.sh        mmdebstrap 生成根文件系统（--hook-dir=hooks/）
   make-esp.sh            组装 FAT32 ESP（mtools，无需 root）
   build-image.sh         生成 esp.img + rootfs.img + manifest
   assemble-disk.sh       合成 GPT 整盘镜像
+  verify-image.sh        debugfs 直接校验 ext4 镜像（属主/权限/文件）
   drv-selfcheck.sh       设备端硬件自检
   grub.cfg.example       ESP 引导菜单模板（64 位 + 32 位两个启动项）
+hooks/                   mmdebstrap customize 钩子（在宿主执行，$1 = chroot 目录）
+  customize01-base.sh    主机名/locale/时区/fstab/服务开关
+  customize02-drivers.sh 内核+firmware+initramfs+模块清单（启动关键驱动缺失即失败）
+  customize03-overlay.sh 应用 overlay/ 与设备端自检脚本
 overlay/                 随镜像分发的定制层
 ```
 
