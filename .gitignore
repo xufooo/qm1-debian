@@ -1,0 +1,16 @@
+# 构建产物
+build/
+out/
+*.img
+*.iso
+*.deb
+*.efi
+*.sha256
+
+# GRUB 模块解包目录
+grub-ia32-root/
+grub-amd64-root/
+
+# 杂项
+.DS_Store
+*.log
