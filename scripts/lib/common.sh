@@ -10,6 +10,7 @@ set -euo pipefail
 if [ -n "${_QM1_COMMON_SH:-}" ]; then return 0; fi
 _QM1_COMMON_SH=1
 
+# shellcheck disable=SC2034  # 独立检查本文件时看不到外部脚本的引用
 QM1_REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
 QM1_ESP_LABEL="${QM1_ESP_LABEL:-QM1ESP}"      # FAT32 ESP 卷标（GRUB 用 --label 定位）

@@ -94,7 +94,11 @@ done
 # ---------------- 2. 外设 ----------------
 section "外设"
 if [ -d /sys/class/drm ]; then
-    cards="$(ls -1 /sys/class/drm 2>/dev/null | grep -E '^card[0-9]+$' | tr '\n' ' ')"
+    cards=""
+    for c in /sys/class/drm/card[0-9]*; do
+        [ -e "$c" ] || continue
+        cards="$cards $(basename "$c")"
+    done
     drv="$(cat /sys/class/drm/card0/device/driver/module 2>/dev/null | xargs -r basename)"
     row PASS "显示设备" "cards=${cards:-无} driver=${drv:-未知}"
     [ -n "$drv" ] || row WARN "显示驱动" "未绑定驱动（HDMI 可能无输出）"
@@ -108,10 +112,19 @@ else
     row WARN "声卡" "未发现声卡"
 fi
 
-if [ -n "$(ls -1 /sys/class/net 2>/dev/null | grep -v '^lo$' | tr '\n' ' ')" ]; then
-    ifs="$(ls -1 /sys/class/net | grep -v '^lo$' | tr '\n' ' ')"
+ifs=""
+wlan_found=0
+for n in /sys/class/net/*; do
+    [ -e "$n" ] || continue
+    nm="$(basename "$n")"
+    [ "$nm" = "lo" ] && continue
+    ifs="$ifs $nm"
+    case "$nm" in wl*) wlan_found=1 ;; esac
+done
+
+if [ -n "$ifs" ]; then
     row PASS "网络接口" "$ifs"
-    if ls -1 /sys/class/net | grep -q '^wl'; then
+    if [ "$wlan_found" = "1" ]; then
         row PASS "无线接口" "存在（驱动与固件已就位）"
     else
         row WARN "无线接口" "未发现 wlan* —— Wi-Fi 未启用或驱动缺失"
@@ -121,19 +134,33 @@ else
 fi
 
 if [ -d /sys/class/bluetooth ]; then
-    row PASS "蓝牙" "$(ls -1 /sys/class/bluetooth | tr '\n' ' ')"
+    bt=""
+    for b in /sys/class/bluetooth/*; do
+        [ -e "$b" ] || continue
+        bt="$bt $(basename "$b")"
+    done
+    row PASS "蓝牙" "$bt"
 else
     row WARN "蓝牙" "未发现蓝牙适配器"
 fi
 
 if [ -d /sys/class/rtc ]; then
-    row PASS "RTC" "$(ls -1 /sys/class/rtc | tr '\n' ' ')"
+    rtc=""
+    for r in /sys/class/rtc/rtc[0-9]*; do
+        [ -e "$r" ] || continue
+        rtc="$rtc $(basename "$r")"
+    done
+    row PASS "RTC" "$rtc"
 else
     row WARN "RTC" "未发现 RTC"
 fi
 
 if [ -d /sys/class/thermal ]; then
-    zones="$(ls -1 /sys/class/thermal 2>/dev/null | grep -c thermal_zone)"
+    zones=0
+    for z in /sys/class/thermal/thermal_zone*; do
+        [ -e "$z" ] || continue
+        zones=$((zones + 1))
+    done
     row PASS "温控" "$zones 个 thermal_zone"
 else
     row WARN "温控" "未发现 thermal_zone"
