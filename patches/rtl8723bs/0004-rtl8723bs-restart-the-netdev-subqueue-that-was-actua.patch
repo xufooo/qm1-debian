@@ -71,7 +71,7 @@ index 944b9c7..e9be8c2 100644
 +			continue;
 +
 +		/*  netif_wake_subqueue() has no bounds check */
-+		if (queue >= adapter->pnetdev->num_tx_queues)
++		if (queue >= padapter->pnetdev->num_tx_queues)
 +			continue;
 +
 +		if (padapter->registrypriv.wifi_spec) {
@@ -86,7 +86,7 @@ index 944b9c7..e9be8c2 100644
 +		}
 +
 +		pxmitpriv->stopped_xmit_queues &= ~(1 << queue);
-+		netif_wake_subqueue(adapter->pnetdev, queue);
++		netif_wake_subqueue(padapter->pnetdev, queue);
 +	}
 +}
 +
