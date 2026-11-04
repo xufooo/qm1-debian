@@ -1,0 +1,34 @@
+# grub.cfg 模板 —— 部署到 FAT32 ESP 的 /EFI/BOOT/grub.cfg
+#
+# 占位符由 make-esp.sh 替换：
+#   @ROOT_UUID@     64 位根分区 UUID（ext4）
+#   @ROOT32_UUID@  32 位根分区 UUID（ext4）；没有 32 位系统时整段菜单项会被删除
+#
+# 定位说明：
+#   search --label QM1ESP --set=root  找到引导分区本身（内核与 initrd 放在 ESP 上）
+#   root=UUID=...                     找到根文件系统分区
+#   两个 UUID 不同源：前者是 FAT32 ESP 卷标，后者是 ext4 根分区 UUID。
+#
+# 内核参数说明：
+#   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道（务必保留）
+#   fsck.repair=yes         eMMC 突然掉电后开机自修复
+#   ro                      根以只读挂载，交给 systemd 之后 remount-rw
+
+set timeout=5
+set default=0
+
+search --label QM1ESP --set=root
+
+# 64 位系统（amd64）：由 IA32 引导器经 EFI handover 加载
+menuentry "QM1 Debian 13 (64-bit amd64)" {
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes
+    initrd /initrd.img
+}
+
+# 32 位系统（i386）：32 位固件可直接加载，i386-efi 引导器亦可
+# 文件名用 8.3 可精确表示的形式（vmlinuz32 / initrd32.img），
+# 这样即使 ESP 卷没有长文件名表（LFN）也能被 GRUB 找到。
+menuentry "QM1 Debian 13 (32-bit i386)" {
+    linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes
+    initrd /initrd32.img
+}
