@@ -88,6 +88,11 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # 容器作业里 GitHub 默认用 sh（dash），不支持 <(...) 进程替换等 bash 语法 →
+    # 显式声明 bash，脚本与校验步骤才能一致
+    defaults:
+      run:
+        shell: bash
     # debootstrap 需要在 chroot 里挂载 /proc /dev /sys → 容器必须 privileged
     container:
       image: debian:trixie-slim
@@ -150,7 +155,9 @@ jobs:
         run: |
           set -eux
           cat build/out/manifest.txt
-          ( cd build/out && sha256sum -c <(sed -n '/^--- sha256 ---$/,$p' manifest.txt | tail -n +2) )
+          # 校验清单里的 sha256（不依赖 bash 进程替换，sh 下也能跑）
+          sed -n '/^--- sha256 ---$/,$p' build/out/manifest.txt | tail -n +2 > build/out/SHA256SUMS
+          ( cd build/out && sha256sum -c SHA256SUMS )
           file build/out/bootloaders/grub2ia32.efi build/out/bootloaders/grubx64.efi
           mdir -/ -i build/out/esp.img ::/EFI/BOOT | tee build/out/esp-listing.txt
           mdir -/ -i build/out/esp.img ::/ | tee -a build/out/esp-listing.txt
