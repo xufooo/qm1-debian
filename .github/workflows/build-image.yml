@@ -50,7 +50,7 @@ jobs:
           apt-get update -qq
           apt-get install -y -qq --no-install-recommends \
             debootstrap mtools dosfstools e2fsprogs fdisk util-linux \
-            grub2-common file ca-certificates curl xz-utils zstd procps kmod
+            grub2-common file ca-certificates curl wget gnupg gpgv xz-utils zstd procps kmod
           # 两个架构的 EFI 模块：grub-mkimage 与 .mod 必须同版本，
           # 所以直接用 trixie 仓库里的同一套 grub2-common + grub-efi-*-bin
           dpkg --add-architecture i386

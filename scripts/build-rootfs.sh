@@ -44,6 +44,7 @@ done
 
 require_root
 need_cmd debootstrap "apt install debootstrap"
+need_cmd wget "apt install wget（debootstrap 内部用 wget 取 InRelease，缺它会报 unknown location）"
 need_cmd mount
 
 # debootstrap 内部会 cd 进目标目录，相对路径会失败（"can't cd to build"）→ 一律转绝对路径
