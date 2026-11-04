@@ -195,13 +195,16 @@ fi
 nodrv="$(dmesg 2>/dev/null | grep -ci 'no driver for')"
 if [ "${nodrv:-0}" -gt 0 ]; then
     row WARN "未绑定驱动" "$nodrv 条"
-    dmesg | grep -i 'no driver for' | tail -5 | sed 's/^/      /'
+    grep -i 'no driver for' <<<"$dmesg_out" | tail -5 | sed 's/^/      /'
 else
     row PASS "未绑定驱动" "无"
 fi
-if dmesg 2>/dev/null | grep -qi 'I/O error\|Buffer I/O error'; then
+# 先把 dmesg 收进变量再用 herestring 匹配：管道 + grep -q 在 pipefail 下会因
+# SIGPIPE 返回 141，误判成"没有 I/O 错误"。
+dmesg_out="$(dmesg 2>/dev/null || true)"
+if grep -qi 'I/O error\|Buffer I/O error' <<<"$dmesg_out"; then
     row FAIL "存储 I/O 错误" "dmesg 有 I/O error —— eMMC 或供电可能有问题"
-    dmesg | grep -i 'I/O error\|Buffer I/O error' | tail -5 | sed 's/^/      /'
+    grep -i 'I/O error\|Buffer I/O error' <<<"$dmesg_out" | tail -5 | sed 's/^/      /'
 else
     row PASS "存储 I/O 错误" "无"
 fi

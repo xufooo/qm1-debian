@@ -37,7 +37,9 @@ check_attr() {
     local path="$1" regex="$2" desc="$3"
     local out
     out="$(debugfs -R "stat $path" "$IMG" 2>/dev/null || true)"
-    if printf '%s' "$out" | grep -qE "$regex"; then
+    # 用 herestring 而不是管道：管道里 grep -q 提前退出会给上游发 SIGPIPE，
+    # 本脚本开了 pipefail，管道返回 141 会把"找到了"误判成"没找到"。
+    if grep -qE "$regex" <<<"$out"; then
         printf '  OK   %-46s (%s)\n' "$path" "$desc"
     else
         printf '  FAIL %-46s (%s)\n' "$path" "$desc"
@@ -74,8 +76,9 @@ else
     printf '  FAIL %-46s (%s)\n' "/lib/modules/<ver>" "找不到内核模块目录"
     fail=$((fail + 1))
 fi
+fw_listing="$(debugfs -R "ls -l /lib/firmware" "$IMG" 2>/dev/null || true)"
 for blob in brcmfmac4365-pcie.bin brcmfmac4352-pcie.bin rtl8723a_fw.bin; do
-    if debugfs -R "ls -l /lib/firmware" "$IMG" 2>/dev/null | grep -q "$blob"; then
+    if grep -q "$blob" <<<"$fw_listing"; then
         printf '  OK   %-46s (%s)\n' "/lib/firmware/$blob" "固件 blob"
     else
         printf '  WARN %-46s (%s) —— 无线芯片型号尚未确认，缺 blob 不致命\n' "/lib/firmware/$blob" "固件 blob"

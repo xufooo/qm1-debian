@@ -175,7 +175,8 @@ fw_blob_summary=""
 for blob in brcmfmac4350-pcie.bin brcmfmac4356-pcie.bin brcmfmac4358-pcie.bin \
             brcmfmac4366b-pcie.bin brcmfmac4366c-pcie.bin \
             rtl8723a_fw.bin rtl8723befw.bin rtl8723bs_fw.bin; do
-    if find "$TARGET/lib/firmware" -name "$blob" -print -quit 2>/dev/null | grep -q .; then
+    # find -quit 会让上游管道出 SIGPIPE，这里直接取结果判断
+    if [ -n "$(find "$TARGET/lib/firmware" -name "$blob" -print -quit 2>/dev/null)" ]; then
         fw_blob_summary="$fw_blob_summary $blob:ok"
     else
         fw_blob_summary="$fw_blob_summary $blob:-"

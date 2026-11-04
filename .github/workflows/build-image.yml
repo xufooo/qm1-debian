@@ -215,7 +215,10 @@ jobs:
             printf '%s\n' "$listing" > build/out/initramfs-listing.txt
             echo "initramfs 条目数：$(printf '%s\n' "$listing" | grep -c . || true)"
             for m in sdhci[-_]pci sdhci[-_]acpi mmc[-_]block; do
-              if printf '%s\n' "$listing" | grep -aqE "$m"; then
+              # herestring 而非管道：GitHub 的 bash 默认带 -o pipefail，
+              # 管道里 grep -q 提前退出会让上游收到 SIGPIPE，管道返回 141，
+              # 结果是"明明在清单里"却被判成"缺失"。
+              if grep -aqE "$m" <<<"$listing"; then
                 echo "OK   initramfs 含 $m"
               else
                 echo "::error::initramfs 里没有 $m —— 根盘/ESP 阶段会挂不上"
@@ -255,7 +258,8 @@ jobs:
 
           # 4) firmware 包必须装进镜像
           for p in $QM1_REQUIRED_FIRMWARE; do
-            if chroot "$ROOT" dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed"; then
+            pkg_status="$(chroot "$ROOT" dpkg-query -W -f='${Status}' "$p" 2>/dev/null || true)"
+            if [ "$pkg_status" = "install ok installed" ]; then
               echo "OK   firmware 包 $p"
             else
               echo "::error::firmware 包未装进镜像：$p"
