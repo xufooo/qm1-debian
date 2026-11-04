@@ -1,0 +1,9 @@
+[Unit]
+Description=QM1 hardware self-check
+After=multi-user.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/qm1-selftest
+StandardOutput=journal
+StandardError=journal

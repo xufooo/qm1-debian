@@ -1,0 +1,6 @@
+# zram 压缩交换 —— 2 GiB 内存机器的救命稻草
+# 768 MiB zram(zstd) 可把 agent+浏览器的冷页留在内存里，而不是磨 eMMC
+ALGO=zstd
+SIZE=768
+PRIORITY=100
+SWAP_ON=1

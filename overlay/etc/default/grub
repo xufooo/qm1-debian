@@ -1,0 +1,8 @@
+# 注意：本仓库的 ESP grub.cfg 由 scripts/make-esp.sh 生成，**不使用 update-grub**。
+# 这里保留默认值，仅供人工查看与后续切换到 update-grub 时参考。
+GRUB_TIMEOUT=5
+GRUB_TIMEOUT_STYLE=menu
+GRUB_DISABLE_RECOVERY="true"
+GRUB_DISABLE_OS_PROBER="true"
+GRUB_TERMINAL="console serial"
+GRUB_CMDLINE_LINUX_DEFAULT="console=tty0 console=ttyS0,115200n8 fsck.repair=yes"

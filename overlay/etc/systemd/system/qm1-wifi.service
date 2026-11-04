@@ -1,0 +1,14 @@
+[Unit]
+Description=QM1 Wi-Fi (wpa_supplicant managed)
+After=network.target
+Wants=network.target
+ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant.conf
+
+[Service]
+Type=simple
+ExecStart=/usr/sbin/wpa_supplicant -B -i %i -c /etc/wpa_supplicant/wpa_supplicant.conf
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

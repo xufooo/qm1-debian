@@ -1,0 +1,3 @@
+#!/bin/sh
+# QM1 硬件自检入口（实际脚本在 /usr/local/lib/qm1/drv-selfcheck.sh）
+exec /usr/local/lib/qm1/drv-selfcheck.sh "$@"
