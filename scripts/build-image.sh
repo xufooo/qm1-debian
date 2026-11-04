@@ -90,6 +90,25 @@ bash "$SCRIPT_DIR/make-esp.sh" \
 
 # ---------- 5. 根文件系统 ----------
 ROOT_IMG="$OUT_DIR/rootfs.img"
+
+# 5.1 清空伪文件系统（/dev /proc /sys /run 运行时由内核挂载）。
+#     构建期若挂过这些目录，残留内容会让 mkfs.ext4 -d 无法填充：
+#     "Permission denied while opening ... to copy"（设备节点/套接字无法复制）。
+for d in dev proc sys run; do
+    if [ -d "$ROOTFS/$d" ]; then
+        find "$ROOTFS/$d" -mindepth 1 -delete 2>/dev/null || true
+    fi
+done
+mkdir -p "$ROOTFS"/{dev,proc,sys,run}
+
+# 5.2 诊断：把非常规文件（设备节点/套接字/FIFO）与不可读项打出来，
+#     真出问题时可直接从日志看出是哪一个路径挡住了 populate_fs。
+special="$(find "$ROOTFS" -xdev \( -type b -o -type c -o -type s -o -type p \) -printf '%y %p\n' 2>/dev/null | head -20 || true)"
+if [ -n "$special" ]; then
+    log "警告：根文件系统里仍有非常规文件（会导致 mkfs.ext4 -d 失败）："
+    printf '%s\n' "$special" >&2
+fi
+
 USED_KB="$(du -sk "$ROOTFS" | awk '{print $1}')"
 NEED_KB=$((USED_KB + 1024 * 1024))          # 留 1 GiB 余量
 TARGET_KB=$((ROOT_SIZE_GIB * 1024 * 1024))

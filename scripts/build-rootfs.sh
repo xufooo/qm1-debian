@@ -1,197 +1,125 @@
 #!/usr/bin/env bash
-# build-rootfs.sh — 用 debootstrap 生成 QM1 的 Debian 13 根文件系统
+# build-rootfs.sh — 用 mmdebstrap 构建 QM1 的 Debian 13 根文件系统
 #
-# 目标机器：ASUS QM1-B002（Intel Atom Z3735F / Bay Trail / 2GB RAM / 32GB eMMC）
-# 底座选择：Debian 13 (trixie) amd64 —— 与 Hermes 官方镜像同一用户层；
-#           trixie 的 amd64 基线为 x86-64-v2，Bay Trail（无 AVX）恰好达标。
+# 为什么用 mmdebstrap 而不是 debootstrap：
+#   * mmdebstrap 直接产出 tar，不依赖 debootstrap 那套 chroot 挂载/清理，
+#     也就不会出现"构建期挂进 /dev /proc /sys 的伪文件系统残留进镜像"的问题；
+#   * 定制步骤全部放进 hooks/ 目录（customizeNN.sh），语义清晰、可单独 dry-run；
+#   * 支持 --format=tar，镜像构建阶段可以像 ZYBO 那样
+#     "解包 + mke2fs -d" 一次完成，避免逐个文件复制导致的权限漂移。
 #
-# 用法（需要 root，debootstrap 必须 chroot）：
-#   sudo bash scripts/build-rootfs.sh --out build/rootfs
-#   sudo bash scripts/build-rootfs.sh --out build/rootfs --profile runtime
-#
-# 选项：
-#   --suite trixie            Debian 发行代号（默认 trixie）
-#   --arch  amd64|i386       目标架构（默认 amd64；i386 仅作救援兜底）
-#   --out  DIR               输出目录（默认 build/rootfs）
-#   --profile base|runtime   base=最小可运行系统；runtime=追加浏览器等 agent 运行时依赖
-#   --extra-pkgs "a b c"     追加软件包
-#   --no-drivers             跳过 install-drivers.sh（驱动预置）
+# 用法：
+#   bash scripts/build-rootfs.sh --out build/rootfs --arch amd64 --profile runtime
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 # shellcheck source=lib/common.sh
 source "$SCRIPT_DIR/lib/common.sh"
 
-SUITE="trixie"
-ARCH="amd64"
 OUT="build/rootfs"
+ARCH="amd64"
 PROFILE="base"
-EXTRA_PKGS=""
-RUN_DRIVERS=1
+SUITE="trixie"
+MIRROR="http://deb.debian.org/debian"
+COMPONENTS="main,non-free-firmware"
+HOOKS_DIR="$REPO_ROOT/hooks"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --suite) SUITE="$2"; shift 2 ;;
-        --arch)  ARCH="$2";  shift 2 ;;
-        --out)   OUT="$2";   shift 2 ;;
+        --out) OUT="$2"; shift 2 ;;
+        --arch) ARCH="$2"; shift 2 ;;
         --profile) PROFILE="$2"; shift 2 ;;
-        --extra-pkgs) EXTRA_PKGS="$2"; shift 2 ;;
-        --no-drivers) RUN_DRIVERS=0; shift ;;
-        -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+        --suite) SUITE="$2"; shift 2 ;;
+        --mirror) MIRROR="$2"; shift 2 ;;
+        --components) COMPONENTS="$2"; shift 2 ;;
+        --hooks) HOOKS_DIR="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
 
-require_root
-need_cmd debootstrap "apt install debootstrap"
-need_cmd wget "apt install wget（debootstrap 内部用 wget 取 InRelease，缺它会报 unknown location）"
-need_cmd mount
+need_cmd mmdebstrap "apt install mmdebstrap"
+[ -d "$HOOKS_DIR" ] || die "hooks 目录不存在：$HOOKS_DIR"
 
-# debootstrap 内部会 cd 进目标目录，相对路径会失败（"can't cd to build"）→ 一律转绝对路径
+# 目标目录必须是绝对路径（mmdebstrap 的 TARGET 参数）
 mkdir -p "$(dirname "$OUT")"
 OUT="$(cd "$(dirname "$OUT")" && pwd)/$(basename "$OUT")"
-
-case "$ARCH" in
-    amd64|i386) ;;
-    *) die "仅支持 amd64 / i386（i386 仅作救援兜底，不能承载现代 agent 运行时）" ;;
-esac
+rm -rf "$OUT"
+mkdir -p "$OUT"
 
 # ---------- 包清单 ----------
-# base：最小可运行 + 远程运维 + agent 运行时所需的基础库
-BASE_PKGS=(
-    systemd-sysv systemd-resolved systemd-oomd dbus
-    openssh-server sudo
-    ca-certificates curl wget git gnupg apt-utils
-    kmod initramfs-tools          # modinfo（驱动清单核对）+ update-initramfs（预置启动关键模块）
-    locales tzdata less file
-    iproute2 iputils-ping ethtool dnsutils procps psmisc
-    rsync xz-utils zstd bzip2 tar
-    pciutils usbutils lm-sensors alsa-utils
-    bluez wpasupplicant
-    mmc-utils dosfstools e2fsprogs zram-tools
-    python3 python3-venv
-    ripgrep
-)
-# runtime：headless Chrome + 字体 + 常见运行库（Chromium 依赖会自动带入）
-RUNTIME_PKGS=(
-    chromium
-    fonts-liberation fonts-noto-cjk
-    libnss3 libatk-bridge2.0-0 libatk1.0-0 libcups2 libdrm2 libgbm1
-    libasound2 libxkbcommon0 libxcomposite1 libxdamage1 libxfixes3
-    libxrandr2 libpango-1.0-0 libcairo2
-)
-if [ "$ARCH" = "i386" ]; then
-    RUNTIME_PKGS=()   # 32 位变体不装浏览器与 agent 运行时
+# 基础系统：systemd + 网络 + SSH + 无线 + 存储工具 + agent 运行时前置
+BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sudo,\
+curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
+lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
+dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
+kmod,initramfs-tools,apt-transport-https"
+
+# 运行时（Hermes CLI + headless Chrome）：Chromium 只有 amd64/arm64，32 位变体装不了
+RUNTIME_PKGS_AMD64="chromium,chromium-driver,fonts-liberation,fonts-noto-cjk,\
+libnss3,libgbm1,libasound2,libasound2-plugins,libatk-bridge2.0-0,libgtk-3-0,\
+libx11-xcb1,libdrm2,libxshmfence1,libxkbcommon0,libpango-1.0-0,libcairo2"
+
+case "$ARCH" in
+    amd64) KERNEL_PKGS="linux-image-amd64,linux-headers-amd64" ;;
+    i386)  KERNEL_PKGS="linux-image-i386,linux-headers-i386" ;;
+    *) die "不支持的架构：$ARCH" ;;
+esac
+
+PKGS="$BASE_PKGS,$KERNEL_PKGS"
+if [ "$PROFILE" = "runtime" ] && [ "$ARCH" = "amd64" ]; then
+    PKGS="$PKGS,$RUNTIME_PKGS_AMD64"
+elif [ "$PROFILE" = "runtime" ]; then
+    warn "profile=runtime 但 $ARCH 没有 Chromium 包 —— 32 位变体只能作为救援兜底"
 fi
 
-PKGS=("${BASE_PKGS[@]}")
-if [ "$PROFILE" = "runtime" ]; then
-    PKGS+=("${RUNTIME_PKGS[@]}")
-elif [ "$PROFILE" != "base" ]; then
-    die "--profile 只支持 base / runtime（收到：$PROFILE）"
-fi
-if [ -n "$EXTRA_PKGS" ]; then
-    # shellcheck disable=SC2206
-    PKGS+=($EXTRA_PKGS)
-fi
+log "suite=$SUITE arch=$ARCH profile=$PROFILE components=$COMPONENTS"
+log "包清单：$(echo "$PKGS" | tr ',' '\n' | wc -l) 个"
 
-# ---------- 1. debootstrap ----------
-if [ -e "$OUT" ]; then
-    die "输出目录已存在：$OUT（请先删除，避免半成品混用）"
-fi
-log "debootstrap $SUITE/$ARCH → $OUT（profile=$PROFILE）"
+# ---------- mmdebstrap ----------
+TAR="$OUT.tar"
+rm -f "$TAR"
+export QM1_ARCH="$ARCH"
+export QM1_PROFILE="$PROFILE"
+export QM1_OVERLAY_DIR="$REPO_ROOT/overlay"
+export QM1_SELFCHECK_SRC="$SCRIPT_DIR/drv-selfcheck.sh"
 
-# debootstrap 1.0.141 的位置参数顺序是 <suite> <target> [<mirror> [<script>]]
-# 架构必须用 --arch= 选项传；若把架构当第 3 个位置参数，它会被当成 mirror，
-# 于是报 "E: unknown location amd64/dists/trixie/InRelease"。
-COMPONENTS="main,non-free-firmware"
-MIRROR="${QM1_MIRROR:-http://deb.debian.org/debian}"
-if ! debootstrap --arch="$ARCH" --variant=minbase --components="$COMPONENTS" \
-        "$SUITE" "$OUT" "$MIRROR"; then
-    warn "带 non-free-firmware 组件的 debootstrap 失败，退回仅 main 组件"
-    warn "（此时 firmware-brcm80211 / firmware-realtek 等 firmware 包不可用，Wi-Fi 需另行处理）"
-    rm -rf "$OUT"
-    debootstrap --arch="$ARCH" --variant=minbase --components=main \
-        "$SUITE" "$OUT" "$MIRROR"
+log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"
+if ! mmdebstrap \
+        --variant=minbase \
+        --components="$COMPONENTS" \
+        --architectures="$ARCH" \
+        --include="$PKGS" \
+        --aptopt='Apt::Install-Recommends "true"' \
+        --hook-dir="$HOOKS_DIR" \
+        --format=tar \
+        "$SUITE" "$TAR" "$MIRROR" 2>&1 | tee "$OUT.mmdebstrap.log"; then
+    die "mmdebstrap 失败，日志见 $OUT.mmdebstrap.log"
 fi
 
-cleanup() {
-    log "清理 chroot 挂载点"
-    umount -R "$OUT/dev/pts" 2>/dev/null || true
-    umount "$OUT/dev" 2>/dev/null || true
-    umount "$OUT/sys"  2>/dev/null || true
-    umount "$OUT/proc" 2>/dev/null || true
-    rm -f "$OUT/resolv.conf"
-}
-trap cleanup EXIT
+# ---------- 解包成目录树 ----------
+log "解包 rootfs tar → $OUT"
+tar -xpf "$TAR" -C "$OUT"
+rm -f "$TAR"
 
-# ---------- 2. chroot 环境 ----------
-cp -L /etc/resolv.conf "$OUT/resolv.conf"
-mount -t proc proc "$OUT/proc"
-mount --rbind /sys "$OUT/sys"
-mount --rbind /dev "$OUT/dev"
-mount -t devpts devpts "$OUT/dev/pts"
-
-printf '%s\n' "$SUITE" > "$OUT/etc/debian_version"
-
-# ---------- 3. 基础配置 ----------
-log "配置 locale / 时区 / 主机名"
-in_chroot "$OUT" apt-get update -qq
-in_chroot "$OUT" apt-get install -y -qq --no-install-recommends locales tzdata
-printf 'en_US.UTF-8 UTF-8\n' > "$OUT/etc/locale.gen"
-in_chroot "$OUT" locale-gen
-ln -sf /usr/share/zoneinfo/Asia/Shanghai "$OUT/etc/localtime"
-echo "qm1" > "$OUT/etc/hostname"
-
-log "安装基础包（${#PKGS[@]} 个）"
-in_chroot "$OUT" apt-get install -y -qq --no-install-recommends "${PKGS[@]}"
-
-# 精简：关掉用不上的常驻服务，减小内存与 eMMC 写入
-log "关闭用不上的服务"
-for svc in systemd-resolved avahi-daemon bluetooth systemd-timesyncd; do
-    in_chroot "$OUT" systemctl disable "$svc" >/dev/null 2>&1 || true
+# ---------- 收尾：清空伪文件系统 ----------
+# /dev /proc /sys /run 在运行时由内核挂载，构建期残留会让 mkfs.ext4 -d 无法填充。
+for d in dev proc sys run; do
+    if [ -d "$OUT/$d" ]; then
+        find "$OUT/$d" -mindepth 1 -delete 2>/dev/null || true
+    fi
 done
-in_chroot "$OUT" systemctl enable ssh >/dev/null 2>&1 || true
-in_chroot "$OUT" systemctl enable systemd-oomd >/dev/null 2>&1 || true
-# 首次启动不要等硬件随机数池（有 rngd 更好，但本机无 TPM/urandomd 时用 haveged 亦可；此处仅缩短超时）
-mkdir -p "$OUT/etc/systemd/system.conf.d"
-printf '[Service]\nTimeoutStartSec=30s\n' > "$OUT/etc/systemd/system.conf.d/quick-boot.conf"
+mkdir -p "$OUT"/{dev,proc,sys,run}
 
-# ---------- 4. 驱动与 firmware 预置 ----------
-if [ "$RUN_DRIVERS" = "1" ]; then
-    log "预置驱动与 firmware（install-drivers.sh）"
-    # 把脚本复制进 chroot 后执行（chroot 内没有宿主脚本路径）
-    cp "$SCRIPT_DIR/install-drivers.sh" "$OUT/tmp/install-drivers.sh"
-    chmod +x "$OUT/tmp/install-drivers.sh"
-    in_chroot "$OUT" /tmp/install-drivers.sh --arch "$ARCH" --profile "$PROFILE"
-    rm -f "$OUT/tmp/install-drivers.sh"
-fi
-
-# ---------- 5. overlay 定制层 ----------
-log "应用 overlay 定制层"
-cp -a "$SCRIPT_DIR/../overlay/." "$OUT/"
-
-# 设备端自检脚本（overlay 的 /usr/local/bin/qm1-selftest 依赖此路径）
-mkdir -p "$OUT/usr/local/lib/qm1"
-cp "$SCRIPT_DIR/drv-selfcheck.sh" "$OUT/usr/local/lib/qm1/drv-selfcheck.sh"
-chmod 0755 "$OUT/usr/local/lib/qm1/drv-selfcheck.sh" "$OUT/usr/local/bin/qm1-selftest"
-
-# ---------- 6. 收尾 ----------
-log "清理 apt 缓存与文档"
-in_chroot "$OUT" apt-get clean
-rm -rf "$OUT/usr/share/doc"/* "$OUT/usr/share/man"/* "$OUT/usr/share/info"/* 2>/dev/null || true
-rm -rf "$OUT/var/lib/apt/lists/"*
-rm -f "$OUT/etc/machine-id"
-: > "$OUT/var/lib/dbus/machine-id" 2>/dev/null || true
-
-log "生成清单"
-MANIFEST="${OUT%/}.manifest.txt"
+# ---------- 清单 ----------
+MANIFEST="$OUT/../rootfs-manifest.txt"
 {
-    echo "# qm1-debian rootfs manifest"
-    echo "suite=$SUITE arch=$ARCH profile=$PROFILE"
-    echo "kernel=$(ls "$OUT/lib/modules" 2>/dev/null | tr '\n' ' ')"
-    echo "--- packages ---"
-    chroot "$OUT" dpkg-query -W -f='${Package}=${Version}\n' 2>/dev/null | sort || true
+    echo "# QM1-Debian rootfs manifest"
+    echo "suite=$SUITE arch=$ARCH profile=$PROFILE components=$COMPONENTS"
+    echo "kernel=$(ls -1 "$OUT/lib/modules" 2>/dev/null | sort -V | tail -1)"
+    echo "size_kib=$(du -sk "$OUT" | awk '{print $1}')"
+    echo "--- 已装包 ---"
+    chroot "$OUT" dpkg-query -W -f='${Package}\n' 2>/dev/null | sort || true
 } > "$MANIFEST"
-log "清单：$MANIFEST"
-log "完成：根文件系统位于 $OUT"
+log "清单：$MANIFEST（$(grep -c '' "$MANIFEST") 行）"
+log "完成：$OUT"
