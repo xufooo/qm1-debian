@@ -74,13 +74,28 @@ if [ -n "$KERNEL32" ]; then
 fi
 log "根分区 UUID：$ROOT_UUID${ROOT32_UUID:+ / 32 位：$ROOT32_UUID}"
 
+# 发行版名（菜单标题用）：从 rootfs 的构建信息里读
+SUITE_NAME=""
+if [ -f "$ROOTFS/etc/qm1-build-info" ]; then
+    SUITE_NAME="$(sed -n 's/^suite=//p' "$ROOTFS/etc/qm1-build-info" | head -1)"
+fi
+[ -n "$SUITE_NAME" ] || SUITE_NAME="$ARCH"
+case "$SUITE_NAME" in
+    trixie)   SUITE_LABEL="Debian 13" ;;
+    bookworm) SUITE_LABEL="Debian 12" ;;
+    *)        SUITE_LABEL="$SUITE_NAME" ;;
+esac
+
 # ---------- 4. ESP ----------
 ESP_IMG="$OUT_DIR/esp.img"
-log "组装 ESP"
+log "组装 ESP（arch=$ARCH suite=$SUITE_LABEL）"
 bash "$SCRIPT_DIR/make-esp.sh" \
     --out "$ESP_IMG" \
     --size-mib "$ESP_SIZE_MIB" \
     --bootloaders "$BOOTLOADERS" \
+    --arch "$ARCH" \
+    --suite-amd64 "Debian 13" \
+    --suite-i386 "Debian 12" \
     --kernel "$KERNEL" \
     --initrd "$INITRD" \
     ${KERNEL32:+--kernel32 "$KERNEL32"} \
