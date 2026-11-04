@@ -63,6 +63,10 @@ on:
         type: choice
         options: [base, runtime]
         default: runtime
+      disk_size_gib:
+        description: "整机镜像大小（GiB），应略小于 eMMC 容量（32GB eMMC 建议 30）"
+        type: string
+        default: "30"
       upload_images:
         description: "是否上传镜像产物（体积大，分钟级）"
         type: boolean
@@ -179,7 +183,7 @@ jobs:
 
           # 1) 启动关键驱动必须存在于本镜像内核（module 或 builtin 都算有）
           for m in $QM1_CRITICAL_MODULES; do
-            if grep -qE "^${m}[[:space:]]+(module|builtin)$" build/out/driver-manifest.txt; then
+            if grep -qE "^${m}[[:space:]]+(module|builtin)([[:space:]]|$)" build/out/driver-manifest.txt; then
               echo "OK   关键驱动 $m"
             else
               echo "::error::启动关键驱动缺失：$m（QM1 会认不到 eMMC/ESP，插电起不来）"
@@ -207,7 +211,7 @@ jobs:
 
           # 3) 非关键硬件驱动（缺失只告警，但必须写进清单）
           for m in $QM1_OPTIONAL_MODULES; do
-            if grep -qE "^${m}[[:space:]]+(module|builtin)$" build/out/driver-manifest.txt; then
+            if grep -qE "^${m}[[:space:]]+(module|builtin)([[:space:]]|$)" build/out/driver-manifest.txt; then
               echo "OK   硬件驱动 $m"
             else
               echo "::warning::硬件驱动缺失：$m（不影响启动，但对应外设不可用）"
@@ -257,8 +261,10 @@ jobs:
         run: |
           set -eux
           cat build/rootfs/usr/local/share/qm1/driver-manifest.txt | tee build/out/driver-manifest.txt
-          if grep -q 'MISSING' build/out/driver-manifest.txt; then
-            echo "::warning::驱动清单中有 MISSING 项（多为需 DKMS 的 Realtek 芯片，属预期）"
+          # 清单状态取值：module / builtin / absent
+          if grep -qE '[[:space:]]absent([[:space:]]|$)' build/out/driver-manifest.txt; then
+            echo "::warning::驱动清单中有 absent 项（多为需 DKMS 的 Realtek 芯片，属预期）"
+            grep -E '[[:space:]]absent([[:space:]]|$)' build/out/driver-manifest.txt || true
           fi
 
       - name: Package inventory
@@ -266,6 +272,40 @@ jobs:
           cp build/rootfs-manifest.txt build/out/rootfs-manifest.txt 2>/dev/null || true
           cp build/rootfs.mmdebstrap.log build/out/mmdebstrap.log 2>/dev/null || true
           du -sh build/rootfs | tee build/out/rootfs-size.txt
+
+      - name: Assemble installable disk image
+        run: |
+          set -eux
+          bash scripts/assemble-disk.sh \
+            --esp build/out/esp.img \
+            --root build/out/rootfs.img \
+            --out build/out/qm1-disk.img \
+            --size-gib "${{ inputs.disk_size_gib || 30 }}"
+          cp scripts/install-qm1.sh scripts/provision-agent.sh build/out/
+          # 整盘镜像很大，压缩后再上传
+          zstd -19 -T0 --long=27 -f build/out/qm1-disk.img -o build/out/qm1-disk.img.zst
+          ls -lh build/out/qm1-disk.img.zst
+          sha256sum build/out/qm1-disk.img.zst >> build/out/SHA256SUMS
+
+      - name: Assert runtime payload (profile=runtime)
+        if: inputs.profile == 'runtime' || inputs.profile == ''
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          rc=0
+          # 浏览器（headless Chrome 会话用）
+          [ -x "$ROOT/usr/bin/chromium" ] || { echo "::error::镜像内缺 chromium"; rc=1; }
+          # standalone CPython 3.14（Hermes 官方安装器使用同一类产物）
+          ls -d "$ROOT"/opt/qm1/python/*/bin/python3.14 >/dev/null 2>&1 \
+            || { echo "::error::镜像内缺 standalone CPython 3.14"; rc=1; }
+          # 设备端安装脚本（Hermes 官方安装方式 + systemd 单元）
+          [ -f "$ROOT/usr/local/share/qm1/provision-agent.sh" ] \
+            || { echo "::error::镜像内缺 provision-agent.sh"; rc=1; }
+          # 驱动自检脚本
+          [ -f "$ROOT/usr/local/lib/qm1/drv-selfcheck.sh" ] \
+            || { echo "::error::镜像内缺 drv-selfcheck.sh"; rc=1; }
+          [ "$rc" -eq 0 ] || exit 1
+          echo "运行时载荷检查通过"
 
       - name: Upload build log on failure
         if: failure()

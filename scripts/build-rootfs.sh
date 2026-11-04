@@ -90,6 +90,7 @@ export QM1_ARCH="$ARCH"
 export QM1_PROFILE="$PROFILE"
 export QM1_OVERLAY_DIR="$REPO_ROOT/overlay"
 export QM1_SELFCHECK_SRC="$SCRIPT_DIR/drv-selfcheck.sh"
+export QM1_PROVISION_SRC="$SCRIPT_DIR/provision-agent.sh"
 
 log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"
 if ! mmdebstrap \
