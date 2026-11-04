@@ -45,7 +45,7 @@ sudo bash scripts/build-rootfs.sh --out build/rootfs --profile runtime
 # 2) 生成 ESP + 根文件系统镜像（无需 root）
 bash scripts/build-image.sh --rootfs build/rootfs --out-dir build/out
 
-# 3) 合成整盘镜像（GPT：p1 FAT32 ESP 512MiB + p2 ext4 根）
+# 3) 合成整盘镜像（GPT：p1 = ESP 实际体积的 FAT32 + p2 = ext4 根 + 盘尾 1MiB 给 GPT 备份头）
 bash scripts/assemble-disk.sh --esp build/out/esp.img --root build/out/rootfs.img \
      --out build/qm1-debian13-amd64.img --size-gib 30
 
@@ -113,7 +113,7 @@ Hermes 本体由官方安装器安装（官方用 uv 托管 standalone CPython 3
 分区位置就能引导：
 
 ```bash
-# 先用任意分区工具建 GPT：p1 = 512 MiB FAT32（卷标 QM1ESP），p2 = 其余 ext4（卷标 QM1ROOT）
+# 先用任意分区工具建 GPT：p1 = 与 esp.img 同大的 FAT32（卷标 QM1ESP），p2 = 与 rootfs.img 同大的 ext4（卷标 QM1ROOT）
 sudo dd if=build/out/esp.img   of=/dev/sdX1 bs=1M conv=fsync status=progress
 sudo dd if=build/out/rootfs.img of=/dev/sdX2 bs=1M conv=fsync status=progress
 ```
@@ -176,6 +176,21 @@ sudo /usr/local/bin/qm1-selftest --json   # 机读
 - `lint`：bash 语法检查、shellcheck、可执行位、隐私扫描（禁止本机路径/私人信息）、overlay 完整性。
 - `build-image`：在 `debian:trixie-slim`（privileged）里跑完整构建（mmdebstrap → hooks → 引导器 → ESP → ext4），校验 SHA-256、引导器文件类型、ESP 目录清单、驱动清单，并用 `debugfs` 直接检查 ext4 镜像里的属主/权限与定制文件；手动触发时可选择上传镜像。
 
+最近一次全绿构建的实测结果（amd64 / runtime profile）：
+
+| 项目 | 实测值 |
+|---|---|
+| 根文件系统内核 | `6.12.107+deb13-amd64` |
+| 引导器 | `BOOTIA32.EFI` 425,984 B（PE32 / Intel i386）+ `BOOTX64.EFI` 622,592 B（PE32+ / x86-64） |
+| ESP | 256 MiB FAT32（卷标 `QM1ESP`），内含 grub.cfg + vmlinuz + initrd.img |
+| 根文件系统 | 6 GiB ext4（卷标 `QM1ROOT`），UUID 构建期固定 |
+| 整盘镜像 | 6.25 GiB GPT：p1 256 MiB「EFI System」+ p2 6 GiB「Linux filesystem」，盘尾留 1 MiB 给 GPT 备份头 |
+| 压缩后 | zstd 压缩包约 843 MB（`--long=27`） |
+| 运行时载荷 | Chromium + standalone CPython 3.14 + `provision-agent.sh` + `drv-selfcheck.sh` 均已就位 |
+
+> 整盘镜像按内容大小生成，刷到 32 GB eMMC 后剩余空间不分区；
+> 要铺满时在设备上 extend 分区再 `resize2fs /dev/mmcblk0p2`。
+
 ## 目录结构
 
 ```
@@ -195,6 +210,16 @@ hooks/                   mmdebstrap customize 钩子（在宿主执行，$1 = ch
   customize03-overlay.sh 应用 overlay/ 与设备端自检脚本
 overlay/                 随镜像分发的定制层
 ```
+
+## 构建期踩过的坑（都已在脚本里处理）
+
+- **`sfdisk` 分区类型要写 GUID**：`type=UFS` 不被 util-linux 识别（报 `Failed to add #1 partition: Invalid argument`）；用 p1 = `C12A7328-F81F-11D2-BA4B-00A0C93EC93B`（EFI System）、p2 = `0FC63DAF-8483-4772-8E79-3D69D8477DE4`（Linux filesystem）。
+- **`sfdisk` 的类型名表随 locale 翻译**：非 C locale 下英文类型名会变成"不支持的命令" → 脚本固定 `export LC_ALL=C`，分区规格写文件后 `sfdisk "$OUT" < spec`。
+- **GPT 最后一个分区不能顶到盘尾**（备份分区表在盘尾最后 33 扇区）→ 分区大小按镜像实际体积算，盘尾留 1 MiB。
+- **CI 里 `| grep -q` 会误判**：GitHub 的 bash 默认 `-eo pipefail`，grep 命中后提前退出 → 上游收到 SIGPIPE → 管道返回 141 → 把"存在"判成"缺失"。所有检查改成先捕获输出再用 herestring 匹配。
+- **initramfs 不能用 `zstd -dc` 验证**：装了 intel-microcode 后 initrd 是「early cpio + zstd 主归档」拼接格式 → 用 `lsinitramfs` 列举。
+- **`mkfs.ext4 -d` 前要清空 `/dev` `/proc` `/sys` `/run`**：构建期挂过的伪文件系统残留会让 populate_fs 报 `Permission denied while opening "bind"`。
+- **FAT 上的文件名要能被 8.3 精确表示**：`grub.cfg`→`GRUB.CFG`、`vmlinuz-32` 被截断会让 GRUB 找不到文件 → ESP 内统一用 `vmlinuz` / `initrd.img` / `vmlinuz32` / `initrd32.img`，并用 `mkfs.vfat -F 32`（带长名表）而不是 `mformat`。
 
 ## 已知限制
 
