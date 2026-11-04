@@ -303,7 +303,8 @@ jobs:
             --size-gib "${{ inputs.disk_size_gib || 30 }}"
           cp scripts/install-qm1.sh scripts/provision-agent.sh build/out/
           # 整盘镜像很大，压缩后再上传
-          zstd -19 -T0 --long=27 -f build/out/qm1-disk.img -o build/out/qm1-disk.img.zst
+          # -19 在 6.25GiB 镜像上要跑 ~9.5 分钟，-12 明显更快而体积只大一点
+          zstd -12 -T0 --long=27 -f build/out/qm1-disk.img -o build/out/qm1-disk.img.zst
           ls -lh build/out/qm1-disk.img.zst
           sha256sum build/out/qm1-disk.img.zst >> build/out/SHA256SUMS
 
