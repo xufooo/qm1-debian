@@ -234,8 +234,16 @@ if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
         die "Wi-Fi 模块 deb 安装失败：$_deb_name"
     fi
     rm -f "$TARGET/tmp/$_deb_name"
-    # vermagic 必须与镜像内核一致，否则模块根本加载不了
-    _vm="$(chroot "$TARGET" modinfo -F vermagic r8723bs_qm1 2>/dev/null | awk '{print $1}')"
+    # vermagic 必须与镜像内核一致，否则模块根本加载不了。
+    # 注意 modinfo 必须带 -k <版本>：chroot 里的 uname -r 是**构建机**的内核版本
+    # （CI 容器 / 宿主），不是镜像里的内核，不指定就会去错目录里找模块。
+    _ko="$TARGET/lib/modules/$_img_kver/extra/rtl8723bs/r8723bs_qm1.ko"
+    [ -f "$_ko" ] || die "装完 deb 但镜像里没有 $_ko（模块包布局不对）"
+    _vm="$(chroot "$TARGET" modinfo -k "$_img_kver" -F vermagic r8723bs_qm1 2>/dev/null | awk '{print $1}')"
+    if [ -z "$_vm" ]; then
+        # 兜底：直接从 .ko 的 .modinfo 段里读（不依赖 chroot 里的 modinfo）
+        _vm="$(grep -ao 'vermagic=[^ ]*' "$_ko" 2>/dev/null | head -1 | cut -d= -f2)"
+    fi
     if [ -z "$_vm" ]; then
         die "装完 deb 仍读不到 r8723bs_qm1 的 vermagic（模块名或 .modinfo 不对）"
     fi
