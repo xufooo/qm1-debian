@@ -1,0 +1,121 @@
+name: build-image
+
+on:
+  workflow_dispatch:
+    inputs:
+      arch:
+        description: "目标架构（i386 仅作救援兜底，不能承载现代 agent 运行时）"
+        type: choice
+        options: [amd64, i386]
+        default: amd64
+      profile:
+        description: "base = 最小可运行；runtime = 追加 Chromium 等 agent 运行时依赖"
+        type: choice
+        options: [base, runtime]
+        default: runtime
+      upload_images:
+        description: "是否上传镜像产物（体积大，分钟级）"
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - "scripts/**"
+      - "overlay/**"
+      - ".github/workflows/build-image.yml"
+  schedule:
+    # 每周一 03:00 UTC —— 验证 Debian 仓库侧变化没有把构建打断
+    - cron: "0 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # debootstrap 需要在 chroot 里挂载 /proc /dev /sys → 容器必须 privileged
+    container:
+      image: debian:trixie-slim
+      options: --privileged
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            debootstrap mtools dosfstools e2fsprogs fdisk util-linux \
+            grub2-common file ca-certificates curl xz-utils zstd procps kmod
+          # 两个架构的 EFI 模块：grub-mkimage 与 .mod 必须同版本，
+          # 所以直接用 trixie 仓库里的同一套 grub2-common + grub-efi-*-bin
+          dpkg --add-architecture i386
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            grub-efi-ia32-bin:i386 grub-efi-amd64-bin:amd64
+
+      - name: Build root filesystem (debootstrap)
+        run: |
+          bash scripts/build-rootfs.sh \
+            --out build/rootfs \
+            --arch "${{ inputs.arch || 'amd64' }}" \
+            --profile "${{ inputs.profile || 'runtime' }}"
+
+      - name: Build image artifacts (ESP + rootfs + manifest)
+        run: |
+          bash scripts/build-image.sh \
+            --rootfs build/rootfs \
+            --out-dir build/out \
+            --arch "${{ inputs.arch || 'amd64' }}" \
+            --profile "${{ inputs.profile || 'runtime' }}"
+
+      - name: Verify artifacts
+        run: |
+          set -eux
+          cat build/out/manifest.txt
+          ( cd build/out && sha256sum -c <(sed -n '/^--- sha256 ---$/,$p' manifest.txt | tail -n +2) )
+          file build/out/bootloaders/grub2ia32.efi build/out/bootloaders/grubx64.efi
+          mdir -/ -i build/out/esp.img ::/EFI/BOOT | tee build/out/esp-listing.txt
+          mdir -/ -i build/out/esp.img ::/ | tee -a build/out/esp-listing.txt
+          for f in BOOTIA32.EFI BOOTX64.EFI grub.cfg ; do
+            grep -q "$f" build/out/esp-listing.txt || { echo "::error::ESP 缺少 $f"; exit 1; }
+          done
+          grep -q 'vmlinuz' build/out/esp-listing.txt || { echo "::error::ESP 缺少内核"; exit 1; }
+
+      - name: Driver manifest review
+        run: |
+          set -eux
+          cat build/rootfs/usr/local/share/qm1/driver-manifest.txt | tee build/out/driver-manifest.txt
+          if grep -q 'MISSING' build/out/driver-manifest.txt; then
+            echo "::warning::驱动清单中有 MISSING 项（多为需 DKMS 的 Realtek 芯片，属预期）"
+          fi
+
+      - name: Package inventory
+        run: |
+          cp build/rootfs.manifest.txt build/out/rootfs-manifest.txt 2>/dev/null || true
+          du -sh build/rootfs | tee build/out/rootfs-size.txt
+
+      - name: Upload metadata artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-image-metadata-${{ inputs.arch || 'amd64' }}-${{ inputs.profile || 'runtime' }}
+          path: |
+            build/out/manifest.txt
+            build/out/driver-manifest.txt
+            build/out/esp-listing.txt
+            build/out/rootfs-manifest.txt
+            build/out/rootfs-size.txt
+            build/out/bootloaders/
+
+      - name: Upload image artifacts (opt-in)
+        if: inputs.upload_images == true
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-images-${{ inputs.arch || 'amd64' }}
+          path: build/out/
+          compression-level: 9
+          retention-days: 7

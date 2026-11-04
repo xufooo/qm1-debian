@@ -1,0 +1,66 @@
+name: lint
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  shell-and-hygiene:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Bash syntax check
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          files=(scripts/*.sh scripts/lib/*.sh)
+          [ "${#files[@]}" -gt 0 ] || { echo "::error::没有找到脚本"; exit 1; }
+          for f in "${files[@]}"; do
+            bash -n "$f"
+            echo "ok: $f"
+          done
+
+      - name: ShellCheck
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq shellcheck
+          shellcheck -x -S warning scripts/*.sh scripts/lib/*.sh
+
+      - name: Scripts are executable
+        run: |
+          set -euo pipefail
+          for f in scripts/*.sh; do
+            [ -x "$f" ] || { echo "::error::$f 不可执行（需 chmod +x）"; exit 1; }
+          done
+          echo "all scripts executable"
+
+      - name: Privacy scan (no local paths / private strings)
+        run: |
+          set -euo pipefail
+          if grep -rInE '(/home/[a-z]|/Users/|gmail\.com|qq\.com|viking://|OpenViking|BEGIN [A-Z ]*PRIVATE KEY)' \
+               --exclude-dir=.git . ; then
+            echo "::error::仓库中出现疑似本机路径或私人信息"
+            exit 1
+          fi
+          echo "privacy scan clean"
+
+      - name: Overlay sanity (required files present)
+        run: |
+          set -euo pipefail
+          for f in \
+            overlay/etc/sysctl.d/90-qm1.conf \
+            overlay/etc/default/zramswap \
+            overlay/etc/wpa_supplicant/wpa_supplicant.conf \
+            overlay/usr/local/bin/qm1-selftest \
+            scripts/grub.cfg.example \
+            scripts/drv-selfcheck.sh ; do
+            [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
+          done
+          echo "overlay ok"
