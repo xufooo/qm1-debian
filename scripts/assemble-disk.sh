@@ -20,6 +20,8 @@
 #
 # --size-gib 是上限（默认 30，够 32GB eMMC）；实际镜像按内容大小生成。
 set -euo pipefail
+# 固定 locale：sfdisk 的分区类型名表随 locale 变化，非 C locale 下英文类型名会失效
+export LC_ALL=C
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib/common.sh
@@ -59,8 +61,21 @@ MAX_MIB=$(( SIZE_GIB * 1024 ))
 
 truncate -s "${DISK_MIB}M" "$OUT"
 log "写分区表：p1 ${ESP_MIB}MiB (FAT32/UFS) + p2 ${ROOT_MIB}MiB (Linux)，盘尾留 1MiB 给备份 GPT"
-printf 'label: gpt\nstart=1MiB, size=%sMiB, type=UFS\nstart=%sMiB, size=%sMiB, type=Linux\n' \
-    "$ESP_MIB" "$ROOT_START_MIB" "$ROOT_MIB" | sfdisk "$OUT" >/dev/null
+# p1 用 EFI System Partition 类型 GUID，p2 用 Linux filesystem 类型 GUID。
+# 两个坑：
+#   1) util-linux 的 sfdisk 不认 "UFS"/"Linux" 这类类型名（UFS 直接报
+#      "Failed to add #1 partition: Invalid argument"），写 GUID 才稳；
+#   2) 类型名表会随 locale 翻译，非 C locale 下英文名会变成"不支持的命令"。
+#      因此固定 LC_ALL=C，并把分区规格写进文件再喂给 sfdisk（管道 + printf
+#      在某些 locale 下会喂出坏行）。
+SPEC="$(mktemp)"
+trap 'rm -f "$SPEC"' EXIT
+{
+    echo "label: gpt"
+    echo "start=1MiB, size=${ESP_MIB}MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+    echo "start=${ROOT_START_MIB}MiB, size=${ROOT_MIB}MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+} > "$SPEC"
+LC_ALL=C sfdisk "$OUT" < "$SPEC" >/dev/null
 
 log "写入 ESP"
 dd if="$ESP" of="$OUT" bs=1M seek=1 conv=notrunc status=none
