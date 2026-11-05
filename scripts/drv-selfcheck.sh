@@ -212,9 +212,17 @@ if [ -d /sys/class/bluetooth ]; then
         [ -e "$b" ] || continue
         bt="$bt $(basename "$b")"
     done
-    row PASS "蓝牙" "$bt"
+    if [ -n "$bt" ]; then
+        row PASS "蓝牙" "$bt"
+    else
+        row WARN "蓝牙" "/sys/class/bluetooth 存在但没有 hci 设备"
+    fi
 else
-    row WARN "蓝牙" "未发现蓝牙适配器"
+    if [ -x /usr/sbin/rtk_hciattach ]; then
+        row WARN "蓝牙" "未发现蓝牙适配器 —— 厂商包已装（rtk_hciattach），但内核没有 hci 设备；查 systemctl status qm1-bluetooth 与 dmesg 里的 ACPI OBDA8723"
+    else
+        row WARN "蓝牙" "未发现蓝牙适配器 —— 内置蓝牙是 ACPI UART，需要 qm1-rtl8723bs-bt 包（rtk_hciattach）才能初始化"
+    fi
 fi
 
 if [ -d /sys/class/rtc ]; then
