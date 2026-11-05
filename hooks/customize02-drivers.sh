@@ -333,6 +333,11 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     #   （里面还有 options rtw88_qm1 disable_lps_deep=y 等参数）。
     #   这里**只补缺失的行，不覆盖整个文件** —— 覆盖掉会把那些参数弄丢，
     #   而 CI 的包内容校验正是按这些参数断言的。
+    #
+    #   r8723bs_qm1（打了 P1–P5 补丁的树外 staging 模块）也要挡：
+    #   它带的是**同一个** SDIO device id（0x024c:0xb723），udev 照样会
+    #   按 modalias 抢先加载它 —— 那就等于换了个名字的老驱动，
+    #   永久卡死路径一条没少。
     _iso_conf="$TARGET/etc/modprobe.d/qm1-rtw88-8723bs.conf"
     mkdir -p "$TARGET/etc/modprobe.d"
     if [ ! -f "$_iso_conf" ]; then
@@ -345,6 +350,8 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     for _iso_line in \
         "blacklist r8723bs" \
         "install r8723bs /bin/false" \
+        "blacklist r8723bs_qm1" \
+        "install r8723bs_qm1 /bin/false" \
         "blacklist rtw88_core" \
         "blacklist rtw88_sdio" \
         "blacklist rtw88_usb" \
@@ -353,7 +360,34 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
             || printf '%s\n' "$_iso_line" >> "$_iso_conf"
     done
     chmod 0644 "$_iso_conf"
-    log "已补齐隔离配置：$_iso_conf（挡住树内 r8723bs 与树内 rtw88）"
+    log "已补齐隔离配置：$_iso_conf（挡住树内 r8723bs、树外 r8723bs_qm1 与树内 rtw88）"
+
+    # 模块包自带的 qm1-rtw88-8723bs.service 做的是「运行时兜底」：
+    # ExecStartPre=-/sbin/modprobe -r r8723bs 把可能已经被 udev 抢先
+    # 加载的树内驱动卸掉，再加载出货模块。
+    # ★ 以前这个单元**从来没有被 enable** ⇒ 那个 modprobe -r 永远不执行，
+    #   于是它在包里躺了很久，看着像有兜底、实际一点作用没有。
+    #   构建期 chroot 里 systemctl enable 不可靠，所以这里直接建 wants 软链。
+    _rtw88_unit="/lib/systemd/system/qm1-rtw88-8723bs.service"
+    if [ -f "$TARGET$_rtw88_unit" ]; then
+        mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
+        ln -sf "$_rtw88_unit" \
+            "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-rtw88-8723bs.service"
+        # 链接目标是绝对路径 ⇒ 校验时必须把它拼回 $TARGET 再判断，
+        # 否则内核会拿宿主机去解析，宿主机上当然没有这个单元。
+        _rtw88_link="$TARGET/etc/systemd/system/multi-user.target.wants/qm1-rtw88-8723bs.service"
+        _rtw88_tgt="$(readlink "$_rtw88_link" 2>/dev/null || true)"
+        case "$_rtw88_tgt" in
+            /*) _rtw88_resolved="$TARGET$_rtw88_tgt" ;;
+            *)  _rtw88_resolved="$(dirname "$_rtw88_link")/$_rtw88_tgt" ;;
+        esac
+        [ -e "$_rtw88_resolved" ] \
+            || die "qm1-rtw88-8723bs.service 的 wants 链接悬空：$_rtw88_unit"
+        log "已启用 qm1-rtw88-8723bs.service（开机卸载树内 r8723bs 并加载 $_sdio_mod）"
+    else
+        warn "模块包里没有 $_rtw88_unit —— 运行时兜底不可用（静态隔离仍然有效）"
+    fi
+
     # modules-load.d：换成回移模块，去掉 staging 驱动与补丁 staging 模块
     sed -i -E '/^r8723bs(_qm1)?$/d' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
     printf '%s\n' "$_sdio_mod" >> "$TARGET/etc/modules-load.d/qm1-hardware.conf"
@@ -362,8 +396,32 @@ else
     if [ -n "${QM1_RTW88_MODULE_DEB:-}" ]; then
         die "QM1_RTW88_MODULE_DEB 指向的文件不存在：$QM1_RTW88_MODULE_DEB"
     fi
-    warn "未提供 QM1_RTW88_MODULE_DEB：镜像里没有 rtw88 回移模块，Wi-Fi 仍靠有永久卡死路径的 staging 驱动"
-    RTW88_MODULE_STATE="absent"
+    # ★ 这里原来是 warn —— 于是「模块没编出来 / 没传进来」的流水线会**照常
+    #   产出一个镜像**，而那个镜像里的 Wi-Fi 是发行版树内 r8723bs：
+    #   带 4 条永久卡死路径（丢一次 SDIO 中断即可能永久断流），
+    #   而且这台机没有 RJ45、Wi-Fi 是唯一的主联网链路 ⇒ 装上去就是一台
+    #   「看着能开机、一用就断流」的机器。
+    #   Wi-Fi 是这台机的主链路 ⇒ 出货镜像里没有任何自定义驱动 = 构建失败。
+    #   确实要出「无自定义驱动」的通用镜像时，显式设
+    #   QM1_ALLOW_NO_WIFI_MODULE=1 放行（并在清单里如实标 absent）。
+    #
+    #   注意：4b 已经装上「打了 P1–P5 补丁的树外 staging 模块」时，
+    #   本分支只是回退路径（CI 里 rtw88 模块构建失败就落到这里），
+    #   那是有自定义驱动的，不算失败 —— 所以先看 WIFI_MODULE_STATE。
+    case "${WIFI_MODULE_STATE:-absent}" in
+        installed:*)
+            warn "未提供 QM1_RTW88_MODULE_DEB：回退到打了补丁的树外 staging 模块（${WIFI_MODULE_STATE#installed:}）"
+            RTW88_MODULE_STATE="absent"
+            ;;
+        *)
+            if [ "${QM1_ALLOW_NO_WIFI_MODULE:-0}" = "1" ]; then
+                warn "QM1_ALLOW_NO_WIFI_MODULE=1：本次明确放行「无自定义 Wi-Fi 模块」的镜像（Wi-Fi 仍是发行版树内 r8723bs）"
+                RTW88_MODULE_STATE="absent"
+            else
+                die "未提供 QM1_RTW88_MODULE_DEB，镜像里也没有打了补丁的树外 Wi-Fi 模块：Wi-Fi 只能靠有永久卡死路径的树内 r8723bs —— 拒绝产出这样的镜像（要放行请设 QM1_ALLOW_NO_WIFI_MODULE=1）"
+            fi
+            ;;
+    esac
 fi
 
 # ---------- 4d. 蓝牙：RTL8723BS 的 BT 部分（内核 hci_uart + btrtl + 发行版固件） ----------

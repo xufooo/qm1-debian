@@ -303,6 +303,25 @@ jobs:
             grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
               || { echo "::error::modprobe 配置里没有 blacklist $m（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
           done
+          # ★ 打了 P1–P5 补丁的树外 staging 模块 r8723bs_qm1 也要挡：
+          #   它带的是**同一个** SDIO device id（0x024c:0xb723），udev 照样会
+          #   按 modalias 抢先加载它 —— 那就等于换了个名字的老驱动，
+          #   永久卡死路径一条没少（现象：装了根治模块却仍在用老驱动）。
+          for m in r8723bs_qm1; do
+            grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+              || { echo "::error::modprobe 配置里没有 blacklist $m（树外 staging 模块会抢 SDIO 设备）"; exit 1; }
+            grep -qx "install $m /bin/false" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+              || { echo "::error::modprobe 配置里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
+          done
+          # ★ 模块包自带的 qm1-rtw88-8723bs.service 必须真的被启用：
+          #   它的 ExecStartPre=-/sbin/modprobe -r r8723bs 是运行时兜底
+          #   （万一树内驱动已经被抢先加载）。以前这个单元从来没被 enable，
+          #   那个 modprobe -r 永远不执行 —— 看着有兜底、实际一点作用没有。
+          U="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-rtw88-8723bs.service"
+          [ -L "$U" ] \
+            || { echo "::error::qm1-rtw88-8723bs.service 没有被启用（运行时兜底是空的）"; exit 1; }
+          [ -e "$U" ] \
+            || { echo "::error::qm1-rtw88-8723bs.service 的 wants 链接是悬空的"; exit 1; }
           # modprobe 里的 options 只能写 rtw_core 真实存在的参数，写错参数会让
           # modprobe 直接拒绝加载模块（Invalid argument）。
           for p in disable_lps_deep support_bf debug_mask; do

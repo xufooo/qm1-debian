@@ -263,7 +263,14 @@ assert_tx_probe_timeout() {   # assert_tx_probe_timeout <rtw88/tx.h>
 tree_exports_symbol() {   # tree_exports_symbol <symbol>
     local sym="$1" sv="$KSRC/Module.symvers"
     [ -f "$sv" ] || return 1
-    awk -v s="$sym" '$2 == s { print $3 }' "$sv" | grep -q '^rtw88'
+    # 不要写成 `awk ... | grep -q '^rtw88'`：grep -q 命中即退出，
+    # 而 awk 还在继续扫 Module.symvers（同一个符号可能由多个模块导出），
+    # 后续写入会拿到 EPIPE/SIGPIPE(141)；在 set -o pipefail 下整条管道
+    # 的退出码就变成 141 —— 「符号存在」会被误判成「不存在」。
+    # 先把 awk 的输出收进 shell 变量，管道里就只剩一次很短的写入。
+    local exporters
+    exporters="$(awk -v s="$sym" '$2 == s { print $3 }' "$sv")" || return 1
+    printf '%s\n' "$exporters" | grep -q '^rtw88'
 }
 
 # ---------------------------------------------------------------------------

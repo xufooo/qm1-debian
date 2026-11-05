@@ -207,6 +207,28 @@ for d in dev proc sys run; do
 done
 mkdir -p "$OUT"/{dev,proc,sys,run}
 
+# ---------- DNS：/etc/resolv.conf 指向 systemd-resolved 的 stub ----------
+# ★ 为什么这一步放在这里，而不是 hooks/customize01-base.sh：
+#   构建期 chroot 里并没有运行 systemd-resolved，它的 stub 只对
+#   127.0.0.53 有效，而 chroot 里那个地址上什么都没有。在 hook 里换掉
+#   mmdebstrap 配好的真实 resolver，后面还要联网的 hook02（装固定内核）
+#   与 hook04（装 Chromium / uv）就会一片 "Temporary failure resolving
+#   'deb.debian.org'"，构建直接失败（CI 42048147510 就是这么挂的）。
+#   所以构建全程沿用 mmdebstrap 配的真实 resolver，等四个 hook 全跑完、
+#   解包出最终根文件系统之后再换成 stub —— 设备开机由 systemd-resolved 接管。
+#
+# 为什么非换不可：Debian 13 的 systemd 与 systemd-resolved 两个包都不带
+# /etc/resolv.conf（systemd-resolved 只有 /usr/lib/systemd/resolv.conf 这个
+# stub），而 systemd-networkd 自己不写 /etc/resolv.conf ⇒ 不换就没有 DNS
+# 数据源 ⇒ systemd-timesyncd 拿不到时间（默认 NTP 服务器是域名）⇒ 时钟停在
+# 1970 ⇒ 所有 TLS 证书校验失败。
+if [ -f "$OUT/usr/lib/systemd/resolv.conf" ]; then
+    ln -sf /usr/lib/systemd/resolv.conf "$OUT/etc/resolv.conf"
+    log "/etc/resolv.conf → /usr/lib/systemd/resolv.conf（systemd-resolved stub）"
+else
+    die "镜像里没有 /usr/lib/systemd/resolv.conf（systemd-resolved 的 stub）—— 出货镜像将没有 DNS 数据源"
+fi
+
 # ---------- 构建信息（供后续脚本读取发行版/架构/内核版本） ----------
 mkdir -p "$OUT/etc"
 KERNEL_INSTALLED="$(ls -1 "$OUT/lib/modules" 2>/dev/null | sort -V | tail -1)"

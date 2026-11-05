@@ -66,8 +66,19 @@ enable_overlay_unit() {
     ln -sf "$_src" "$TARGET/etc/systemd/system/$_wants.wants/$_link_name"
 
     # 悬空链接是这次要根除的病根 —— 建完必须验一次。
-    if [ ! -e "$TARGET/etc/systemd/system/$_wants.wants/$_link_name" ]; then
-        echo "[hook03][fail] wants 链接悬空：$_wants.wants/$_link_name -> $_src"
+    #
+    # ★ 链接目标是**绝对路径**（/etc/systemd/system/<unit>），所以不能用
+    #   `[ -e "$TARGET/.../wants/<name>" ]` 去验：那样内核会拿**宿主机**的根
+    #   去解析那个绝对路径，宿主机上当然没有这个单元 ⇒ 一律判成「悬空」，
+    #   构建必挂。必须把链接目标拼回 $TARGET 再判断。
+    _link="$TARGET/etc/systemd/system/$_wants.wants/$_link_name"
+    _tgt="$(readlink "$_link" 2>/dev/null || true)"
+    case "$_tgt" in
+        /*) _resolved="$TARGET$_tgt" ;;
+        *)  _resolved="$(dirname "$_link")/$_tgt" ;;
+    esac
+    if [ ! -e "$_resolved" ]; then
+        echo "[hook03][fail] wants 链接悬空：$_wants.wants/$_link_name -> $_tgt"
         exit 1
     fi
     echo "[hook03] 已启用 $_link_name（$_wants.wants -> $_src）"

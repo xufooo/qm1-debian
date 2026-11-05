@@ -72,13 +72,22 @@ enable_unit systemd-oomd.service multi-user.target
 #     systemd-timesyncd 拿不到时间（它的默认 NTP 服务器是域名）⇒ 时钟停在 1970
 #     ⇒ 所有 HTTPS/TLS 证书校验失败 ⇒ agent 一条命令都跑不了。
 #   修法：开 systemd-resolved，并把 /etc/resolv.conf 指向它的 stub。
+#
+# ★ 但**不在这里换 /etc/resolv.conf**：
+#   本 hook 跑在 mmdebstrap 的构建期 chroot 里，chroot 里并没有运行
+#   systemd-resolved —— 它的 stub 是给 127.0.0.53 用的，而 chroot 里
+#   那个地址上什么都没有。
+#   在这里换掉 mmdebstrap 配好的真实 resolver，后面还要联网的 hook02
+#   （装内核 linux-image-6.12.113）与 hook04（装 Chromium / uv）就会
+#   一片 "Temporary failure resolving 'deb.debian.org'"，构建直接失败。
+#   （2026-11-05 的 CI 42048147510 就是这么挂的。）
+#   所以真正的替换放在 scripts/build-rootfs.sh 里 —— 等 mmdebstrap 把
+#   四个 hook 全部跑完、解包出最终根文件系统之后再换。
 enable_unit systemd-networkd.service multi-user.target
 enable_unit systemd-resolved.service multi-user.target
-if [ -f "$TARGET/usr/lib/systemd/resolv.conf" ]; then
-    ln -sf /usr/lib/systemd/resolv.conf "$TARGET/etc/resolv.conf"
-    echo "[hook01] /etc/resolv.conf → /usr/lib/systemd/resolv.conf（systemd-resolved stub）"
-else
-    echo "[hook01][warn] 找不到 /usr/lib/systemd/resolv.conf —— /etc/resolv.conf 未配置" >&2
+if [ ! -f "$TARGET/usr/lib/systemd/resolv.conf" ]; then
+    echo "[hook01][fail] 镜像里没有 /usr/lib/systemd/resolv.conf（systemd-resolved 的 stub）—— 出货镜像将没有 DNS 数据源" >&2
+    exit 1
 fi
 # avahi-daemon 保持关闭（2GB 内存，少一个常驻服务）；resolved 不再 disable。
 chroot "$TARGET" systemctl disable avahi-daemon >/dev/null 2>&1 || true
