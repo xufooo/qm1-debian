@@ -233,7 +233,51 @@ if [ -d /sys/class/rtc ]; then
     done
     row PASS "RTC" "$rtc"
 else
-    row WARN "RTC" "未发现 RTC"
+    # Bay Trail-T 上开着 CONFIG_PINCTRL_BAYTRAIL 可能导致 /dev/rtc0 不出现
+    # （上游邮件列表 2015-07-11 的实证），所以这不一定是故障。
+    row WARN "RTC" "未发现 RTC —— 注意：Bay Trail-T 上 CONFIG_PINCTRL_BAYTRAIL=y 会让 /dev/rtc0 消失（已知取舍，不一定是故障）"
+fi
+
+# C-state 深度：内核参数 intel_idle.max_cstate=1 应把最深空闲态限制在 C1。
+# 依据：Z3735F 在 Bay Trail 的 C-state 冻结 bug 受影响名单内（Ubuntu Launchpad #1471989），
+# 且深 C-state 与 SDIO/eMMC 的 DMA 冲突同源（watchmysys 实测）。
+if [ -d /sys/devices/system/cpu/cpu0/cpuidle ]; then
+    deep=""
+    for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+        [ -e "$s" ] || continue
+        [ "$(cat "$s/disable" 2>/dev/null || echo 0)" = "1" ] || deep="$deep $(basename "$s")"
+    done
+    if [ -z "$deep" ]; then
+        row PASS "C-state" "最深空闲态已限制在 C1（intel_idle.max_cstate=1 生效）"
+    else
+        row WARN "C-state" "以下空闲态仍可用：$deep —— 检查内核参数 intel_idle.max_cstate=1（Bay Trail 冻结 bug 与 eMMC DMA 冲突都跟它有关）"
+    fi
+else
+    row WARN "C-state" "没有 cpuidle 状态目录，无法确认 intel_idle.max_cstate=1 是否生效"
+fi
+
+# 硬件无线开关（rfkill）：内置 Wi-Fi 走 SDIO，若有 rfkill 节点但处于 soft-block，
+# wpa_supplicant 会连不上。
+if [ -d /sys/class/rfkill ]; then
+    rf=""
+    for k in /sys/class/rfkill/rfkill*; do
+        [ -e "$k" ] || continue
+        soft="$(cat "$k/soft" 2>/dev/null || echo '?')"
+        hard="$(cat "$k/hard" 2>/dev/null || echo '?')"
+        rf="$rf $(basename "$k")(soft=$soft,hard=$hard)"
+    done
+    row PASS "rfkill" "$rf"
+else
+    row WARN "rfkill" "没有 rfkill 节点（内置 Wi-Fi 是 SDIO 设备，一般不会有独立开关 —— 若社区反馈过 rfkill-gpio 缺 ACPI id，这属预期）"
+fi
+
+# 声卡拓扑：Bay Trail 的 HDMI 音频走 i915 的 hdmi_lpe_audio，社区有 blacklist 的建议，
+# 但本机模拟输出是否走 realtek codec 需要实机核对。
+if command -v aplay >/dev/null 2>&1; then
+    cards="$(aplay -l 2>/dev/null | grep -c '^card ' || true)"
+    row PASS "声卡" "aplay 看到 ${cards:-0} 张卡（HDMI 音频由 i915 提供，模拟输出取决于 codec）"
+else
+    row WARN "声卡" "没有 aplay（未装 alsa-utils），无法核对声卡拓扑"
 fi
 
 if [ -d /sys/class/thermal ]; then

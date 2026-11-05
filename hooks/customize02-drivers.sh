@@ -402,6 +402,28 @@ log "镜像内核版本：$KVER"
 KCFG="$TARGET/boot/config-$KVER"
 [ -f "$KCFG" ] || warn "没有 $KCFG（内核 config 缺失，驱动状态只能靠 modinfo 判定）"
 
+# 关键内核 config 基线核对（Debian 13 / 6.12.113 实测值，随镜像记录进清单）
+#   CONFIG_IOSF_MBI=y          —— Bay Trail 的 sdhci-acpi 挂死修复（上游 6e1c7d6103fe）
+#                                  真正生效的前提；没有它，eMMC/SD 挂死修复等于没打
+#   CONFIG_X86_INTEL_PSTATE=y  —— intel_pstate 编进内核（Silvermont 支持 5 档 P-state）
+#   CONFIG_X86_ACPI_CPUFREQ=m  —— acpi-cpufreq 作为备选频率驱动
+#   CONFIG_PINCTRL_BAYTRAIL=y  —— Bay Trail-T 上可能导致 /dev/rtc0 不出现（已知取舍）
+KCFG_SUMMARY=""
+for _sym in CONFIG_IOSF_MBI CONFIG_X86_INTEL_PSTATE CONFIG_X86_ACPI_CPUFREQ \
+            CONFIG_PINCTRL_BAYTRAIL CONFIG_MMC_SDHCI_ACPI CONFIG_BT_HCIUART; do
+    if [ -f "$KCFG" ]; then
+        _val="$(grep -E "^${_sym}=" "$KCFG" 2>/dev/null | head -1 | cut -d= -f2)"
+        [ -n "$_val" ] || _val="unset"
+    else
+        _val="no-config"
+    fi
+    KCFG_SUMMARY="$KCFG_SUMMARY $_sym=$_val"
+done
+log "内核 config 基线：$KCFG_SUMMARY"
+if [ -f "$KCFG" ] && ! grep -qE '^CONFIG_IOSF_MBI=y$' "$KCFG"; then
+    warn "CONFIG_IOSF_MBI 不是 y —— Bay Trail 的 sdhci-acpi 挂死修复（6e1c7d6103fe）不会生效"
+fi
+
 # 判断一个驱动在本内核里的状态：
 #   module  = 编成模块（.ko），可 modprobe
 #   builtin = 编进内核（=y），没有 .ko 但功能在
@@ -491,6 +513,8 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
     echo ""
     echo "--- firmware blob 核对 ---"
     echo "$fw_blob_summary"
+    echo "--- 内核 config 关键项 ---"
+    echo "$KCFG_SUMMARY"
     echo "--- 已装 firmware 包 ---"
     echo "installed:${installed_fw:-none}"
     echo "missing:${missing_fw:-none}"

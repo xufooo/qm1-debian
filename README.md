@@ -188,10 +188,19 @@ microSD / U 盘，别先动 eMMC。
 
 **2. 内置 microSD 槽在开机阶段可能不被识别。**
 
-社区记录显示自带 TF 槽「启动的时候识别不了」（单一来源，未实测）。稳妥做法是用
-**外置 USB 读卡器**接 microSD。注意这台机器只有 **1 个 USB-A 口**，
-插了读卡器就没有第二个口留给救援盘或 USB 网卡了 —— 请按需规划。
-（读卡器实测速度约 23 MB/s 读、15–21 MB/s 写；eMMC 写约 44 MB/s。）
+先纠正一个容易搞错的点：**这台机器的 microSD 读卡器挂在 Intel SD Host Controller
+（SDHCI）上，不是 USB 大容量存储**（评测原文「读卡器也是下挂在这个控制器上」）。
+也就是说插卡识别走的是 `sdhci-acpi` 那条路，和 eMMC 同属 SD 主机体系。
+
+社区记录显示自带 TF 槽「启动的时候识别不了」（单一来源，未实测）。可能的原因是
+**卡检测脚的上拉设置**：上游给 Asus T100TA 打过一个 DMI quirk（BIOS 里配 20 kΩ 上拉，
+但 DSDT 写的是 PullNone，于是驱动再补一次上拉），QM1 没有对应的 DMI 条目。
+
+对策：
+- 先插卡看 `dmesg` 有没有 `new SD card`；没有再查 DSDT。
+- 如果内部槽实在不行，用**外置 USB 读卡器**接 microSD（走 `usb-storage`，内核自带、最稳）。
+  注意这台机器只有 **1 个 USB-A 口**，插了读卡器就没有第二个口留给救援盘或 USB 网卡了。
+  （外置读卡器实测速度约 23 MB/s 读、15–21 MB/s 写；eMMC 写约 44 MB/s。）
 
 **3. 无显示器启动可能失败。**
 
@@ -590,7 +599,13 @@ overlay/                 随镜像分发的定制层
   - 若识别为 Broadcom，注意 brcmfmac 的 PCIe 型号还需要对应的 NVRAM（`.txt`）文件，`firmware-brcm80211` 未包含全部型号。
 - **32 位变体用 Debian 12（bookworm）**：Debian 13 起不再提供 i386 内核包（`binary-i386` 里没有 `linux-image-*`，也没有 i386 安装器），所以 i386 变体固定用 bookworm 的 `linux-image-686-pae`（PAE flavour，适配 Bay Trail）。它只能当救援兜底 —— 32 位 x86 的 Node.js 自 v10 起为 Experimental，Hermes 要求的 Python 3.14 也没有 i686 预编译产物。
 - **Bay Trail 无 AVX**：本地 LLM（llama.cpp）会退化到 SSE 路径；无头 agent 编排逻辑几乎不受影响。
-- **这颗 Atom 没有 cpufreq 缩放驱动**（内核无 `CONFIG_ACPI_CPUFREQ`），不是缺驱动，是平台本身没有；长时间满载只能靠散热，长任务建议排队而非并发。
+- **频率缩放的实情**（2026-11-05 按 Debian 13 / 6.12.113 内核 config 实测更正）：平台**有** cpufreq 能力 ——
+  `CONFIG_X86_INTEL_PSTATE=y`（intel_pstate 已编进内核，上游明确支持 Silvermont，5 档 800–1333 MHz）、
+  `CONFIG_X86_ACPI_CPUFREQ=m`（acpi-cpufreq 作备选）、`CONFIG_CPU_FREQ=y`。
+  实机未见缩放，最可能是 ACPI 没暴露可用的 P-state 表（intel_pstate 主动模式需要 `_PSS`）。
+  本项目**保持锁频**（不主动干预频率）：无电池、5V/2A 常供电、不以省电为目标，
+  而锁频能避免「跑一半降频」带来的不确定性。长时间满载仍要靠散热（实测拷机 71 ℃、负载 85 ℃ 触发节流）。
+  另注：老建议 `i915.enable_rc6=0` 上游 2017 年已删除，6.12 上完全无效，不要照抄。
 - 镜像与设备一一对应：根分区 UUID 在构建期固定，克隆到另一台设备需重新构建或改 UUID。
 
 ## 参考案例

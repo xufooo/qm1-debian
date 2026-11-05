@@ -15,6 +15,12 @@
 #   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道（务必保留）
 #   fsck.repair=yes         eMMC 突然掉电后开机自修复
 #   ro                      根以只读挂载，交给 systemd 之后 remount-rw
+#   intel_idle.max_cstate=1 把最深 C-state 限制在 C1。Z3735F 在 Bay Trail 的 C-state
+#                           冻结 bug 受影响名单内（Ubuntu Launchpad #1471989 的 Z3735F
+#                           机器 -110 实证、AskUbuntu 803640、watchmysys 实测博客），
+#                           而「深 C-state + SDIO/eMMC 的 DMA 冲突」是同一个旋钮。
+#                           本机无电池、5V/2A 常供电、不以省电为目标，锁到 C1 只损失
+#                           一点功耗，换来的是不随机冻死（挂死时只能拔电源）。
 
 set timeout=5
 set default=0
@@ -25,7 +31,7 @@ search --label QM1ESP --set=root
 # 发行版名用占位符：Debian 13 起不再提供 i386 内核，32 位系统请用 Debian 12（bookworm），
 # 两边的菜单标题要如实写清楚是哪一版。
 menuentry "QM1 @SUITE_AMD64@ (64-bit amd64)" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd.img
 }
 
@@ -33,6 +39,6 @@ menuentry "QM1 @SUITE_AMD64@ (64-bit amd64)" {
 # 文件名用 8.3 可精确表示的形式（vmlinuz32 / initrd32.img），
 # 这样即使 ESP 卷没有长文件名表（LFN）也能被 GRUB 找到。
 menuentry "QM1 @SUITE_I386@ (32-bit i386)" {
-    linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes
+    linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd32.img
 }

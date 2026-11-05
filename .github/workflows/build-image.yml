@@ -329,6 +329,31 @@ jobs:
           fi
           echo "OK   蓝牙厂商初始化包、固件、服务与开机自启全部就位"
 
+      - name: Assert the kernel config baseline for the Bay Trail quirks
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          KCFG=$(ls "$ROOT"/boot/config-* 2>/dev/null | head -1 || true)
+          [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件"; exit 1; }
+          # CONFIG_IOSF_MBI=y 是 Bay Trail 的 sdhci-acpi 挂死修复（上游 6e1c7d6103fe）
+          # 真正生效的前提 —— 没有它，eMMC/SD 的挂死补丁等于没打。实测 Debian 13
+          # 的 6.12.113+deb13-amd64 为 =y。
+          grep -qE '^CONFIG_IOSF_MBI=y$' "$KCFG" \
+            || { echo "::error::CONFIG_IOSF_MBI 不是 y —— Bay Trail 的 sdhci-acpi 挂死修复不会生效"; exit 1; }
+          echo "OK   CONFIG_IOSF_MBI=y（Bay Trail eMMC/SD 挂死修复生效前提满足）"
+          # 记录其余关键项（不作为失败条件，只作为镜像事实写进产物）
+          for sym in CONFIG_X86_INTEL_PSTATE CONFIG_X86_ACPI_CPUFREQ CONFIG_PINCTRL_BAYTRAIL \
+                     CONFIG_MMC_SDHCI_ACPI CONFIG_BT_HCIUART CONFIG_X86_ACPI_CPUFREQ; do
+            val=$(grep -E "^${sym}=" "$KCFG" | head -1 | cut -d= -f2 || true)
+            echo "INFO $sym=${val:-unset}"
+          done
+          # 内核参数必须带上 C-state 限制（Bay Trail C-state 冻结 bug 受影响名单含 Z3735F）
+          grep -q 'intel_idle.max_cstate=1' scripts/grub.cfg.example \
+            || { echo "::error::scripts/grub.cfg.example 缺少 intel_idle.max_cstate=1"; exit 1; }
+          grep -q 'intel_idle.max_cstate=1' scripts/grub-installer.cfg.example \
+            || { echo "::error::scripts/grub-installer.cfg.example 缺少 intel_idle.max_cstate=1"; exit 1; }
+          echo "OK   内核参数含 intel_idle.max_cstate=1"
+
       - name: Assert the first-boot provisioning is inside the image
         run: |
           set -eu
