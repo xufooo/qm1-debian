@@ -379,7 +379,13 @@ if [ -r /proc/meminfo ]; then
 fi
 if [ -r /proc/swaps ]; then
     swap_mib="$(awk 'NR>1 && $1!="Filename"{s+=$3} END{printf "%.0f", s/1024}' /proc/swaps)"
-    row PASS "交换" "${swap_mib:-0} MiB（zram 建议 768 MiB）"
+    # 以前这里一律 PASS —— 于是"zram 根本没启用"这件事永远查不出来
+    # （配置在 /etc/default/zramswap 不等于 zram 设备在跑）。
+    if [ "${swap_mib:-0}" -ge 64 ]; then
+        row PASS "交换" "${swap_mib} MiB（zram 建议 768 MiB）"
+    else
+        row FAIL "交换" "${swap_mib:-0} MiB —— 几乎没有交换空间（zram 没起来？检查 zramswap.service）"
+    fi
 fi
 df -h / | tail -1 | awk '{printf "  %-4s 根分区空间 %s 已用 / %s 可用\n", "PASS", $3, $4}' >/dev/null
 if have df; then

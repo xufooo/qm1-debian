@@ -117,7 +117,14 @@ fi
     echo "network={"
     echo "    ssid=$(qm1_wpa_ssid_value "$SSID")"
     [ -n "$PSK_LINE" ] && echo "$PSK_LINE"
-    echo "    key_mgmt=WPA-PSK"
+    # 没有 psk 就是开放网络 ⇒ key_mgmt 必须是 NONE。
+    # 写成 WPA-PSK 又不带 psk，wpa_supplicant 会拒绝整段 network 块
+    # （而且是"连不上"这种看不出原因的现象）。
+    if [ -n "$PSK_LINE" ]; then
+        echo "    key_mgmt=WPA-PSK"
+    else
+        echo "    key_mgmt=NONE"
+    fi
     echo "}"
 } > "$OUT/wpa_supplicant.conf"
 chmod 0600 "$OUT/wpa_supplicant.conf"

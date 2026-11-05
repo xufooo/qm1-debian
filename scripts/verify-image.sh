@@ -86,6 +86,13 @@ check_attr /usr/bin/sudo   'Mode: *04755' "sudo 保留 setuid 位"
 
 echo "-- 定制层是否落进镜像 --"
 check_exists /etc/default/zramswap                 "zram 配置（768M zstd）"
+# 配置文件在 ≠ zram 设备在跑：zramswap.service 必须被 enable（要看到
+# multi-user.target.wants 里的那个链接），否则这台 2 GiB 的机器实际零交换，
+# 而旧的检查只看 /etc/default/zramswap 存在 ⇒ 永远绿。
+# 链接目标在 Debian 上可能是 /lib/… 也可能是 /usr/lib/…（/lib 是软链），
+# 所以这里只断言"链接在"，不绑死目标字符串。
+check_exists /etc/systemd/system/multi-user.target.wants/zramswap.service \
+    "zram 交换已启用（zramswap.service 在 multi-user.target.wants 里）"
 check_exists /etc/systemd/journald.conf.d/qm1.conf "journald 限额"check_exists /etc/systemd/oomd.conf.d/qm1.conf     "systemd-oomd 限额"
 check_exists /etc/modules-load.d/qm1-hardware.conf  "硬件模块自动加载清单"
 check_exists /etc/initramfs-tools/modules          "initramfs 关键模块清单"

@@ -23,7 +23,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 OUT="build/rootfs"
 ARCH="amd64"
-PROFILE="base"
+# 默认 runtime（与 build-image.sh 一致）：base profile 不装 agent 运行时。
+PROFILE="runtime"
 SUITE=""
 MIRROR="http://deb.debian.org/debian"
 COMPONENTS="main,non-free-firmware"

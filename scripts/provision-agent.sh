@@ -50,6 +50,19 @@ log()  { printf '[provision] %s\n' "$*"; }
 warn() { printf '[provision][warn] %s\n' "$*" >&2; }
 die()  { printf '[provision][error] %s\n' "$*" >&2; exit 1; }
 
+# 失败要能被上层看见。
+# 以前这个脚本在任何一步失败时都只 warn 然后继续，最后一律 exit 0 ——
+# 于是调用方（qm1-provision 包装器）以为"运行时部署完成"，写下了
+# /var/lib/qm1/provision-done 标记，于是 qm1-provision.service 的
+# ConditionPathExists=!标记 以后每次开机都跳过 ⇒ 首次开机没装上的运行时
+# 永远补不上，而且日志里只有一句"部署完成"。
+# 现在：关键步骤失败记下来，脚本最后以非零退出 ⇒ 不写标记 ⇒ 下次开机重试。
+FAILED=0
+fail_hard() {
+    printf '[provision][fail] %s\n' "$*" >&2
+    FAILED=1
+}
+
 while [ $# -gt 0 ]; do
     case "$1" in
         --wifi-ssid) WIFI_SSID="$2"; shift 2 ;;
@@ -69,8 +82,21 @@ log "内存：$(free -m | awk '/^Mem:/{print $2" MiB 总 / "$7" MiB 可用"}')"
 
 # 以哪个用户的身份装 Hermes、单元写到谁的 home —— 在任何分支之前先算好，
 # 否则 --skip-hermes 时 RUN_HOME 是空的，后面的单元会写到 / 下面去。
-RUN_AS="${SUDO_USER:-root}"
+#
+# RUN_AS 的来路有两个：
+#   * 手工 sudo 跑 ⇒ SUDO_USER 是调用者 ⇒ 用调用者 ✓；
+#   * 由 qm1-provision.service 以 root 触发 ⇒ 没有 SUDO_USER ⇒ 之前会落到
+#     root 身上，于是 Hermes 装进 /root/.local/bin、单元写进 /root/.config，
+#     而 sshd 明确禁掉了 root 登录（overlay 的 qm1.conf: PermitRootLogin no）
+#     ⇒ 交付用户（qm1）根本用不到装好的 Hermes。
+#     这时改为用镜像里的登录账号 qm1（安装器创建的 LOGIN_USER 就是它）。
+RUN_AS="${QM1_PROVISION_USER:-${SUDO_USER:-}}"
+if [ -z "$RUN_AS" ] || [ "$RUN_AS" = "root" ]; then
+    if id qm1 >/dev/null 2>&1; then RUN_AS=qm1; fi
+fi
+[ -n "$RUN_AS" ] || RUN_AS="root"
 RUN_HOME="$(getent passwd "$RUN_AS" 2>/dev/null | cut -d: -f6)"
+log "运行时部署身份：$RUN_AS（家目录 ${RUN_HOME:-未知}）"
 
 # ---------- 1. Wi-Fi（必须最先做）----------
 # ★ 顺序原来反了：先 apt-get update 再写 Wi-Fi 配置。
@@ -123,7 +149,9 @@ wait_for_dns() {
 }
 if [ -n "$WIFI_SSID" ]; then
     if ! wait_for_dns; then
-        warn "DNS 仍未就绪 —— 下面的 apt/安装步骤可能失败（检查 Wi-Fi 是否关联成功）"
+        # 没有 DNS 就没法 apt、没法拉官方安装器、连时钟都对不上 ⇒ 这一步失败
+        # 后面每一步都会失败，如实记下来（最后非零退出 ⇒ 下次开机重试）。
+        fail_hard "DNS 仍未就绪 —— 下面的 apt/安装步骤必然失败（检查 Wi-Fi 是否关联成功）"
     fi
 fi
 
@@ -145,7 +173,7 @@ wait_for_clock() {
 }
 
 if ! wait_for_clock; then
-    warn "系统时钟仍未同步（$(date -u)）——TLS 证书校验可能失败，请检查 systemd-timesyncd"
+    fail_hard "系统时钟仍未同步（$(date -u)）—— TLS 证书校验必然失败，请检查 systemd-timesyncd"
 fi
 
 # ---------- 4. 运行时依赖 ----------
@@ -153,14 +181,14 @@ log "安装运行时依赖（Chromium 运行库 / 字体 / ripgrep / ffmpeg / �
 export DEBIAN_FRONTEND=noninteractive
 # 没网时 apt 会失败，但那不该让脚本死在半路 —— 后面的 systemd 单元才是这台
 # 机器能长期干活的骨架，联网后重跑本脚本就能补上软件包。
-apt-get update -qq || warn "apt-get update 失败（还没联网？）—— 继续写单元，联网后重跑本脚本补装软件包"
+apt-get update -qq || fail_hard "apt-get update 失败（还没联网？）—— 单元会照写，但运行时没铺上"
 apt-get install -y --no-install-recommends \
     ca-certificates curl git gnupg ripgrep ffmpeg \
     chromium chromium-driver \
     fonts-liberation fonts-noto-cjk \
     libnss3 libgbm1 libasound2 libatk-bridge2.0-0 libxkbcommon0 \
     libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
-    zram-tools e2fsprogs rsync || warn "部分包安装失败（离线？），继续"
+    zram-tools e2fsprogs rsync || fail_hard "部分包安装失败（离线？）—— 运行时没铺上，下次开机重试"
 
 # ---------- 5. Hermes（官方安装方式）----------
 if [ "$SKIP_HERMES" -eq 1 ]; then
@@ -251,8 +279,15 @@ Description=Headless Chrome session for browser_exec
 After=network-online.target
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+# Type 必须是 simple（或 exec），不能是 oneshot：
+# oneshot 的语义是"ExecStart 跑完就算启动完成"，而 chromium 是**永不返回**的
+# 常驻进程 ⇒ systemd 会一直等它，等超过用户管理器的 DefaultTimeoutStartSec
+# （默认 90 秒）就把进程杀掉、单元判 failed ⇒ 9222 端口从来没有服务，
+# browser_exec 这条交付能力等于不存在（而脚本当时只 warn 一句）。
+# Type=simple 才是"前台常驻"的正确写法：--now 立刻返回，进程一直活着。
+Type=simple
+Restart=on-failure
+RestartSec=5
 ExecStart=/usr/bin/chromium --headless=new --no-sandbox --disable-dev-shm-usage \
   --disable-gpu --disable-features=VizDisplayCompositor \
   --remote-debugging-port=9222 --user-data-dir=%h/.cache/qm1-chrome about:blank
@@ -329,3 +364,9 @@ transient errors"），这是它的设计，不是故障。凭据由 hermes setu
 EOF
 log "Hermes 用的解释器由官方安装器托管（standalone CPython 3.14），不要用系统 python3 代替。"
 log "网关单元由官方 CLI 安装（hermes gateway install --if-missing）；凭据未配置时网关会自行退出，先跑 hermes setup。"
+
+if [ "$FAILED" -ne 0 ]; then
+    # 非零退出 ⇒ 调用方不写 /var/lib/qm1/provision-done ⇒ 下次开机自动重试。
+    printf '[provision][fail] 运行时部署未全部成功（见上面的 fail 行）—— 以非零退出，下次开机重试\n' >&2
+    exit 1
+fi
