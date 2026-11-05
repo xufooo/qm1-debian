@@ -86,8 +86,7 @@ check_attr /usr/bin/sudo   'Mode: *04755' "sudo 保留 setuid 位"
 
 echo "-- 定制层是否落进镜像 --"
 check_exists /etc/default/zramswap                 "zram 配置（768M zstd）"
-check_exists /etc/systemd/journald.conf.d/qm1.conf "journald 限额"
-check_exists /etc/systemd/oomd.conf.d/qm1.conf     "systemd-oomd 限额"
+check_exists /etc/systemd/journald.conf.d/qm1.conf "journald 限额"check_exists /etc/systemd/oomd.conf.d/qm1.conf     "systemd-oomd 限额"
 check_exists /etc/modules-load.d/qm1-hardware.conf  "硬件模块自动加载清单"
 check_exists /etc/initramfs-tools/modules          "initramfs 关键模块清单"
 check_exists /usr/local/share/qm1/driver-manifest.txt "驱动清单"
@@ -176,6 +175,8 @@ check_content /etc/systemd/system/qm1-wifi@.service '^TimeoutStartSec=(1[2-9][0-
     "Wi-Fi 单元的超时 ≥120s（ExecStartPre 要等 60s 让 SDIO 枚举出接口）"
 check_content /etc/systemd/system.conf.d/quick-boot.conf '^TimeoutStartSec=120' \
     "全局单元超时 120s（30s 会在接口出现前把 Wi-Fi 单元掐掉）"
+check_content /etc/systemd/journald.conf.d/qm1.conf '^Storage=persistent' \
+    "journal 落盘持久化（默认 auto 写 /run，重启即失，现场没法翻日志）"
 check_exists /etc/systemd/system/qm1-firstboot.service "首启脚本单元"
 check_exists /etc/udev/rules.d/60-qm1-emmc-power.rules "eMMC runtime suspend 的 udev 规则（initramfs 阶段就要生效）"
 check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
