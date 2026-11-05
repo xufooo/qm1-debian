@@ -265,6 +265,52 @@ disk_parity "字节范围哈希"    qm1_hash_range "$LOOP" 0 1048576
 # 所以这一步同时验证了"不一致时两份实现都判失败、且给出同样的说明"。
 disk_parity "备份逐分区校验（不一致时）" qm1_verify_backup "$LOOP" "$BACKUP" 0
 
+echo "== 尾部备份的字节偏移（写进去的位置必须和读出来的位置一致） =="
+# 安装器把整盘备份写进安装介质尾部的未分区空间时，用的是：
+#
+#   dd if="$TARGET" of="$MEDIA" bs=4M seek="$BASE" \
+#      oflag=seek_bytes conv=notrunc,fsync
+#
+# 而校验时读的是 qm1_hash_range "$MEDIA" "$BASE" …（也是字节偏移）。
+#
+# ★ dd 的 seek **默认以 bs 为单位**：少了 oflag=seek_bytes，$BASE 这个
+#   字节偏移会被当成"4MiB 的块数"，实际落到 4×$BASE 处 ⇒ 备份写在了
+#   介质别处 ⇒ 校验永远读不到它（要么安装死在校验这一步，要么悄悄把
+#   介质尾部写坏）。这一对偏移约定必须由用例钉住，而不是靠人记得。
+#
+# 选一个**不是 4MiB 整数倍**的偏移：整数倍的偏移在两种约定下差的是
+# 整数倍，肉眼不容易看出来，非整数倍才能把两种约定区分开。
+TB_SRC="$WORK/tb-src.img"
+TB_MEDIA="$WORK/tb-media.img"
+dd if=/dev/urandom of="$TB_SRC" bs=1M count=8 status=none
+truncate -s 256M "$TB_MEDIA"
+TB_SIZE="$(stat -c%s "$TB_SRC")"
+TB_BASE=$(( 25 * 1024 * 1024 + 4096 ))
+dd if="$TB_SRC" of="$TB_MEDIA" bs=4M seek="$TB_BASE" \
+   oflag=seek_bytes conv=notrunc,fsync status=none
+tb_src_hash="$(sha256sum "$TB_SRC" | awk '{print $1}')"
+tb_got_hash="$(qm1_hash_range "$TB_MEDIA" "$TB_BASE" "$TB_SIZE")"
+if [ -n "$tb_got_hash" ] && [ "$tb_src_hash" = "$tb_got_hash" ]; then
+    ok "按字节偏移写入的备份，能在同一个偏移读回来（sha256 一致）"
+else
+    bad "按字节偏移写入的备份读不回来：源 $tb_src_hash / 读回 $tb_got_hash"
+fi
+# 反过来验：4×$BASE 那个位置**不应该**是这份备份。
+# （如果有人把 seek 当块数用，备份就落在那儿。）
+tb_wrong_hash="$(qm1_hash_range "$TB_MEDIA" $(( TB_BASE * 4 )) "$TB_SIZE")"
+if [ -n "$tb_wrong_hash" ] && [ "$tb_wrong_hash" != "$tb_src_hash" ]; then
+    ok "4 倍偏移处不是这份备份（说明偏移确实按字节解释了）"
+else
+    bad "4 倍偏移处的哈希与备份相同（$tb_wrong_hash）—— seek 可能被当成块数了"
+fi
+# 备份之前的内容不能被动过（那块是安装镜像的地盘，不能被备份覆盖）
+printf '\000' > "$WORK/one-zero-byte"
+if [ "$(qm1_hash_range "$TB_MEDIA" 0 1)" = "$(qm1_hash_range "$WORK/one-zero-byte" 0 1)" ]; then
+    ok "备份只落在尾部偏移处，之前的介质内容没被动过"
+else
+    bad "备份写入前的介质头部被改动了"
+fi
+
 echo "== 目标布局规划（写盘后按真实容量重建分区表） =="
 # 这个函数决定"写完盘之后分区表长什么样"：ESP 固定在 1 MiB，
 # 根分区一直撑到盘尾前 1 MiB（给备份 GPT 留位）。

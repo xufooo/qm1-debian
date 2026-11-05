@@ -828,6 +828,17 @@ jobs:
             || { echo "::error::设备侧安装器没有显式跳过 EFI 登记的开关（只能悄悄跳过是不行的）"; exit 1; }
           grep -q 'EFI 启动项没有登记成功' "$DEV" \
             || { echo "::error::设备侧安装器 EFI 登记失败时没有判失败"; exit 1; }
+          # 备份位置放不下 ⇒ 必须中止（不能"先写了再说"）：
+          # 覆盖 eMMC 之前没有整盘备份，就等于没有退路。
+          grep -q 'die "备份目录空间不足' "$DEV" \
+            || { echo "::error::设备侧安装器在备份位置空间不足时没有中止"; exit 1; }
+          # 备份校验必须发生在**写盘之前**：顺序反了就是"写完才发现备份是坏的"。
+          _vbp_line="$(grep -n 'verify_backup_partitions' "$DEV" | tail -1 | cut -d: -f1)"
+          _write_line="$(grep -n 'dd if="\$SRC_ROOT"' "$DEV" | head -1 | cut -d: -f1)"
+          [ -n "$_vbp_line" ] && [ -n "$_write_line" ] \
+            || { echo "::error::设备侧安装器里找不到备份校验或写盘的位置"; exit 1; }
+          [ "$_vbp_line" -lt "$_write_line" ] \
+            || { echo "::error::设备侧安装器在写盘之后才校验备份（备份坏了也已经写进去了）"; exit 1; }
 
           # --- 主机侧安装器 ---
           grep -q 'qm1_verify_backup' "$HOST" \

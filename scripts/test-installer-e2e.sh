@@ -64,6 +64,9 @@ WORK="$(mktemp -d /tmp/qm1-install-e2e.XXXXXX)"
 LOOPS=()
 cleanup() {
     set +e
+    # tmpfs（用例 G 的备份目录）要先卸载，否则 rm -rf 删的是挂载点里的内容，
+    # 挂载本身还留在内核里。
+    umount "$WORK/tiny-backup" 2>/dev/null || true
     for d in "${LOOPS[@]:-}"; do losetup -d "$d" 2>/dev/null; done
     rm -rf "$WORK"
 }
@@ -653,8 +656,11 @@ if printf '%s\n' "$SF_G" | grep -qi "type=$LINUX_GUID"; then
 else
     bad "用例 E2：根分区的分区类型 GUID 不对"
 fi
+# ★ sfdisk -d 打印的类型 GUID 是**大写**，而 awk 的 index() 大小写敏感 ——
+#   同一批断言里 grep -qi 是大小写不敏感的，所以"GUID 对不对"那条过了，
+#   "起始扇区"这条却解析成空。比对前先把整行转成小写。
 _g_esp_start="$(printf '%s\n' "$SF_G" | awk -v t="$ESP_GUID" '
-    index($0, t) { for (i = 1; i <= NF; i++) if ($i ~ /^start=/) { sub(/^start=/, "", $i); gsub(/,/, "", $i); print $i; exit } }')"
+    index(tolower($0), t) { for (i = 1; i <= NF; i++) if ($i ~ /^start=/) { sub(/^start=/, "", $i); gsub(/,/, "", $i); print $i; exit } }')"
 if [ "${_g_esp_start:-}" = "2048" ]; then
     ok "用例 E2：ESP 起于 1 MiB（扇区 2048）"
 else
@@ -665,7 +671,10 @@ fi
 #     主机侧那条路径曾经把"内容大小的镜像"写进 28.5 GiB 的盘 ⇒ 镜像自带的
 #     备份 GPT 留在 6.3 GiB 处，盘尾还有旧的一份 ⇒ 一盘三份 GPT。
 _g_gpt_count="$(grep -abo 'EFI PART' "$TGT_G" 2>/dev/null | wc -l | tr -d ' ')"
-_g_gpt_tail=$(( 512 * 1024 * 1024 - 33 * 512 ))
+# ★ GPT 的备份头在**最后一个扇区**（LBA 总数 - 1），不是"尾部留 1 MiB 里的第 33 个扇区"。
+#   512 MiB 的盘 ⇒ 最后一个扇区的起始字节 = 512*1024*1024 - 512 = 536870400。
+#   之前按 "尾部 33 个扇区" 算成了 536854016，于是"备份 GPT 在盘尾"这条永远不过。
+_g_gpt_tail=$(( 512 * 1024 * 1024 - 512 ))
 _g_gpt_offsets="$(grep -abo 'EFI PART' "$TGT_G" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')"
 if [ "${_g_gpt_count:-0}" = "2" ]; then
     ok "用例 E2：整盘上只有两份 GPT 头（主表 + 盘尾备份表）"
@@ -732,6 +741,55 @@ if grep -q '整盘备份' "$WORK/install-g.log"; then
     ok "用例 E2：日志写明了整盘备份"
 else
     bad "用例 E2：日志里没有整盘备份的记录"
+fi
+
+# ---------- 8. 用例 G：备份位置放不下 ⇒ 必须中止，且目标盘一字节都不动 ----------
+#
+# 为什么要有这条：
+#   覆盖 eMMC 之前必须先有整盘备份，这是"还能装回原版系统"的唯一保障。
+#   如果备份位置放不下，正确行为是**中止并且什么都不写** ——
+#   绝不能"先写了再说"。这条以前没被测过：安装器会先去找备份位置，
+#   找不到就 die；但"找到的位置空间不够"这条分支从来没被走过。
+#
+# 做法：挂一个 1 MiB 的 tmpfs 当备份目录（要 root，CI 里是 sudo 跑的），
+#   目标盘是 512 MiB ⇒ 备份目录必然放不下。
+log "用例 G：备份位置空间不足（必须中止，目标零改动）"
+SMALL_DIR="$WORK/tiny-backup"
+mkdir -p "$SMALL_DIR"
+if mount -t tmpfs -o size=1M tmpfs "$SMALL_DIR" 2>/dev/null; then
+    TGT_G2="$WORK/target-g2.img"
+    truncate -s 512M "$TGT_G2"
+    LOOP_TGT_G2="$(losetup --partscan --find --show "$TGT_G2" 2>/dev/null)" || skip "造目标失败"
+    LOOPS+=("$LOOP_TGT_G2")
+    _g2_before="$(whole_sha "$TGT_G2")"
+
+    if bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_G2" \
+            --source-disk "$LOOP_SRC_G" --source-root "${LOOP_SRC_G}p2" --source-esp "${LOOP_SRC_G}p1" \
+            --lib "$INSTALL_LIB" --no-login-account --mode emmc --force-kind emmc --yes --skip-efi-entry \
+            --backup-dir "$SMALL_DIR" \
+            > "$WORK/install-g2.log" 2>&1; then
+        bad "用例 G：备份位置明明放不下，安装器却报了成功"
+        tail -30 "$WORK/install-g2.log"
+    else
+        ok "用例 G：备份位置放不下时安装器判失败"
+        if grep -q '空间不足' "$WORK/install-g2.log"; then
+            ok "用例 G：失败原因说清了是空间不足"
+        else
+            bad "用例 G：失败信息里没有说明是空间不足"
+            tail -20 "$WORK/install-g2.log"
+        fi
+    fi
+
+    _g2_after="$(whole_sha "$TGT_G2")"
+    if [ "$_g2_before" = "$_g2_after" ]; then
+        ok "用例 G：中止之后目标盘一字节都没动"
+    else
+        bad "用例 G：中止之后目标盘被改了（整盘 sha256 变了）"
+    fi
+
+    umount "$SMALL_DIR" 2>/dev/null || true
+else
+    warn "用例 G：挂不了 tmpfs，跳过（内核不允许？）"
 fi
 
 printf '\n'
