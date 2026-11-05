@@ -44,6 +44,8 @@ set -euo pipefail
 
 ROOTFS=""
 DISK=""
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+ASSERT_SCRIPT="$SCRIPT_DIR/boot-smoke-assert.sh"
 TIMEOUT=420
 LOG="build/out/boot-smoke.log"
 WORK="build/out/boot-smoke"
@@ -78,6 +80,7 @@ fi
 if [ -n "$DISK" ] && [ ! -f "$DISK" ]; then
     die "找不到整盘镜像 $DISK"
 fi
+[ -f "$ASSERT_SCRIPT" ] || die "找不到断言脚本 $ASSERT_SCRIPT"
 need qemu-system-x86_64
 need debugfs
 need python3
@@ -213,10 +216,20 @@ cleanup() {
 trap cleanup EXIT
 
 # ---------- 3. 等它走到 multi-user.target ----------
-MILESTONE="Reached target Multi-User System"
+# ★ systemd v255 起控制台状态行的格式变了，断言必须按新格式写：
+#     旧格式（v254 及以前）：[  OK  ] Reached target Multi-User System.
+#     新格式（v255+）      ：[  OK  ] Reached target multi-user.target - Multi-User System.
+#   原因在 src/core/unit.c 的 unit_status_printf()：只要日志要上色，ident 里
+#   带空格时它会被替换成 "<单元名> - <描述>"。而 "Multi-User System" 正是
+#   multi-user.target 的描述 ⇒ 单元名被插到了描述前面 ⇒ 老串匹配不到。
+#   同理单元名两侧还有 ANSI 高亮序列（ANSI_HIGHLIGHT / ANSI_NORMAL）⇒
+#   直接 grep "Started ssh.service" 也匹配不到，实测字节是
+#       Started \e[0;1;39mssh.service\e[0m - OpenBSD Secure Shell server.
+#   这里的正则用 ".*" 把中间的 ANSI 序列和省略号一并吃掉。
+MILESTONE_RE='Reached target .*multi-user\.target'
 DEADLINE=$(( $(date +%s) + TIMEOUT ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
-    if [ -f "$CONSOLE" ] && grep -q "$MILESTONE" "$CONSOLE"; then
+    if [ -f "$CONSOLE" ] && grep -qE -- "$MILESTONE_RE" "$CONSOLE"; then
         break
     fi
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
@@ -227,7 +240,7 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     sleep 2
 done
 
-if ! grep -q "$MILESTONE" "$CONSOLE" 2>/dev/null; then
+if ! grep -qE -- "$MILESTONE_RE" "$CONSOLE" 2>/dev/null; then
     echo "BOOT-SMOKE: 客户机没走到 multi-user.target（超时 ${TIMEOUT}s），控制台日志尾部：" >&2
     tail -60 "$CONSOLE" >&2 || true
     exit 1
@@ -297,55 +310,17 @@ else
 fi
 
 # ---------- 6. 断言 ----------
-OUT="$(cat "$CONSOLE" 2>/dev/null || true)"
-assert_console() {
-    printf '%s' "$OUT" | grep -q -- "$1" \
-        || { echo "BOOT-SMOKE: 断言不过：$2" >&2; tail -60 "$CONSOLE" >&2; exit 1; }
-}
-assert_console "$MILESTONE" "客户机没走到 multi-user.target"
-assert_console "Started OpenBSD Secure Shell server" "sshd 没起来（登录不进��）"
-assert_console "Started systemd-resolved.service" "systemd-resolved 没起来（DNS 没有数据源）"
-assert_console "Finished qm1-firstboot.service" "qm1-firstboot.service 没跑完（开机即用的配置那一步）"
-
-# 关键单元一个都不能起失败。QEMU 里注定起不来的（没 SDIO 设备、没网卡、
-# 没蓝牙）不在这张表里 —— 它们在真机上才是判据。
-for unit in ssh.service systemd-resolved.service systemd-networkd.service \
-            qm1-firstboot.service qm1-hardware-fixups.service; do
-    if printf '%s' "$OUT" | grep -q "Failed to start $unit"; then
-        echo "BOOT-SMOKE: 断言不过：$unit 起失败了" >&2
-        tail -60 "$CONSOLE" >&2
-        exit 1
-    fi
-done
-
-# 出货的 Wi-Fi 驱动单元：只要它出现在日志里，就不允许起失败。
-# QEMU 里没有 SDIO 卡，但模块本身照样能加载成功（modprobe 只做符号解析和
-# 注册驱动，没有设备是正常的）⇒ 这条在 QEMU 里也成立，而且正好能挡住
-# 「模块索引没刷新 ⇒ modprobe 报 not found ⇒ 驱动永远加载不上」这类问题。
-if printf '%s' "$OUT" | grep -q "qm1-rtw88-8723bs.service"; then
-    if printf '%s' "$OUT" | grep -q "Failed to start qm1-rtw88-8723bs.service"; then
-        echo "BOOT-SMOKE: 断言不过：Wi-Fi 驱动单元 qm1-rtw88-8723bs.service 起失败" >&2
-        echo "BOOT-SMOKE:（最常见原因：镜像的 modules.dep 里没有这个模块，modprobe 找不到它）" >&2
-        tail -60 "$CONSOLE" >&2
-        exit 1
-    fi
-fi
-
+# 断言逻辑单独放在 scripts/boot-smoke-assert.sh 里：那里的断言串必须能被
+# 单独喂 fixture 验证（scripts/test-boot-smoke-assert.sh）—— systemd v255
+# 改过控制台状态行的格式，断言串一腐化，CI 上看起来就和"启动失败"一样，
+# 只能靠真跑一次 CI 才发现，那太慢了。
+JOURNAL_TEXT_FILE=""
 if [ "$JOURNAL_OK" = "yes" ]; then
-    assert_journal() {
-        printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" \
-            || { echo "BOOT-SMOKE: 断言不过（journal）：$2" >&2; exit 1; }
-    }
-    assert_journal "Startup finished" "journal 里没有 systemd 的启动收尾记录（journal 可能是坏的）"
-    assert_journal "\[qm1-firstboot\]" "journal 里没有 qm1-firstboot 的输出（开机即用的配置那一步没跑）"
-    # 自检脚本的输出格式（QM1 硬件自检 … PASS=n WARN=n FAIL=n）——
-    # 自检本身是手工工具（不进开机流程），所以这里只确认它可执行、格式没坏。
-    if printf '%s' "$JOURNAL_TEXT" | grep -q "qm1-selftest.service"; then
-        log "客户机自检（qm1-selftest）的输出摘录："
-        printf '%s' "$JOURNAL_TEXT" \
-            | grep -A2 "qm1-selftest.service" \
-            | tail -12 | sed 's/^/    /' >&2 || true
-    fi
+    JOURNAL_TEXT_FILE="$WORK/journal.txt"
+    printf '%s' "$JOURNAL_TEXT" > "$JOURNAL_TEXT_FILE"
+fi
+if ! bash "$ASSERT_SCRIPT" --console "$CONSOLE" ${JOURNAL_TEXT_FILE:+--journal-text-file "$JOURNAL_TEXT_FILE"}; then
+    exit 1
 fi
 
 log "启动成功，断言全过（日志：$LOG，控制台：$CONSOLE）"
