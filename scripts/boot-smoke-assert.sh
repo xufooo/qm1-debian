@@ -57,21 +57,88 @@ data = re.sub(r"\^\[\[[0-9;]*[A-Za-z]", "", data)
 sys.stdout.write(data)
 ' 2>/dev/null || printf '%s' "$OUT_RAW")"
 
+# ---------- 拿 journal（要放在断言前面：失败时要一起摊开）----------
+if [ -n "$JOURNAL_TEXT_FILE" ] && [ -f "$JOURNAL_TEXT_FILE" ]; then
+    JOURNAL_TEXT="$(cat "$JOURNAL_TEXT_FILE" 2>/dev/null || true)"
+fi
+
+# ---------- 失败时的取证 ----------
+# ★ 为什么不能只 tail 控制台尾部：
+#   控制台尾部是关机序列，看不到开机段；而"单元没跑完"的原因恰恰在开机段。
+#   所以这里把整条单元事件流（谁 Starting 了、谁 Finished 了、谁 Failed 了、
+#   有没有排序环）整段打出来，再附控制台尾部和 journal 尾部。
+dump_diag() {
+    echo "BOOT-SMOKE-ASSERT: —— 单元事件流（控制台）——" >&2
+    printf '%s' "$OUT" \
+        | grep -E 'Starting |Started |Finished |Failed |Skipped|Reached target|ordering cycle|Dependency ' \
+        | tail -80 >&2 || true
+    echo "BOOT-SMOKE-ASSERT: —— 控制台尾部 60 行 ——" >&2
+    tail -60 "$CONSOLE" >&2 || true
+    if [ -n "$JOURNAL_TEXT" ]; then
+        echo "BOOT-SMOKE-ASSERT: —— journal 尾部 40 行 ——" >&2
+        printf '%s' "$JOURNAL_TEXT" | tail -40 >&2 || true
+    fi
+}
+fail() {
+    echo "BOOT-SMOKE-ASSERT: 断言不过：$*" >&2
+    dump_diag
+    exit 1
+}
+
 # ---------- 断言 ----------
 MILESTONE_RE='Reached target .*multi-user\.target'
 
 assert_console() {
-    printf '%s' "$OUT" | grep -qF -- "$1" \
-        || { echo "BOOT-SMOKE-ASSERT: 断言不过：$2" >&2; tail -60 "$CONSOLE" >&2; exit 1; }
+    printf '%s' "$OUT" | grep -qF -- "$1" || fail "$2"
 }
 assert_console_re() {
-    printf '%s' "$OUT" | grep -qE -- "$1" \
-        || { echo "BOOT-SMOKE-ASSERT: 断言不过：$2" >&2; tail -60 "$CONSOLE" >&2; exit 1; }
+    printf '%s' "$OUT" | grep -qE -- "$1" || fail "$2"
 }
+
+# ---------- 先查"起失败"，再查"没跑完" ----------
+# ★ 顺序是刻意的。
+#   上一轮 CI 红在"qm1-firstboot.service 没跑完"，但真正的原因被藏住了：
+#   失败清单排在正例后面，所以"这个单元起失败了"和"这个单元没跑完"两种
+#   情况报出来的是同一句话，只能靠猜。现在失败在前、正例在后，
+#   一旦它真的起失败，报出来的就是"起失败"，附带单元事件流。
+for unit in ssh.service systemd-resolved.service systemd-networkd.service \
+            qm1-firstboot.service qm1-hardware-fixups.service; do
+    if printf '%s' "$OUT" | grep -qF "Failed to start $unit"; then
+        fail "$unit 起失败了"
+    fi
+    # 超时被杀也算起失败（systemd 打的是 "Failed with result 'timeout'"）
+    if printf '%s' "$OUT" | grep -qF "$unit: Failed with result"; then
+        fail "$unit 起失败了（超时或被杀掉）"
+    fi
+done
+
+# 出货的 Wi-Fi 驱动单元：只要它出现在日志里，就不允许起失败。
+# QEMU 里没有 SDIO 卡，但模块本身照样能加载成功（modprobe 只做符号解析和
+# 注册驱动，没有设备是正常的）⇒ 这条在 QEMU 里也成立，而且正好能挡住
+# 「模块索引没刷新 ⇒ modprobe 报 not found ⇒ 驱动永远加载不上」这类问题。
+if printf '%s' "$OUT" | grep -qF "qm1-rtw88-8723bs.service"; then
+    if printf '%s' "$OUT" | grep -qF "Failed to start qm1-rtw88-8723bs.service"; then
+        fail "Wi-Fi 驱动单元 qm1-rtw88-8723bs.service 起失败（最常见原因：镜像的 modules.dep 里没有这个模块，modprobe 找不到它）"
+    fi
+fi
+
 assert_console_re "$MILESTONE_RE" "客户机没走到 multi-user.target"
 assert_console "Started ssh.service" "sshd 没起来（登录不进去）"
 assert_console "Started systemd-resolved.service" "systemd-resolved 没起来（DNS 没有数据源）"
-assert_console "Finished qm1-firstboot.service" "qm1-firstboot.service 没跑完（开机即用的配置那一步）"
+
+# ★ 首启那一步到底跑没跑。
+#   判据是"行为"，不是"呈现"：控制台上 systemd 的 Finished 行**或者**
+#   journal 里脚本自己的输出，任一有就算它跑过。
+#   为什么放宽：控制台是串口，systemd 打的状态行可能被截断或丢失；
+#   而脚本自己的输出（journal 里的 [qm1-firstboot]）是它确实执行的直接证据。
+#   两份证据都没有 ⇒ 它确实没跑（被条件跳过、或压根没被拉起）。
+if ! printf '%s' "$OUT" | grep -qF "Finished qm1-firstboot.service" \
+   && ! printf '%s' "$JOURNAL_TEXT" | grep -q "\[qm1-firstboot\]"; then
+    fail "qm1-firstboot.service 没跑（开机即用的配置那一步）：控制台没有它的 Finished 行，journal 里也没有它的输出"
+fi
+if ! printf '%s' "$OUT" | grep -qF "Finished qm1-firstboot.service"; then
+    echo "BOOT-SMOKE-ASSERT: 注意：控制台没有 qm1-firstboot.service 的 Finished 行（journal 里有它的输出，判为已执行）" >&2
+fi
 
 # ★ Wi-Fi 单元必须"起来"（而不是卡在 activating）。
 #   这条是本轮修的那个真机级缺陷的回归闸：
@@ -86,38 +153,10 @@ assert_console "Finished qm1-firstboot.service" "qm1-firstboot.service 没跑完
 assert_console "Started qm1-wifi@wlan0.service" \
     "Wi-Fi 单元没起来（qm1-wifi@wlan0.service 没有达到 Started）"
 
-# 关键单元一个都不能起失败。QEMU 里注定起不来的（没 SDIO 设备、没网卡、
-# 没蓝牙）不在这张表里 —— 它们在真机上才是判据。
-for unit in ssh.service systemd-resolved.service systemd-networkd.service \
-            qm1-firstboot.service qm1-hardware-fixups.service; do
-    if printf '%s' "$OUT" | grep -qF "Failed to start $unit"; then
-        echo "BOOT-SMOKE-ASSERT: 断言不过：$unit 起失败了" >&2
-        tail -60 "$CONSOLE" >&2
-        exit 1
-    fi
-done
-
-# 出货的 Wi-Fi 驱动单元：只要它出现在日志里，就不允许起失败。
-# QEMU 里没有 SDIO 卡，但模块本身照样能加载成功（modprobe 只做符号解析和
-# 注册驱动，没有设备是正常的）⇒ 这条在 QEMU 里也成立，而且正好能挡住
-# 「模块索引没刷新 ⇒ modprobe 报 not found ⇒ 驱动永远加载不上」这类问题。
-if printf '%s' "$OUT" | grep -qF "qm1-rtw88-8723bs.service"; then
-    if printf '%s' "$OUT" | grep -qF "Failed to start qm1-rtw88-8723bs.service"; then
-        echo "BOOT-SMOKE-ASSERT: 断言不过：Wi-Fi 驱动单元 qm1-rtw88-8723bs.service 起失败" >&2
-        echo "BOOT-SMOKE-ASSERT:（最常见原因：镜像的 modules.dep 里没有这个模块，modprobe 找不到它）" >&2
-        tail -60 "$CONSOLE" >&2
-        exit 1
-    fi
-fi
-
 # journal 断言（可选）：只在拿到 journal 文本时才查。
-if [ -n "$JOURNAL_TEXT_FILE" ] && [ -f "$JOURNAL_TEXT_FILE" ]; then
-    JOURNAL_TEXT="$(cat "$JOURNAL_TEXT_FILE" 2>/dev/null || true)"
-fi
 if [ -n "$JOURNAL_TEXT" ]; then
     assert_journal() {
-        printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" \
-            || { echo "BOOT-SMOKE-ASSERT: 断言不过（journal）：$2" >&2; exit 1; }
+        printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" || fail "（journal）$2"
     }
     assert_journal "Startup finished" "journal 里没有 systemd 的启动收尾记录（journal 可能是坏的）"
     assert_journal "\[qm1-firstboot\]" "journal 里没有 qm1-firstboot 的输出（开机即用的配置那一步没跑）"

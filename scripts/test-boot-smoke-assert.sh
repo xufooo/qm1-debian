@@ -149,6 +149,47 @@ else
     bad "ANSI 被转义成字面 ^[ 的日志竟然没过 —— 清洗逻辑有洞"
 fi
 
+# ---------- fixture ⑥：首启单元起失败（"没跑完"和"起失败"必须能分开报）----------
+cat > "$WORK/firstboot-failed.log" <<EOF
+[${ESC}[0;32m  OK  ${ESC}[0m] Reached target ${ESC}[0;1;39mmulti-user.target${ESC}[0m - Multi-User System.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39mssh.service${ESC}[0m - OpenBSD Secure Shell server.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39msystemd-resolved.service${ESC}[0m - Resolve LLM DNS and DNS Over TLS.
+[${ESC}[0;31mFAILED${ESC}[0m] Failed to start ${ESC}[0;1;39mqm1-firstboot.service${ESC}[0m - QM1 first boot provisioning.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39mqm1-wifi@wlan0.service${ESC}[0m - QM1 internal Wi-Fi (wlan0) managed by wpa_supplicant.
+EOF
+if bash "$ASSERT" --console "$WORK/firstboot-failed.log" >/dev/null 2>&1; then
+    bad "首启单元起失败的日志竟然通过了 —— 失败清单失效"
+else
+    ok "首启单元起失败的日志应当挂（并且要报成『起失败』，不是『没跑完』）"
+fi
+
+# ---------- fixture ⑦：控制台缺 Finished 行，但 journal 里有脚本输出 ⇒ 判为已执行 ----------
+cat > "$WORK/no-finished.log" <<EOF
+[${ESC}[0;32m  OK  ${ESC}[0m] Reached target ${ESC}[0;1;39mmulti-user.target${ESC}[0m - Multi-User System.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39mssh.service${ESC}[0m - OpenBSD Secure Shell server.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39msystemd-resolved.service${ESC}[0m - Resolve LLM DNS and DNS Over TLS.
+[${ESC}[0;32m  OK  ${ESC}[0m] Started ${ESC}[0;1;39mqm1-wifi@wlan0.service${ESC}[0m - QM1 internal Wi-Fi (wlan0) managed by wpa_supplicant.
+EOF
+cat > "$WORK/j-firstboot.txt" <<'EOF'
+Startup finished in 12s.
+[qm1-firstboot] provisioning ok
+EOF
+if bash "$ASSERT" --console "$WORK/no-finished.log" --journal-text-file "$WORK/j-firstboot.txt" >/dev/null 2>&1; then
+    ok "控制台缺 Finished 行但 journal 里有首启输出时，应当判为已执行"
+else
+    bad "控制台缺 Finished 行但 journal 里有首启输出时，不该判失败"
+fi
+
+# ---------- fixture ⑧：控制台缺 Finished 行，journal 里也没有 ⇒ 它确实没跑 ----------
+cat > "$WORK/j-none.txt" <<'EOF'
+something else entirely
+EOF
+if bash "$ASSERT" --console "$WORK/no-finished.log" --journal-text-file "$WORK/j-none.txt" >/dev/null 2>&1; then
+    bad "两份证据都没有首启痕迹时竟然过了 —— 首启断言失效"
+else
+    ok "两份证据都没有首启痕迹时应当挂（首启那一步确实没跑）"
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo "自测失败：$FAIL 项不对" >&2
     exit 1
