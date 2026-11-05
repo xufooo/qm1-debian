@@ -256,6 +256,15 @@ jobs:
             || { echo "::error::ESP 里的 grub.cfg 一条 menuentry 都没有（哑菜单）"; exit 1; }
           echo "OK   ESP 的 grub.cfg 有 ${MENUS} 条菜单项"
 
+          # ★ grub.cfg 里的 search 行必须指向 ESP 实际的 FAT32 卷标。
+          #   卷标对不上，GRUB 就找不到引导分区：屏幕停在 GRUB 提示符或直接
+          #   "error: no such device"，没有任何能指向原因的信息。
+          ESP_LABEL="$(grep -o 'esp_label=[^ ]*' build/out/manifest.txt 2>/dev/null | head -1 | cut -d= -f2 || true)"
+          [ -n "$ESP_LABEL" ] || ESP_LABEL=QM1ESP
+          grep -q "^search --label $ESP_LABEL --set=root" build/out/grub-from-esp.cfg \
+            || { echo "::error::grub.cfg 里没有 'search --label $ESP_LABEL --set=root'（GRUB 会找不到引导分区）"; exit 1; }
+          echo "OK   grub.cfg 用 search --label $ESP_LABEL 定位引导分区"
+
       - name: Assert the rtw88 Wi-Fi module is inside the image
         run: |
           set -eu

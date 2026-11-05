@@ -7,9 +7,13 @@
 #   @SUITE_I386@   32 位系统发行版名（如 Debian 12）
 #
 # 定位说明：
-#   search --label QM1ESP --set=root  找到引导分区本身（内核与 initrd 放在 ESP 上）
+#   search --label @ESP_LABEL@ --set=root  找到引导分区本身（内核与 initrd 放在 ESP 上）
 #   root=UUID=...                     找到根文件系统分区
 #   两个 UUID 不同源：前者是 FAT32 ESP 卷标，后者是 ext4 根分区 UUID。
+#
+# @ESP_LABEL@ 由 make-esp.sh 替换成实际建卷时的 FAT32 卷标（默认 QM1ESP）。
+# 卷标写错 = GRUB 找不到引导分区 = 机器起不来，所以 make-esp.sh 会核对
+# 生成的 search 行与实际卷标是否一致。
 #
 # 内核参数说明：
 #   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道（务必保留）
@@ -25,7 +29,7 @@
 set timeout=5
 set default=0
 
-search --label QM1ESP --set=root
+search --label @ESP_LABEL@ --set=root
 
 # 64 位系统（amd64）：由 IA32 引导器经 EFI handover 加载
 # 发行版名用占位符：Debian 13 起不再提供 i386 内核，32 位系统请用 Debian 12（bookworm），

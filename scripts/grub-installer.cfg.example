@@ -28,7 +28,7 @@
 set timeout=8
 set default=0
 
-search --label QM1ESP --set=root
+search --label @ESP_LABEL@ --set=root
 
 # ① 安装到 eMMC：备份 → 写分区 → 校验 → 换成正常菜单
 menuentry "① 安装 QM1 @SUITE_AMD64@ 到 eMMC（备份 → 写入 → 校验）" {
