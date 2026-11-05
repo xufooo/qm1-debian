@@ -1,0 +1,36 @@
+[Unit]
+Description=QM1 Bluetooth controller (Realtek RTL8723BS BT over ACPI UART)
+Documentation=https://github.com/xufooo/qm1-debian
+After=systemd-modules-load.service
+Wants=systemd-modules-load.service
+Before=bluetooth.service
+# 内核 btrtl 按名字取厂商固件；没有这个文件就等于没有蓝牙控制器
+ConditionPathExists=/lib/firmware/rtl_bt/rtl8723bs_fw.bin
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 蓝牙控制器是 combo 芯片的 BT 部分，经 ACPI 枚举的 UART 挂在主机上
+# （ACPI HID OBDA8723 / OBDA0623）。
+#
+# 【为什么是内核路线，不是用户态 rtk_hciattach】
+# 上游 v6.12 的 hci_h5.c 的 h5_acpi_match[] 里就有 OBDA8723 / OBDA0623 ——
+# 内核自己认这台机，走 serdev 绑定；btrtl.c 里 RTL8723BS 的
+# .fw_name="rtl_bt/rtl8723bs_fw"、.cfg_name="rtl_bt/rtl8723bs_config"，
+# 实际请求 rtl_bt/rtl8723bs_config-OBDA8723.bin（按 ACPI HID 拼名）——
+# Debian 的 firmware-realtek 里就有这几个文件。
+#
+# 用户态 rtk_hciattach 和内核抢同一个串口：谁先占谁赢，另一边就彻底没有
+# hci0；而且厂商 hciattach 的 -n 参数让它永不返回（脚本后半段是死代码，
+# systemd 却显示 active(running)），兜底逻辑还可能把内核控制台 ttyS0 切成
+# raw 造成串口乱码。所以只保留内核这一条路。
+#
+# 这里只做两件事：确保模块加载；等 hci0 出现（最多 30s）。
+# 等不到**不算失败**：内核没绑定通常是 DSDT 把 OBDA8723 暴露成了普通
+# 16550 串口设备（8250 抢先绑定），那时 bluez 只会报"没有适配器"，
+# 不该把整机启动拖住 —— 详细的排查路径见 drv-selfcheck.sh 的蓝牙段。
+ExecStart=/bin/sh -c 'modprobe hci_uart 2>/dev/null || true; modprobe btrtl 2>/dev/null || true; for i in $(seq 1 30); do [ -d /sys/class/bluetooth/hci0 ] && exit 0; sleep 1; done; echo "qm1-bluetooth: 30 秒内没有出现 hci0（查 dmesg 里 OBDA8723 / hci_uart）" >&2; exit 0'
+TimeoutStartSec=45
+
+[Install]
+WantedBy=multi-user.target

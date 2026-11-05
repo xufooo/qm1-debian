@@ -1,25 +1,42 @@
 #!/bin/bash
 # qm1-install-to-emmc — 分步引导式安装：把当前系统装进目标存储
 #
-# 触发方式：安装介质 GRUB 菜单第 ① 项（内核参数 qm1.install=1）→ systemd 单元
-#           qm1-install.service → 本脚本。
+# 触发方式：安装介质 GRUB 菜单第 ① 项（内核参数 qm1.install=1 qm1.install.mode=emmc
+#           qm1.install.yes=1）→ systemd 单元 qm1-install.service → 本脚本。
 #
 # 设计目标（来自实际使用场景）：
-#   1) **非破坏性优先**：默认装到可移动介质（microSD / U 盘），eMMC 一个字节都不动。
-#      原系统因此原样保留，随时拔卡就能回退 —— 这是"还能装回原版系统"的前提。
-#      只有明确选择 eMMC 才会动 eMMC，而那条路强制先做**整盘备份**。
-#   2) **一次性配好 Wi-Fi 与 SSH**：装机时就把 SSID/密码写进系统，并把 SSH 开好，
+#   1) **默认目标是 eMMC**：QM1 是"装进去、开机就能用"的机器，不是插盘运行的
+#      临时盘 —— GRUB 菜单 ① 明确带 qm1.install.mode=emmc。
+#      非破坏性路径（装到 U 盘 / microSD，eMMC 一个字节都不动、原系统保留、
+#      拔卡即可回退）仍然保留，但必须显式 --mode media，不会被自动选中。
+#   2) **覆盖 eMMC 前强制整盘备份**：备份放不下就中止，不"先写后说"。
+#      备份位置自动挑：--backup-dir → 安装介质上空间足够的挂载点 →
+#      安装介质尾部未分区的空间（U 盘容量大于安装镜像时的"同盘既当启动盘
+#      又当备份盘"）。备份做**逐分区 sha256 比对**，不是只算文件自身的哈希。
+#   3) **一次性配好 Wi-Fi 与 SSH**：装机时就把 SSID/密码写进系统，并把 SSH 开好，
 #      装完拔盘重启就能联网、能远程登录，不用再接显示器键盘手动敲配置。
 #      provisioning 文件（照 Raspberry Pi 的做法放在启动分区）也能直接生效。
-#   3) **一步一步**：每个步骤都打印当前做什么、做完是什么结果，可随时 Ctrl-C。
+#      同时给镜像内置的 qm1 账号生成一次性口令并打印出来 —— 镜像里不放默认口令。
+#   4) **写盘必须可核对**：写完立刻逐分区 sha256 比对，不一致立刻中止，
+#      不带着一个写坏的目标继续做后面的步骤。
+#   5) **写完要能被固件找到**：用 efibootmgr 在 UEFI 里登记一条指向目标 ESP 的
+#      启动项，否则装完可能要靠 BIOS 菜单手动选启动设备。
+#   6) **一步一步**：每个步骤都打印当前做什么、做完是什么结果，可随时 Ctrl-C。
 #
 # 步骤：
-#   [1/6] 选择安装目标（默认可移动介质；eMMC 需要显式确认）
+#   [1/6] 选择安装目标（默认 eMMC；可移动介质需显式 --mode media）
 #   [2/6] 检查目标（是否已有分区、是不是源盘）
-#   [3/6] 网络与 SSH 配置（读 provisioning 或交互输入）
-#   [4/6] 备份（写 eMMC 时强制整盘备份，空间不够就中止）
-#   [5/6] 写入系统（GPT + dd + 逐分区校验 + 撑满整盘）
+#   [3/6] 网络与 SSH 配置（读 provisioning 或交互输入；写进 live 系统 +
+#         给 qm1 账号生成一次性口令，口令会随整盘复制进目标）
+#   [4/6] 备份（写 eMMC 时强制整盘备份 + 逐分区校验，空间不够就中止）
+#   [5/6] 写入系统（GPT + dd + 逐分区校验 + 撑满整盘 + 登记 UEFI 启动项）
 #   [6/6] 收尾（写回 provisioning、安装记录、下一步提示）
+#
+# 内核命令行参数（GRUB 菜单用）：
+#   qm1.install=1              触发本脚本
+#   qm1.install.mode=emmc       安装模式（emmc | media）
+#   qm1.install.yes=1           非交互模式下也确认破坏性操作
+#   qm1.install.target=/dev/xxx 指定目标设备
 set -euo pipefail
 
 log()  { printf '[qm1-install] %s\n' "$*"; }
@@ -31,7 +48,20 @@ ask() {
     # ask <提示> <默认值> → 结果写到 REPLY
     local prompt="$1" default="${2:-}"
     if [ ! -t 0 ]; then
-        REPLY="$default"
+        # 非交互（systemd 单元 / 无人值守）：不能像原来那样默默用默认值。
+        #
+        # 原来的写法在这里返回默认值，而"确认覆盖？"的默认值是 no
+        # ⇒ 从 GRUB 菜单选 ①（非 TTY）时，安装器在 [2/6] 就 die 退出，
+        # "安装到 eMMC" 变成一个永远走不完的空操作。
+        #
+        # 现在：破坏性确认只在 --yes / qm1.install.yes=1 时自动通过，
+        # 否则明确报错并告诉人怎么继续（而不是无声退出）。
+        if [ "$ASSUME_YES" = "1" ]; then
+            REPLY="yes"
+        else
+            REPLY="no"
+        fi
+        log "非交互模式：$prompt → $REPLY（要自动确认请加 --yes 或内核参数 qm1.install.yes=1）"
         return 0
     fi
     if [ -n "$default" ]; then
@@ -55,7 +85,9 @@ PSK="${QM1_PSK:-}"
 ENABLE_SSH="${QM1_ENABLE_SSH:-auto}"      # auto | yes | no
 SSH_USER="${QM1_SSH_USER:-}"
 SSH_PUBKEY="${QM1_SSH_PUBKEY:-}"
+SSH_PASSWORD="${QM1_SSH_PASSWORD:-}"
 HOSTNAME_CFG="${QM1_HOSTNAME:-}"
+LOGIN_USER="qm1"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -68,6 +100,7 @@ while [ $# -gt 0 ]; do
         --no-ssh) ENABLE_SSH=no; shift ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --ssh-pubkey) SSH_PUBKEY="$2"; shift 2 ;;
+        --ssh-password) SSH_PASSWORD="$2"; shift 2 ;;
         --hostname) HOSTNAME_CFG="$2"; shift 2 ;;
         --backup-dir) BACKUP_DIR="$2"; shift 2 ;;
         --yes) ASSUME_YES=1; shift ;;
@@ -75,6 +108,23 @@ while [ $# -gt 0 ]; do
         *) die "未知参数：$1" ;;
     esac
 done
+
+# ---------- 内核命令行参数 ----------
+# GRUB 菜单靠内核参数把"装到哪、要不要确认"告诉本脚本（单元是
+# ConditionKernelCommandLine=qm1.install=1 触发的，没有别的传参通道）：
+#   qm1.install.mode=emmc|media
+#   qm1.install.yes=1
+#   qm1.install.target=/dev/mmcblk1
+for _w in $(cat /proc/cmdline 2>/dev/null || true); do
+    case "$_w" in
+        qm1.install.mode=*)   MODE="${_w#qm1.install.mode=}" ;;
+        qm1.install.yes=1)    ASSUME_YES=1 ;;
+        qm1.install.target=*) TARGET="${_w#qm1.install.target=}" ;;
+    esac
+done
+# 优先级：命令行 > 环境变量（QM1_INSTALL_MODE / QM1_INSTALL_TARGET 等在上面的
+# 变量初始化里已经读过；这里内核命令行在后面覆盖它）。
+log "安装模式：$MODE　目标：${TARGET:-自动选择}　自动确认：$ASSUME_YES"
 
 for c in findmnt lsblk sfdisk dd sha256sum e2fsck resize2fs mount blockdev; do
     command -v "$c" >/dev/null 2>&1 || die "缺少命令 $c（镜像里应装有 util-linux / fdisk / e2fsprogs）"
@@ -105,13 +155,34 @@ log "源 ESP：$SRC_ESP   源根分区：$SRC_ROOT"
 step "[1/6] 选择安装目标"
 
 device_kind() {
-    # 输出 removable / usb / emmc / other
-    local name="$1" d="/sys/block/$1"
-    case "$name" in
-        mmcblk*) echo "emmc"; return ;;
+    # 输出 removable / usb / emmc / sd / sdio / mmc-unknown / other
+    #
+    # 关键：**不能把所有 mmcblk* 都当成 eMMC**。
+    # QM1 上 Wi-Fi（Realtek RTL8723BS，SDIO）占着 mmc0，eMMC 实际是 mmc1
+    # （实机观测 mmc1 = ACPI 80860F14:00 = SanDisk S10032 28.5 GiB）。
+    # 把 mmcblk0 当 eMMC ⇒ 找不到真正的 eMMC；而一旦 ACPI 没认出 eMMC、
+    # 兜底按字典序选第一个 mmcblk，选中的就是那张 **Wi-Fi 卡** ——
+    # 往上面写整盘镜像，等于把主联网链路写坏。
+    #
+    # 内核在 MMC 卡的 device/type 里给出真实类型：
+    #   MMC = eMMC，SD = SD 卡，SDIO = SDIO 卡（本机的 Wi-Fi）
+    local name="$1" d="/sys/block/$1" dev type
+    dev="$(readlink -f "$d/device" 2>/dev/null || true)"
+    type=""
+    if [ -n "$dev" ] && [ -r "$dev/type" ]; then
+        type="$(cat "$dev/type" 2>/dev/null || true)"
+    fi
+    case "$type" in
+        MMC)   echo "emmc"; return ;;
+        SD)    echo "sd"; return ;;
+        SDIO*) echo "sdio"; return ;;
     esac
     if [ "$(cat "$d/removable" 2>/dev/null || echo 0)" = "1" ]; then echo "removable"; return; fi
-    if readlink -f "$d/device" 2>/dev/null | grep -q '/usb'; then echo "usb"; return; fi
+    if [ -n "$dev" ] && printf '%s' "$dev" | grep -q '/usb'; then echo "usb"; return; fi
+    # 是 MMC 设备但读不到 type（老内核 / 没暴露）：不猜，交给调用方显式指定
+    case "$name" in
+        mmcblk*) echo "mmc-unknown"; return ;;
+    esac
     echo "other"
 }
 
@@ -124,6 +195,12 @@ list_candidates() {
         [ -b "$dev" ] || continue
         [ "$dev" = "$SRC_DISK" ] && continue
         kind="$(device_kind "$name")"
+        # SDIO 卡（本机的 Wi-Fi 模块）永远不作为安装目标：
+        # 往它上面写分区表会直接毁掉主联网链路。
+        if [ "$kind" = "sdio" ]; then
+            printf '  %-16s %-10s %s\n' "$dev" "sdio" "$(lsblk -dno SIZE "$dev" 2>/dev/null | head -1 || true)（跳过：Wi-Fi 的 SDIO 卡）"
+            continue
+        fi
         size="$(lsblk -dno SIZE "$dev" 2>/dev/null | head -1 || true)"
         printf '  %-16s %-10s %s\n' "$dev" "$kind" "$size"
     done
@@ -139,22 +216,40 @@ else
 fi
 
 if [ -z "$TARGET" ]; then
-    # 优先选可移动介质：这样 eMMC 完全不动，原系统保留（可回退）。
+    # 自动选目标。分两种情况，**不能混**：
+    #   mode=emmc/auto → 只认内核 MMC 类型 = MMC 的设备（真 eMMC）
+    #   mode=media     → 只认可移动 / USB 介质，绝不碰 eMMC
+    #
+    # 原来这里写死 /dev/mmcblk0 —— 在 QM1 上那是 Wi-Fi 的 SDIO 卡；
+    # 而且按字典序兜底选第一个 mmcblk，选中的同样是那张 Wi-Fi 卡。
+    # 往上面写整盘镜像 = 把主联网链路写坏。
     AUTO_TARGET=""
-    while read -r dev kind _rest; do
-        [ -n "$dev" ] || continue
-        case "$kind" in
-            removable|usb) AUTO_TARGET="$dev"; break ;;
-        esac
-    done <<< "$CANDIDATES"
-    if [ -n "$AUTO_TARGET" ]; then
+    if [ "$MODE" = "media" ]; then
+        while read -r dev kind _rest; do
+            [ -n "$dev" ] || continue
+            case "$kind" in
+                removable|usb) AUTO_TARGET="$dev"; break ;;
+            esac
+        done <<< "$CANDIDATES"
+        [ -n "$AUTO_TARGET" ] || die "--mode media 需要一个可移动 / USB 介质作为目标，但没找到。
+本机候选设备如下：
+$(printf '%s\n' "$CANDIDATES" | sed 's/^/    /')
+请用 --target <设备> 显式指定（例如 --target /dev/sdb）。"
         TARGET="$AUTO_TARGET"
-        MODE="media"
-        log "默认选中可移动介质：$TARGET（eMMC 不会被触碰）"
+        log "选中可移动介质：$TARGET（eMMC 不会被触碰）"
     else
-        TARGET="/dev/mmcblk0"
+        while read -r dev kind _rest; do
+            [ -n "$dev" ] || continue
+            case "$kind" in
+                emmc) AUTO_TARGET="$dev"; break ;;
+            esac
+        done <<< "$CANDIDATES"
+        [ -n "$AUTO_TARGET" ] || die "没有找到 eMMC（内核 MMC 类型 = MMC 的块设备）。本机可能的存储设备如下：
+$(printf '%s\n' "$CANDIDATES" | sed 's/^/    /')
+请用 --target <设备> 显式指定目标（例如 --target /dev/mmcblk1）。"
+        TARGET="$AUTO_TARGET"
         MODE="emmc"
-        warn "没有发现可移动介质 —— 默认目标改为 eMMC（$TARGET），这一步会覆盖 eMMC"
+        log "选中 eMMC：$TARGET（内核 MMC 类型 = MMC）"
     fi
 fi
 
@@ -299,6 +394,70 @@ fi
 [ -n "$SSH_USER" ] && printf '%s\n' "$SSH_USER" > "$WORK_PROV/ssh_user"
 [ -n "$HOSTNAME_CFG" ] && printf '%s\n' "$HOSTNAME_CFG" > "$WORK_PROV/hostname"
 
+# ---------- 3f. 把 Wi-Fi 配置写进 live 系统 ----------
+# 为什么要写两遍（原来只写了 provisioning 目录）：
+#   * provisioning 目录 (/etc/qm1/provision/) 只在**首次开机**时被
+#     qm1-firstboot 读取 —— 装完"试用"的那台机器（还是从 U 盘跑）
+#     /etc/wpa_supplicant/wpa_supplicant.conf 仍然是全注释 ⇒ 试不联网；
+#   * [5/6] 的整盘 dd 会把 live 根分区原样复制到 eMMC ⇒ 这次写入会
+#     一起进目标系统，不用再手工补一次。
+if [ -f "$WORK_PROV/wpa_supplicant.conf" ]; then
+    mount -o remount,rw / 2>/dev/null || true
+    install -d -m 0755 /etc/wpa_supplicant
+    if cp "$WORK_PROV/wpa_supplicant.conf" /etc/wpa_supplicant/wpa_supplicant.conf 2>/dev/null; then
+        chmod 0600 /etc/wpa_supplicant/wpa_supplicant.conf
+        log "已把 Wi-Fi 配置写入本机（会随整盘复制进 eMMC）"
+        # 顺手让当前这台（安装环境/试用环境）也用上这份配置
+        systemctl enable qm1-wifi@wlan0.service >/dev/null 2>&1 || true
+        systemctl restart --no-block qm1-wifi@wlan0.service >/dev/null 2>&1 || true
+    else
+        warn "无法写入 /etc/wpa_supplicant/wpa_supplicant.conf —— 目标系统里 Wi-Fi 需手工配置"
+    fi
+fi
+
+# ---------- 3g. 登录账号与口令 ----------
+# 镜像里预置了 qm1 用户，但口令是**锁定的**（镜像里不放默认口令 ——
+# 一份会被公开仓库分发的镜像不该带任何通用口令）。
+# 这里在装机时生成一次性口令写进去，装完就能 SSH 登进去。
+if id "$LOGIN_USER" >/dev/null 2>&1; then
+    log "镜像内已有账号：$LOGIN_USER"
+else
+    if useradd --create-home --shell /bin/bash "$LOGIN_USER" 2>/dev/null; then
+        usermod -aG sudo "$LOGIN_USER" 2>/dev/null || true
+        log "已创建账号：$LOGIN_USER"
+    else
+        warn "创建账号 $LOGIN_USER 失败 —— 装完后需要手工创建"
+    fi
+fi
+if id "$LOGIN_USER" >/dev/null 2>&1; then
+    if [ -z "$SSH_PASSWORD" ]; then
+        # 24 位十六进制：够长、不会和 shell/键盘布局打架
+        SSH_PASSWORD="$(od -An -tx1 -N 12 /dev/urandom 2>/dev/null | tr -d ' \n')"
+    fi
+    if [ -n "$SSH_PASSWORD" ]; then
+        if printf '%s:%s\n' "$LOGIN_USER" "$SSH_PASSWORD" | chpasswd 2>/dev/null; then
+            log "已为 $LOGIN_USER 设置一次性登录口令"
+        else
+            warn "设置口令失败 —— 装完后需要用 sudo passwd 手工设置"
+            SSH_PASSWORD=""
+        fi
+    fi
+    # sshd 允许口令登录（仅限这个账号）。
+    # 命名必须排在 overlay 里的 sshd_config.d/qm1.conf **之前**
+    # （"05-qm1-user.conf" < "qm1.conf"）：sshd 对每个关键字取"第一个取得的值"，
+    # 所以这里先给 yes，后面那个全局的 no 对 qm1 就不会再覆盖回来。
+    install -d -m 0755 /etc/ssh/sshd_config.d
+    cat > /etc/ssh/sshd_config.d/05-qm1-user.conf <<EOF
+# 由 QM1 安装程序生成：允许 $LOGIN_USER 用口令登录
+# （文件号必须小于 10-qm1.conf —— sshd 取每个关键字的"第一个值"）
+Match User $LOGIN_USER
+    PasswordAuthentication yes
+EOF
+    chmod 0644 /etc/ssh/sshd_config.d/05-qm1-user.conf
+    systemctl enable ssh.service >/dev/null 2>&1 || true
+    printf '%s\n' "$LOGIN_USER" > "$WORK_PROV/ssh_user"
+fi
+
 # ---------- [4/6] 备份 ----------
 step "[4/6] 备份"
 
@@ -306,25 +465,137 @@ TARGET_BYTES="$(blockdev --getsize64 "$TARGET")"
 TARGET_MIB=$(( TARGET_BYTES / 1048576 ))
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE=""
+BACKUP_SRC=""        # 备份数据所在（文件或裸设备）
+BACKUP_BASE=0        # 备份映像的字节 0 在 BACKUP_SRC 里的偏移
 
 avail_bytes() { df -PB1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
+# 源盘上最后一个分区的结束位置（字节）
+source_used_end() {
+    local end=0 st sz
+    while read -r st sz; do
+        [ -n "${st:-}" ] || continue
+        [ "${sz:-0}" -gt 0 ] || continue
+        end=$(( st + sz ))
+    done < <(lsblk -bnro START,SIZE,TYPE "$SRC_DISK" 2>/dev/null \
+             | awk '$3=="part" && $1 ~ /^[0-9]+$/ && $2 ~ /^[0-9]+$/ {print $1, $2}')
+    echo "$end"
+}
+
+# 源盘尾部**未分区**的空间（U 盘容量大于安装镜像时的"同盘既当启动盘又当备份盘"）
+source_tail_bytes() {
+    local dsize used
+    dsize="$(blockdev --getsize64 "$SRC_DISK" 2>/dev/null || echo 0)"
+    used="$(source_used_end)"
+    # 盘尾留 1 MiB 给 GPT 备份头
+    echo $(( dsize - used - 1048576 ))
+}
+
+# 对一段字节区间算 sha256（用 iflag=skip_bytes/count_bytes，按字节精确取）
+device_hash() {  # $1=偏移 $2=长度
+    dd if="$TARGET" iflag=skip_bytes,count_bytes skip="$1" count="$2" status=none 2>/dev/null \
+        | sha256sum | awk '{print $1}'
+}
+backup_hash() {  # $1=备份映像内偏移 $2=长度
+    dd if="$BACKUP_SRC" iflag=skip_bytes,count_bytes skip="$(( BACKUP_BASE + $1 ))" count="$2" status=none 2>/dev/null \
+        | sha256sum | awk '{print $1}'
+}
+
+# 逐分区比对备份与原盘 —— 不是只算备份文件自身的哈希
+verify_backup_partitions() {
+    local name start size dsum bsum ok=0 bad=0
+    log "校验备份：逐分区比对 sha256（GPT 头 + 每个分区）"
+    # GPT 主头 + 分区表（前 1 MiB）
+    dsum="$(device_hash 0 1048576)"
+    bsum="$(backup_hash 0 1048576)"
+    if [ "$dsum" = "$bsum" ]; then
+        log "  GPT/分区表区（1 MiB）一致：$dsum"
+        ok=$(( ok + 1 ))
+    else
+        warn "  GPT/分区表区（1 MiB）不一致：原盘 $dsum / 备份 $bsum"
+        bad=$(( bad + 1 ))
+    fi
+    while read -r name start size; do
+        [ -n "${name:-}" ] || continue
+        [ "${size:-0}" -gt 0 ] || continue
+        dsum="$(device_hash "$start" "$size")"
+        bsum="$(backup_hash "$start" "$size")"
+        if [ "$dsum" = "$bsum" ]; then
+            log "  分区 $name（偏移 $start，$(( size / 1048576 )) MiB）一致：$dsum"
+            ok=$(( ok + 1 ))
+        else
+            warn "  分区 $name（偏移 $start，$(( size / 1048576 )) MiB）不一致：原盘 $dsum / 备份 $bsum"
+            bad=$(( bad + 1 ))
+        fi
+    done < <(lsblk -bnro NAME,START,SIZE,TYPE "$TARGET" 2>/dev/null \
+             | awk '$4=="part" && $3>0 {print $1, $2, $3}')
+    log "备份校验：$ok 项一致，$bad 项不一致"
+    [ "$bad" -eq 0 ]
+}
+
 if [ "$MODE" = "emmc" ]; then
     # 覆盖 eMMC 之前必须做完整备份：这是"还能装回原版系统"的唯一保障。
-    if [ -z "$BACKUP_DIR" ]; then
-        die "覆盖 eMMC 前必须指定备份目录：--backup-dir <大容量介质上的目录>"
+    #
+    # 原来这里写死"必须 --backup-dir"，而 GRUB 菜单 ① 并不传它
+    # ⇒ 从菜单选"安装到 eMMC"必然在这一步 die。QM1 只有一个 USB-A 口，
+    # 现实用法是"把安装镜像 dd 到一个 ≥64GiB 的 U 盘，同盘既当启动盘
+    # 又当备份盘"—— 所以这里自己找备份位置：
+    #   1) --backup-dir 指定的目录
+    #   2) 安装介质上已挂载、且剩余空间足够的目录
+    #   3) 安装介质**尾部未分区**的空间（U 盘比安装镜像大时的剩余部分）
+    BACKUP_METHOD=""
+    if [ -n "$BACKUP_DIR" ]; then
+        mkdir -p "$BACKUP_DIR" || die "无法创建备份目录 $BACKUP_DIR"
+        need="$(avail_bytes "$BACKUP_DIR")"
+        [ "${need:-0}" -ge "$TARGET_BYTES" ] \
+            || die "备份目录空间不足：需要 ${TARGET_BYTES} 字节，只有 ${need:-0} 字节"
+        BACKUP_METHOD="dir:$BACKUP_DIR"
+    else
+        for _mp in $(lsblk -nro MOUNTPOINT "$SRC_DISK" 2>/dev/null | grep -v '^$' | sort -u); do
+            [ -d "$_mp" ] && [ -w "$_mp" ] || continue
+            need="$(avail_bytes "$_mp")"
+            [ "${need:-0}" -ge "$TARGET_BYTES" ] || continue
+            BACKUP_METHOD="dir:$_mp"
+            break
+        done
+        if [ -z "$BACKUP_METHOD" ]; then
+            _tail="$(source_tail_bytes)"
+            if [ "${_tail:-0}" -ge "$TARGET_BYTES" ]; then
+                BACKUP_METHOD="raw:$SRC_DISK"
+            fi
+        fi
     fi
-    mkdir -p "$BACKUP_DIR" || die "无法创建备份目录 $BACKUP_DIR"
-    need="$(avail_bytes "$BACKUP_DIR")"
-    [ "${need:-0}" -ge "$TARGET_BYTES" ] \
-        || die "备份目录空间不足：需要 ${TARGET_BYTES} 字节，只有 ${need:-0} 字节"
-    BACKUP_FILE="$BACKUP_DIR/qm1-emmc-preinstall-$STAMP.img"
-    log "整盘备份 → $BACKUP_FILE（${TARGET_MIB} MiB，请耐心）"
-    dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
-    sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
-    log "整盘备份完成：$(cat "$BACKUP_FILE.sha256")"
+    [ -n "$BACKUP_METHOD" ] || die "覆盖 eMMC 前必须能放下整盘备份（需要 ${TARGET_BYTES} 字节），但没有找到合适的备份位置。
+请用 --backup-dir <大容量介质上的目录> 指定；
+或把安装镜像 dd 到一个比镜像大 ≥28.5GiB 的 U 盘（尾部未分区空间会自动用作备份区）。"
+
+    case "$BACKUP_METHOD" in
+        dir:*)
+            BACKUP_STORE="${BACKUP_METHOD#dir:}"
+            BACKUP_FILE="$BACKUP_STORE/qm1-emmc-preinstall-$STAMP.img"
+            log "整盘备份 → $BACKUP_FILE（${TARGET_MIB} MiB，请耐心）"
+            dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
+            BACKUP_SRC="$BACKUP_FILE"
+            BACKUP_BASE=0
+            ;;
+        raw:*)
+            BACKUP_RAW_DEV="${BACKUP_METHOD#raw:}"
+            BACKUP_BASE="$(source_used_end)"
+            BACKUP_FILE="${BACKUP_RAW_DEV}@${BACKUP_BASE}"
+            log "整盘备份 → 安装介质尾部未分区空间（$BACKUP_RAW_DEV 偏移 ${BACKUP_BASE}，${TARGET_MIB} MiB，请耐心）"
+            dd if="$TARGET" of="$BACKUP_RAW_DEV" bs=4M seek=$(( BACKUP_BASE / 1048576 )) \
+               conv=notrunc,fsync status=progress
+            BACKUP_SRC="$BACKUP_RAW_DEV"
+            ;;
+    esac
+
+    verify_backup_partitions \
+        || die "备份校验失败（逐分区 sha256 不一致）—— 中止。没有对 $TARGET 做任何写入。
+备份位置：$BACKUP_FILE
+请先检查介质（这通常意味着 U 盘读写有问题），不要在备份不可信的情况下继续。"
+
     if [ "$ASSUME_YES" != 1 ]; then
-        ask "备份已完成，确认覆盖 $TARGET？" "no"
+        ask "备份已完成并逐分区校验通过，确认覆盖 $TARGET？" "no"
         [ "$REPLY" = "yes" ] || die "已取消（未做任何写入）"
     fi
 else
@@ -365,20 +636,48 @@ LC_ALL=C sfdisk "$TARGET" < "$SPEC" >/dev/null
 
 partprobe "$TARGET" 2>/dev/null || true
 udevadm settle 2>/dev/null || true
+
+# 分区设备按**分区类型**认，不按 lsblk 的输出顺序猜。
+# 原来直接取 NEWPARTS[0]/[1]，一旦内核给出的顺序变了，就把 ESP 和根分区
+# 搞反 —— 结果是 FAT32 的引导分区里装的是 ext4 根文件系统。
+#   EFI System  = c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+#   Linux fs    = 0fc63daf-8483-4772-8e79-3d69d8477de4
 PART1=""
 PART2=""
+PART1_NO=""
+PART2_NO=""
 for _ in $(seq 1 20); do
-    mapfile -t NEWPARTS < <(lsblk -ndo NAME,TYPE "$TARGET" 2>/dev/null | awk '$2=="part"{print $1}')
-    if [ "${#NEWPARTS[@]}" -ge 2 ]; then
-        PART1="/dev/${NEWPARTS[0]}"
-        PART2="/dev/${NEWPARTS[1]}"
+    PART1=""
+    PART2=""
+    PART1_NO=""
+    PART2_NO=""
+    while read -r _name _ptype _pno; do
+        case "$_ptype" in
+            c12a7328-f81f-11d2-ba4b-00a0c93ec93b)
+                PART1="/dev/$_name"; PART1_NO="$_pno" ;;
+            0fc63daf-8483-4772-8e79-3d69d8477de4)
+                PART2="/dev/$_name"; PART2_NO="$_pno" ;;
+        esac
+    done < <(lsblk -nro NAME,PARTTYPE,PARTN "$TARGET" 2>/dev/null)
+    if [ -n "$PART1" ] && [ -n "$PART2" ]; then
         break
     fi
     sleep 0.5
 done
-[ -n "$PART1" ] && [ -n "$PART2" ] || die "分区设备没出现（等 10 秒仍未看到两个分区）"
+[ -n "$PART1" ] && [ -n "$PART2" ] \
+    || die "分区设备没出现或类型不对（等 10 秒仍未看到 EFI System + Linux 文件系统两个分区）"
 [ -b "$PART1" ] && [ -b "$PART2" ] || die "分区设备没出现：$PART1 / $PART2"
-log "目标分区：$PART1（ESP） / $PART2（根）"
+log "目标分区：$PART1（ESP，p$PART1_NO） / $PART2（根，p$PART2_NO）"
+
+# 分区布局自检：写出来的分区表必须与我们打算写的一致
+_layout="$(LC_ALL=C sfdisk -d "$TARGET" 2>/dev/null || true)"
+_esp_got="$(awk -F': ' '/start=/{print $2; exit}' <<<"$_layout" | head -1)"
+if [ -n "$_layout" ]; then
+    _n_parts="$(grep -c '^[^#].*start=' <<<"$_layout" || true)"
+    [ "${_n_parts:-0}" -eq 2 ] \
+        || die "分区布局不对：期望 2 个分区，实际 ${_n_parts:-0} 个"
+    log "分区布局自检通过（2 个分区，起点 ${_esp_got:-?}）"
+fi
 
 mount -o remount,ro / 2>/dev/null || warn "根文件系统改只读失败（继续，可能有轻微不一致）"
 
@@ -409,6 +708,18 @@ if [ "$SRC_ROOT_HASH" = "$DST_ROOT_HASH" ]; then
 else
     warn "根文件系统写入校验失败：源 $SRC_ROOT_HASH / 目标 $DST_ROOT_HASH"
     rc=1
+fi
+# 校验失败 = 写盘没成功，继续往下走只会留下一个"装了一半"的 eMMC，
+# 而用户从 U 盘重启后看到的现象是"启动失败"，却查不出真正原因。
+# 这里必须立刻中止，并说清楚当前 eMMC 处于什么状态、怎么恢复。
+if [ "$rc" -ne 0 ]; then
+    die "写入校验失败 —— 中止，没有做后续改动（菜单、provisioning、安装记录都没做）。
+$TARGET 现在处于**写了一半**的状态，不要从这里启动。
+可用的恢复手段：
+  1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
+     用它恢复：dd if=<备份文件> of=$TARGET bs=4M conv=fsync
+  2) 重新跑一遍安装（备份会自动再存一份）。
+先把 U 盘插好、别拔，然后重新启动到安装介质再试。"
 fi
 
 # ---------- [6/6] 收尾 ----------
@@ -475,8 +786,11 @@ if mount "$PART2" "$DST_ROOT_MNT" 2>/dev/null; then
         echo "esp_sha256_at_write=$DST_ESP_HASH"
         echo "rootfs_sha256_at_write=$DST_ROOT_HASH"
         echo "backup=${BACKUP_FILE:-none}"
+        [ -n "$LOGIN_USER" ] && echo "ssh_user=$LOGIN_USER"
+        [ -n "$SSH_PASSWORD" ] && echo "ssh_password=$SSH_PASSWORD"
     } > "$DST_ROOT_MNT/etc/qm1-installed-to-emmc" 2>/dev/null \
         || warn "安装记录写入目标根分区失败"
+    chmod 0600 "$DST_ROOT_MNT/etc/qm1-installed-to-emmc" 2>/dev/null || true
     sync
     umount "$DST_ROOT_MNT"
     log "安装记录已写入目标根分区：/etc/qm1-installed-to-emmc"
@@ -484,6 +798,49 @@ else
     warn "挂载目标根分区失败 —— 安装记录没能写进目标"
 fi
 rmdir "$DST_ROOT_MNT" 2>/dev/null || true
+
+# 6e. 登记 UEFI 启动项
+#
+# 原来这一步整个没有 —— 刷完 eMMC 后，固件里没有指向新系统的启动项，
+# 结果就是"装完了，但开机还是进原来的系统（或没有系统）"。
+# ESP 上有两条可引导文件（make-esp.sh 写入）：
+#   \EFI\BOOT\BOOTX64.EFI（64 位）、\EFI\BOOT\BOOTIA32.EFI（32 位兜底）
+# 优先登记 64 位那条；efibootmgr 不可用时靠 \EFI\BOOT\ 兜底路径 + 手工命令。
+EFI_ENTRY_DONE="no"
+if [ -e /sys/firmware/efi/efivars ]; then
+    if command -v efibootmgr >/dev/null 2>&1; then
+        _esp_mnt="$(mktemp -d)"
+        if mount "$PART1" "$_esp_mnt" 2>/dev/null; then
+            if [ -f "$_esp_mnt/EFI/BOOT/BOOTX64.EFI" ]; then
+                if efibootmgr -c -d "$TARGET" -p "$PART1_NO" -L "QM1 Debian" \
+                        -l '\EFI\BOOT\BOOTX64.EFI' 2>/dev/null; then
+                    log "已登记 UEFI 启动项：QM1 Debian（\EFI\BOOT\BOOTX64.EFI，磁盘 $TARGET 分区 p$PART1_NO）"
+                    EFI_ENTRY_DONE="yes"
+                else
+                    warn "efibootmgr 登记启动项失败（可以稍后手工执行，见下方提示）"
+                fi
+            else
+                warn "目标 ESP 里没有 \EFI\BOOT\BOOTX64.EFI —— 无法登记启动项"
+            fi
+            umount "$_esp_mnt" 2>/dev/null || true
+        else
+            warn "挂载目标 ESP 失败 —— 无法登记 UEFI 启动项"
+        fi
+        rmdir "$_esp_mnt" 2>/dev/null || true
+    else
+        warn "镜像里没有 efibootmgr —— 无法自动登记 UEFI 启动项"
+    fi
+else
+    warn "当前不是以 UEFI 模式启动（没有 /sys/firmware/efi/efivars）—— 无法登记 UEFI 启动项"
+fi
+if [ "$EFI_ENTRY_DONE" != "yes" ]; then
+    cat <<EOF
+  手工登记（进入已装好的系统后执行，或从 U 盘的安装环境执行）：
+    efibootmgr -c -d $TARGET -p $PART1_NO -L "QM1 Debian" -l '\\EFI\\BOOT\\BOOTX64.EFI'
+    efibootmgr -o 1        # 可选：把它设为第一启动项
+  兜底：\\EFI\\BOOT\\BOOTX64.EFI 是固件的可引导路径，多数固件会自动找到它。
+EOF
+fi
 
 echo
 echo "================================================================"
@@ -495,6 +852,11 @@ fi
 echo " 目标设备 : $TARGET（模式 $MODE）"
 echo " 根分区   : $PART2"
 echo " 备份     : ${BACKUP_FILE:-none}"
+if [ "$EFI_ENTRY_DONE" = "yes" ]; then
+    echo " UEFI 启动项 : 已登记（QM1 Debian）"
+else
+    echo " UEFI 启动项 : 未登记 —— 见上面的手工命令"
+fi
 if [ "$MODE" = "media" ]; then
     echo " eMMC     : 未触碰（原系统保留，可随时取下 $TARGET 回退）"
 fi
@@ -512,5 +874,17 @@ else
     echo "   3. 首次开机后需要手动联网（本次没有 Wi-Fi 配置）"
 fi
 echo "   4. 登录后跑：sudo /usr/local/bin/qm1-selftest"
+if [ -n "$LOGIN_USER" ]; then
+    echo
+    echo " 登录凭据（仅此一次，请立即抄下来并改掉口令）："
+    echo "   用户名 : $LOGIN_USER"
+    if [ -n "$SSH_PASSWORD" ]; then
+        echo "   口令   : $SSH_PASSWORD"
+    else
+        echo "   口令   : 未自动生成（请用 sudo passwd $LOGIN_USER 设置）"
+    fi
+    echo "   改口令 : passwd $LOGIN_USER"
+    echo "   记录位置：目标根分区 /etc/qm1-installed-to-emmc（权限 0600）"
+fi
 echo "================================================================"
 exit "$rc"

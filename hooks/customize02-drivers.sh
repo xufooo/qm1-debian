@@ -202,14 +202,21 @@ chroot "$TARGET" update-initramfs -u -k all
 # ---------- 4. 运行时自动加载的硬件模块 ----------
 mkdir -p "$TARGET/etc/modules-load.d"
 cat > "$TARGET/etc/modules-load.d/qm1-hardware.conf" <<'EOF'
-# QM1 硬件模块（缺哪个会在 drv-selfcheck.sh 里报出来）
+# QM1 硬件模块（缺哪个会在 drv-selfcheck.sh 里里报出来）
 i915
 snd_hda_intel
 btusb
+# 内置蓝牙（Realtek RTL8723BS 的 BT 部分，ACPI UART）。
+# hci_uart 里编进了 hci_h5（3WIRE 协议），btrtl 负责按名字取厂商固件
+# rtl_bt/rtl8723bs_fw.bin + rtl_bt/rtl8723bs_config-OBDA8723.bin。
+# 这两个模块必须在内核枚举出 ACPI HID OBDA8723 之前就位。
+hci_uart
+btrtl
 # 内置 Realtek RTL8723BS（SDIO）。通常 udev 也能按 modalias 自动加载，
 # 显式列出是为了在 SDIO 枚举晚于模块加载时仍能接管。
 # 注意：装了就打了补丁的 r8723bs_qm1 时，这个条目要改成 r8723bs_qm1 ——
-# 树内 r8723bs 会被 /etc/modprobe.d/qm1-rtl8723bs.conf 里的 blacklist 挡住。
+# 树内 r8723bs 会被树外模块包自带的 /etc/modprobe.d/qm1-rtl8723bs.conf
+# 里的 blacklist 挡住（那台 Debian 自带的 r8723bs_nic.bin 只对树内驱动有效）。
 r8723bs
 EOF
 
@@ -313,6 +320,40 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     [ -f "$TARGET/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
         || die "rtw88 固件 rtw88/rtw8723b_fw.bin 缺失（Debian 13 的 firmware-realtek 不含该 blob）"
     log "rtw88 模块：$_sdio_mod（vermagic $_vm，与镜像内核一致）"
+
+    # ★ 隔离：把树内 staging 驱动 r8723bs 和树内 rtw88 系列挡住。
+    #   没有这道隔离，出货镜像会**静默地用回有永久卡死路径的 staging 驱动**：
+    #     树内 r8723bs 带着 0x024c:0xb723 的 SDIO device id，udev 按 modalias
+    #     自动把它加载起来抢先绑定 SDIO 卡 ⇒ 我们的 rtw88_qm1 根本绑不上，
+    #     而"装上了 rtw88 模块"这件事在日志和清单里看起来一切正常。
+    #   blacklist 挡自动加载（udev/modprobe 的别名路径），install ... /bin/false
+    #   再挡一次显式 modprobe —— 两道都要，因为 CI 的断言只看文件在不在。
+    #
+    #   注意：模块包自己已经带了 /etc/modprobe.d/qm1-rtw88-8723bs.conf
+    #   （里面还有 options rtw88_qm1 disable_lps_deep=y 等参数）。
+    #   这里**只补缺失的行，不覆盖整个文件** —— 覆盖掉会把那些参数弄丢，
+    #   而 CI 的包内容校验正是按这些参数断言的。
+    _iso_conf="$TARGET/etc/modprobe.d/qm1-rtw88-8723bs.conf"
+    mkdir -p "$TARGET/etc/modprobe.d"
+    if [ ! -f "$_iso_conf" ]; then
+        {
+            echo "# QM1 内置 RTL8723BS：出货驱动是上游 rtw88 整树回移模块（$_sdio_mod），"
+            echo "# 树内 staging 驱动 r8723bs 必须挡住，否则它会按 SDIO modalias 抢先绑定，"
+            echo "# 把我们装好的 rtw88 模块晾在一边（现象：装了根治模块却仍在用老驱动）。"
+        } > "$_iso_conf"
+    fi
+    for _iso_line in \
+        "blacklist r8723bs" \
+        "install r8723bs /bin/false" \
+        "blacklist rtw88_core" \
+        "blacklist rtw88_sdio" \
+        "blacklist rtw88_usb" \
+        "blacklist rtw88_pci" ; do
+        grep -qxF "$_iso_line" "$_iso_conf" 2>/dev/null \
+            || printf '%s\n' "$_iso_line" >> "$_iso_conf"
+    done
+    chmod 0644 "$_iso_conf"
+    log "已补齐隔离配置：$_iso_conf（挡住树内 r8723bs 与树内 rtw88）"
     # modules-load.d：换成回移模块，去掉 staging 驱动与补丁 staging 模块
     sed -i -E '/^r8723bs(_qm1)?$/d' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
     printf '%s\n' "$_sdio_mod" >> "$TARGET/etc/modules-load.d/qm1-hardware.conf"
@@ -325,59 +366,59 @@ else
     RTW88_MODULE_STATE="absent"
 fi
 
-# ---------- 4d. 蓝牙：RTL8723BS 的 BT 部分（ACPI UART + 厂商固件下发） ----------
+# ---------- 4d. 蓝牙：RTL8723BS 的 BT 部分（内核 hci_uart + btrtl + 发行版固件） ----------
 # QM1 的蓝牙是 combo 芯片的 BT 部分，经 **ACPI 枚举的 UART** 挂在主机上
 # （ASUS 官方 Win8 驱动 rtkuart.inf：ACPI\VEN_OBDA&DEV_8723 / 0623）。
-# Linux 主线没有 Realtek UART HCI 驱动，缺的是「把厂商固件刷进芯片并初始化」
-# 这一步 —— 由用户态 rtk_hciattach（lwfinger/rtl8723bs_bt）完成，
-# 之后内核 btuart（CONFIG_BT_HCIUART）接手同一个串口。
-# QM1_BT_HCIATTACH_DEB 指向 scripts/build-bt-hciattach.sh 产出的 .deb。
-if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
-    _bt_deb_name="$(basename "$QM1_BT_HCIATTACH_DEB")"
-    log "安装蓝牙厂商初始化包：$_bt_deb_name"
-    cp "$QM1_BT_HCIATTACH_DEB" "$TARGET/tmp/$_bt_deb_name"
-    if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_bt_deb_name"; then
-        rm -f "$TARGET/tmp/$_bt_deb_name"
-        die "蓝牙包安装失败：$_bt_deb_name"
-    fi
-    rm -f "$TARGET/tmp/$_bt_deb_name"
-    [ -x "$TARGET/usr/sbin/rtk_hciattach" ] \
-        || die "装完 deb 但镜像里没有 /usr/sbin/rtk_hciattach"
-    for _bt_fw in rtlbt_fw rtlbt_config; do
-        [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_fw" ] || die "蓝牙固件 $_bt_fw 缺失"
+#
+# 【路线更正 —— 以前走错了，这里改成内核路线】
+# 以前装的是用户态 rtk_hciattach（lwfinger/rtl8723bs_bt），理由写的是
+# 「主线没有 Realtek UART HCI 驱动」。这个前提经核实是错的：
+#   * 上游 v6.12 drivers/bluetooth/hci_h5.c 的 h5_acpi_match[] 里就有
+#     {"OBDA0623",…} 与 {"OBDA8723",…} —— 内核**自己**认这台机的 BT UART，
+#     走 serdev 绑定（hci_h5 编在 hci_uart.ko 里）；
+#   * 上游 v6.12 drivers/bluetooth/btrtl.c 里 RTL8723BS 的
+#     .fw_name = "rtl_bt/rtl8723bs_fw"、.cfg_name = "rtl_bt/rtl8723bs_config"，
+#     实际请求 rtl_bt/rtl8723bs_config-OBDA8723.bin（按 ACPI HID 拼名）；
+#   * Debian 的 firmware-realtek（非-free-firmware 组件）里就有
+#     rtl_bt/rtl8723bs_fw.bin、rtl8723bs_config-OBDA8723.bin、
+#     rtl8723bs_config-OBDA0623.bin；
+#   * Debian 13 的 6.12 内核实测 config：CONFIG_BT_HCIUART=m、
+#     CONFIG_BT_HCIUART_SERDEV=y、CONFIG_BT_HCIUART_3WIRE=y、CONFIG_BT_RTL=m。
+# 而用户态 rtk_hciattach 是**有害**的：它和内核抢同一个串口（谁先占谁赢，
+# 另一边就彻底没有 hci0），厂商 hciattach 的 -n 参数让它永不返回
+# （脚本后半段是死代码，systemd 反而显示 active(running)），
+# 兜底逻辑还可能把内核控制台 ttyS0 切成 raw 造成串口乱码。
+# ⇒ 只走内核路线：hci_uart（含 hci_h5）+ btrtl + 发行版固件。
+BT_STATE="kernel:hci_uart+btrtl"
+
+_bt_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
+[ -n "$_bt_kver" ] || die "镜像里没有 /lib/modules，无法核对蓝牙内核模块"
+
+# 固件：必须来自发行版的 firmware-realtek（内核 btrtl 按名字取，不再自制）
+for _bt_fw in rtl8723bs_fw.bin rtl8723bs_config-OBDA8723.bin rtl8723bs_config-OBDA0623.bin; do
+    [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_fw" ] \
+        || die "蓝牙固件 /lib/firmware/rtl_bt/$_bt_fw 缺失（需要 firmware-realtek 包）"
+done
+log "蓝牙固件就位（rtl_bt/rtl8723bs_fw.bin + config-OBDA8723/OBDA0623）"
+
+# 内核侧：hci_uart（含 hci_h5 的 3WIRE 协议）+ btrtl（厂商固件下发）
+if [ -f "$TARGET/boot/config-$_bt_kver" ]; then
+    _bt_cfg="$TARGET/boot/config-$_bt_kver"
+    for _need in CONFIG_BT_HCIUART CONFIG_BT_HCIUART_SERDEV CONFIG_BT_HCIUART_3WIRE CONFIG_BT_RTL; do
+        grep -qE "^$_need=(y|m)$" "$_bt_cfg" \
+            || die "内核缺 $_need —— 内核没法接管这台机的 Realtek BT UART（蓝牙不可用）"
     done
-    _bt_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
-    if [ -n "$_bt_kver" ] && [ -f "$TARGET/boot/config-$_bt_kver" ]; then
-        # Debian 13 的内核（6.12.113+deb13-amd64）实测：CONFIG_BT=m、
-        # CONFIG_BT_HCIUART=m —— hci_uart 是**模块**（Linux 6.x：hci_uart.ko），
-        # 不是编进内核。所以两种配置都要接受，=m 时要确认模块文件在镜像里。
-        if grep -qE '^CONFIG_BT_HCIUART=y$' "$TARGET/boot/config-$_bt_kver"; then
-            log "内核 btuart：编进内核（CONFIG_BT_HCIUART=y）"
-        elif grep -qE '^CONFIG_BT_HCIUART=m$' "$TARGET/boot/config-$_bt_kver"; then
-            # Linux 6.x 里这个模块叫 hci_uart.ko（早期内核才叫 bt_hciuart.ko）
-            _bt_mod="$(find "$TARGET/lib/modules/$_bt_kver" \( -name 'hci_uart.ko*' -o -name 'bt_hciuart.ko*' \) \
-                 -print -quit 2>/dev/null || true)"
-            if [ -n "$_bt_mod" ]; then
-                log "内核 btuart：模块 hci_uart.ko（CONFIG_BT_HCIUART=m），随包加载"
-            else
-                warn "内核 CONFIG_BT_HCIUART=m，但镜像里找不到 hci_uart.ko —— 厂商固件下发后没人接手串口"
-            fi
-        else
-            warn "内核没有 CONFIG_BT_HCIUART —— 厂商固件下发后蓝牙控制器不会被内核接管"
-        fi
-    fi
-    # 开机自启（用符号链接，避免在 chroot 里跑 systemctl 的副作用）
-    mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
-    ln -sf /lib/systemd/system/qm1-bluetooth.service \
-        "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service"
-    BT_HCIATTACH_STATE="installed:rtk_hciattach:$_bt_deb_name"
+    log "内核蓝牙配置齐备（CONFIG_BT_HCIUART / SERDEV / 3WIRE / BT_RTL）"
 else
-    if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ]; then
-        die "QM1_BT_HCIATTACH_DEB 指向的文件不存在：$QM1_BT_HCIATTACH_DEB"
-    fi
-    warn "未提供 QM1_BT_HCIATTACH_DEB：镜像里没有 rtk_hciattach，内置蓝牙（ACPI UART）不可用"
-    BT_HCIATTACH_STATE="absent"
+    warn "镜像里没有 boot/config-$_bt_kver，跳过内核蓝牙配置核对"
 fi
+
+for _bt_mod in hci_uart btrtl; do
+    if ! find "$TARGET/lib/modules/$_bt_kver" -name "$_bt_mod.ko*" -print -quit 2>/dev/null | grep -q .; then
+        die "镜像里找不到内核模块 $_bt_mod.ko（CONFIG_BT_* 没开或内核包不全）"
+    fi
+done
+log "内核蓝牙模块就位（hci_uart.ko 含 hci_h5 + btrtl.ko）"
 
 # ---------- 5. out-of-tree / DKMS 驱动（可选） ----------
 if [ -n "${QM1_DKMS_DEB_DIR:-}" ] && [ -d "$QM1_DKMS_DEB_DIR" ]; then
@@ -465,8 +506,9 @@ i915|DRM_I915|Intel HD Graphics Gen7（HDMI 输出）|
 snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
-btuart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口，内核模块 hci_uart，Debian 为 =m）|
-r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，主线 staging 驱动）|
+hci_uart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口；hci_h5 的 3WIRE 协议编在此模块里）|
+btrtl|BT_RTL|Realtek 蓝牙厂商固件下发（btrtl，按 ACPI HID 取 rtl_bt/rtl8723bs_*）|
+r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，树内 staging 驱动；装了树外模块时会被 blacklist）|
 brcmfmac|BRCMFMAC|Broadcom Wi-Fi（主线驱动）|
 iwlwifi|IWLWIFI|Intel Wi-Fi（主线驱动）|
 rtw88|RTW88|Realtek 88xx Wi-Fi（主线驱动）|
@@ -513,6 +555,25 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
         printf '%-26s %-8s %s%s\n' "$m" "$st" "$hw" "$mark"
     done
     echo ""
+    echo "--- 出货的内置 Wi-Fi 驱动（树内 r8723bs 会被树外模块包自带的 blacklist 挡住，以这一行为准） ---"
+    case "${RTW88_MODULE_STATE:-absent}" in
+        installed:*)
+            _eff_wifi="${RTW88_MODULE_STATE#installed:}"
+            _eff_wifi="${_eff_wifi%%:*}"
+            printf '%-26s %-8s %s\n' "$_eff_wifi" module "出货的 Wi-Fi 驱动（上游 rtw88 整树回移，根治路径）"
+            ;;
+        *)
+            case "${WIFI_MODULE_STATE:-absent}" in
+                installed:*)
+                    printf '%-26s %-8s %s\n' r8723bs_qm1 module "出货的 Wi-Fi 驱动（打 P1–P5 补丁的树外 staging 模块）"
+                    ;;
+                *)
+                    printf '%-26s %-8s %s\n' r8723bs module "出货的 Wi-Fi 驱动（发行版树内 staging，存在永久卡死路径）"
+                    ;;
+            esac
+            ;;
+    esac
+    echo ""
     echo "--- firmware blob 核对 ---"
     echo "$fw_blob_summary"
     echo "--- 内核 config 关键项 ---"
@@ -524,17 +585,15 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
     echo "${WIFI_MODULE_STATE:-absent}"
     echo "--- rtw88 回移模块 ---"
     echo "${RTW88_MODULE_STATE:-absent}"
-    echo "--- 蓝牙厂商初始化包（rtk_hciattach） ---"
-    echo "${BT_HCIATTACH_STATE:-absent}"
-    if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
-        for _bt_blob in rtlbt_fw rtlbt_config rtlbt_fw_new; do
-            if [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_blob" ]; then
-                echo "bt_firmware_$_bt_blob=ok"
-            else
-                echo "bt_firmware_$_bt_blob=-"
-            fi
-        done
-    fi
+    echo "--- 蓝牙（内核路线：hci_uart 含 hci_h5 + btrtl + 发行版固件） ---"
+    echo "route:${BT_STATE:-absent}"
+    for _bt_blob in rtl8723bs_fw.bin rtl8723bs_config-OBDA8723.bin rtl8723bs_config-OBDA0623.bin; do
+        if [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_blob" ]; then
+            echo "bt_firmware_$_bt_blob=ok"
+        else
+            echo "bt_firmware_$_bt_blob=-"
+        fi
+    done
 } > "$MANIFEST"
 
 # 关键驱动判定：module 或 builtin 都算有，只有 absent 才致命

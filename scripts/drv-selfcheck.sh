@@ -42,6 +42,17 @@ section() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 have() { command -v "$1" >/dev/null 2>&1; }
 mod_loaded() { grep -qw "$1" /proc/modules 2>/dev/null; }
 
+# 一次性把 dmesg 收进变量。
+#
+# 两个坑：
+#   1) 管道 + grep -q 在 pipefail 下会因 SIGPIPE 返回 141，误判成"没有匹配"
+#      ⇒ 统一用 herestring 在变量上匹配。
+#   2) 赋值必须**早于**任何使用处。原来的写法把赋值放在第 4 节末尾，而
+#      第 4 节开头就已经用了 $dmesg_out —— set -u 下那是未绑定变量，整个
+#      自检脚本当场退出（正好是在系统真出问题时退出，最需要诊断结果时
+#      拿不到诊断）。现在提到最前面。
+dmesg_out="$(dmesg 2>/dev/null || true)"
+
 printf '\033[1mQM1 硬件自检\033[0m  %s\n' "$(date -Is)"
 
 # ---------------- 1. 启动关键路径 ----------------
@@ -72,12 +83,31 @@ else
     row FAIL "MMC 控制器" "未发现 /sys/class/mmc_host —— eMMC 未被驱动接管（启动关键）"
 fi
 
-if [ -b /dev/mmcblk0 ]; then
-    cap="$(cat /sys/block/mmcblk0/size 2>/dev/null | awk '{printf "%.1f GiB", $1*512/1024/1024/1024}')"
-    parts="$(lsblk -ndo NAME /dev/mmcblk0 2>/dev/null | tail -n +2 | tr '\n' ' ')"
-    row PASS "eMMC 块设备" "$cap 分区：$parts"
+# eMMC / SD 块设备
+#
+# 不能把 /dev/mmcblk0 当成 eMMC：QM1 上 mmc0 是 Wi-Fi 的 SDIO 卡
+# （Realtek RTL8723BS，AzureWave 模组），eMMC 实际是 mmc1
+# （实机观测 mmc1 = ACPI 80860F14:00 = SanDisk S10032 28.5 GiB）。
+# 内核在 MMC 卡的 device/type 里给出 "MMC"(eMMC) / "SD"(SD 卡)，据此判定。
+mmc_summary=""
+emmc_blk=""
+for b in /sys/class/block/mmcblk*; do
+    [ -e "$b" ] || continue
+    _blk="$(basename "$b")"
+    _dev="$(readlink -f "$b/device" 2>/dev/null || true)"
+    _kind="?"
+    [ -n "$_dev" ] && [ -r "$_dev/type" ] && _kind="$(cat "$_dev/type" 2>/dev/null || echo '?')"
+    _cap="$(cat "$b/size" 2>/dev/null | awk '{printf "%.1fGiB", $1*512/1024/1024/1024}')"
+    mmc_summary="$mmc_summary ${_blk}[${_kind} ${_cap:-?}]"
+    [ "$_kind" = "MMC" ] && emmc_blk="/dev/$_blk"
+done
+if [ -n "$emmc_blk" ]; then
+    _parts="$(lsblk -ndo NAME "$emmc_blk" 2>/dev/null | tail -n +2 | tr '\n' ' ')"
+    row PASS "eMMC 块设备" "$emmc_blk（type=MMC）分区：${_parts:-无}　全部 mmc：${mmc_summary}"
+elif [ -n "$mmc_summary" ]; then
+    row FAIL "eMMC 块设备" "没有找到 type=MMC 的 eMMC（只看到：${mmc_summary}）"
 else
-    row FAIL "eMMC 块设备" "缺少 /dev/mmcblk0"
+    row FAIL "eMMC 块设备" "未发现任何 MMC 块设备"
 fi
 
 for m in sdhci_pci sdhci_acpi mmc_block; do
@@ -116,6 +146,7 @@ fi
 ifs=""
 wlan_found=0
 wlan_drv=""
+wlan_mod=""
 for n in /sys/class/net/*; do
     [ -e "$n" ] || continue
     nm="$(basename "$n")"
@@ -124,9 +155,19 @@ for n in /sys/class/net/*; do
     case "$nm" in
         wl*)
             wlan_found=1
-            # 报出真实绑定驱动：只认接口名会把"驱动没起来"误判成"Wi-Fi 就绪"
+            # 报出真实绑定的驱动与模块：只认接口名会把"驱动没起来"误判成"Wi-Fi 就绪"。
+            #
+            # 分类要看**模块名**（/sys/class/net/wlan0/device/driver/module 的 basename
+            # = KBUILD_MODNAME），不要看 driver 目录名：
+            #   * 树外整树回移的出货模块 = rtw88_qm1（上游把 8723B/BS 并进 rtw88 后
+            #     整个树编成一个模块，模块名就是 KBUILD_MODNAME）；
+            #   * 树内 staging = r8723bs；打了 P1–P5 补丁的树外 staging = r8723bs_qm1。
+            # 之前只按 driver 名匹配 rtw88_8723bs / rtw_8723bs，出货的 rtw88_qm1
+            # 一个都不匹配 ⇒ 自检对实际在用的驱动完全静默。
             d="$(readlink -f "/sys/class/net/$nm/device/driver" 2>/dev/null | xargs -r basename)"
+            m="$(readlink -f "/sys/class/net/$nm/device/driver/module" 2>/dev/null | xargs -r basename)"
             [ -n "$d" ] && wlan_drv="$wlan_drv $nm:$d"
+            [ -n "$m" ] && wlan_mod="$wlan_mod $nm:$m"
             ;;
     esac
 done
@@ -134,9 +175,10 @@ done
 if [ -n "$ifs" ]; then
     row PASS "网络接口" "$ifs"
     if [ "$wlan_found" = "1" ]; then
-        row PASS "无线接口" "存在（绑定驱动：${wlan_drv:-未知}）"
-        case "$wlan_drv" in
-            *rtw88_8723bs*|*rtw_8723bs*)
+        row PASS "无线接口" "存在（绑定驱动：${wlan_drv:-未知}　模块：${wlan_mod:-未知}）"
+        # 分类依据是模块名（KBUILD_MODNAME）
+        case "$wlan_mod" in
+            *rtw88_qm1*|*rtw88_8723bs*|*rtw_8723bs*)
                 # rtw88 回移模块（上游 7.4 的 8723b/8723bs 支持，按镜像内核回移）：
                 # staging 驱动那 4 条永久卡死路径在上游已被重写，不再存在。
                 row PASS "无线驱动 rtw88" "rtw88 回移模块（上游 7.4 的 RTL8723BS 支持，staging 卡死路径已在上游修掉）"
@@ -207,22 +249,51 @@ else
     row WARN "网络接口" "除 lo 外无接口"
 fi
 
+# ---------------- 蓝牙 ----------------
+# 内置蓝牙 = Realtek RTL8723BS 的 BT 部分，经 ACPI 枚举的 UART 挂在主机上
+# （ACPI HID OBDA8723 / OBDA0623）。
+#
+# 路线只有一条：内核 hci_uart（含 hci_h5 的 3WIRE 协议）负责传输，
+# btrtl 负责取厂商固件 rtl_bt/rtl8723bs_fw.bin 与
+# rtl_bt/rtl8723bs_config-OBDA8723.bin 下发给控制器。
+# 用户态 rtk_hciattach 已从镜像里删除 —— 它和内核抢同一个串口，
+# 结果是两边都没有 hci0。
+bt_state=""
 if [ -d /sys/class/bluetooth ]; then
-    bt=""
     for b in /sys/class/bluetooth/*; do
         [ -e "$b" ] || continue
-        bt="$bt $(basename "$b")"
+        bt_state="$bt_state $(basename "$b")"
     done
-    if [ -n "$bt" ]; then
-        row PASS "蓝牙" "$bt"
-    else
-        row WARN "蓝牙" "/sys/class/bluetooth 存在但没有 hci 设备"
-    fi
+fi
+if [ -n "$bt_state" ]; then
+    row PASS "蓝牙" "hci 设备：$bt_state"
 else
-    if [ -x /usr/sbin/rtk_hciattach ]; then
-        row WARN "蓝牙" "未发现蓝牙适配器 —— 厂商包已装（rtk_hciattach），但内核没有 hci 设备；查 systemctl status qm1-bluetooth 与 dmesg 里的 ACPI OBDA8723"
+    row WARN "蓝牙" "没有 hci 设备 —— 内核没绑定上 BT UART"
+fi
+for m in hci_uart btrtl; do
+    if mod_loaded "$m" || [ -d "/sys/module/$m" ]; then
+        row PASS "模块 $m" "已加载"
     else
-        row WARN "蓝牙" "未发现蓝牙适配器 —— 内置蓝牙是 ACPI UART，需要 qm1-rtl8723bs-bt 包（rtk_hciattach）才能初始化"
+        row WARN "模块 $m" "未加载 —— 内核蓝牙栈没起来"
+    fi
+done
+bt_fw=""
+for p in /lib/firmware/rtl_bt/rtl8723bs_fw.bin \
+         /usr/lib/firmware/rtl_bt/rtl8723bs_fw.bin; do
+    [ -f "$p" ] && bt_fw="$p"
+done
+if [ -n "$bt_fw" ]; then
+    row PASS "蓝牙固件" "$bt_fw"
+else
+    row FAIL "蓝牙固件" "缺 rtl_bt/rtl8723bs_fw.bin（需要 firmware-realtek）"
+fi
+if [ -z "$bt_state" ]; then
+    # 没有 hci0 时给出可操作的线索，而不是一句"没蓝牙"
+    _btlog="$(grep -iE 'OBDA8723|OBDA0623|hci_uart|hci0|rtl8723bs|Bluetooth' <<<"$dmesg_out" \
+              | tail -4 | sed 's/^/      /')"
+    if [ -n "$_btlog" ]; then
+        row INFO "蓝牙线索" "$_btlog"
+        row INFO "蓝牙排查" "内核没绑定 OBDA8723 时，多半是 DSDT 把这个 ACPI 设备暴露成了普通 16550 串口（8250 抢先绑定）—— 需要 DSDT 覆盖"
     fi
 fi
 
@@ -311,23 +382,20 @@ fi
 
 # ---------------- 4. 内核抱怨 ----------------
 section "内核抱怨"
-fw_fail="$(dmesg 2>/dev/null | grep -c 'Direct firmware load for .* failed')"
+fw_fail="$(grep -c 'Direct firmware load for .* failed' <<<"$dmesg_out" || true)"
 if [ "${fw_fail:-0}" -gt 0 ]; then
     row WARN "firmware 加载失败" "$fw_fail 条 —— 见下方明细（多为 Wi-Fi/BT blob 缺失）"
-    dmesg | grep 'Direct firmware load for .* failed' | tail -5 | sed 's/^/      /'
+    grep 'Direct firmware load for .* failed' <<<"$dmesg_out" | tail -5 | sed 's/^/      /'
 else
     row PASS "firmware 加载失败" "无"
 fi
-nodrv="$(dmesg 2>/dev/null | grep -ci 'no driver for')"
+nodrv="$(grep -ci 'no driver for' <<<"$dmesg_out" || true)"
 if [ "${nodrv:-0}" -gt 0 ]; then
     row WARN "未绑定驱动" "$nodrv 条"
     grep -i 'no driver for' <<<"$dmesg_out" | tail -5 | sed 's/^/      /'
 else
     row PASS "未绑定驱动" "无"
 fi
-# 先把 dmesg 收进变量再用 herestring 匹配：管道 + grep -q 在 pipefail 下会因
-# SIGPIPE 返回 141，误判成"没有 I/O 错误"。
-dmesg_out="$(dmesg 2>/dev/null || true)"
 if grep -qi 'I/O error\|Buffer I/O error' <<<"$dmesg_out"; then
     row FAIL "存储 I/O 错误" "dmesg 有 I/O error —— eMMC 或供电可能有问题"
     grep -i 'I/O error\|Buffer I/O error' <<<"$dmesg_out" | tail -5 | sed 's/^/      /'

@@ -80,6 +80,23 @@ if [ -n "$KERNEL32" ]; then
 fi
 log "根分区 UUID：$ROOT_UUID${ROOT32_UUID:+ / 32 位：$ROOT32_UUID}"
 
+# ★ fstab 必须有 "/" 条目。
+# 原来只有伪文件系统（proc/sys/devtmpfs/run/tmpfs），没有根分区条目：
+#   * systemd 不会按 fstab 重新挂载根（options 不生效、remount-fs 没意义）
+#   * systemd-fsck-root 不会检查根文件系统
+#   * 某些工具（mount -a、systemctl daemon-reload 后的重挂载）会把根当成没挂
+# UUID 在这里才确定（前面 mkfs.ext4 -U "$ROOT_UUID" 会写进超级块），
+# 装机时整盘 dd 复制会把它一起带走，所以装到 eMMC 之后这条依然成立。
+if [ -f "$ROOTFS/etc/fstab" ]; then
+    if ! grep -qE '^[^#]*[[:space:]]/[[:space:]]' "$ROOTFS/etc/fstab"; then
+        {
+            echo "# 根分区：由内核 root=UUID= 挂载，这里补一条让 systemd 也能按 fstab 管理"
+            echo "UUID=$ROOT_UUID / ext4 defaults,noatime 0 1"
+        } >> "$ROOTFS/etc/fstab"
+        log "已向 fstab 补上根分区条目（UUID=$ROOT_UUID）"
+    fi
+fi
+
 # 发行版名（菜单标题用）：从 rootfs 的构建信息里读
 SUITE_NAME=""
 if [ -f "$ROOTFS/etc/qm1-build-info" ]; then

@@ -59,12 +59,29 @@ enable_unit() {
 enable_unit ssh.service multi-user.target
 enable_unit systemd-oomd.service multi-user.target
 # 这台机器没有板载 RJ45，内置 Wi-Fi 是唯一的主联网链路 → 必须有 DHCP 客户端。
-# 用 systemd-networkd：它顺带负责写 /etc/resolv.conf，所以 systemd-resolved
-# 可以继续关着（2GB 内存，少一个常驻服务）。
+# 用 systemd-networkd 负责链路与 DHCP，systemd-resolved 负责 DNS。
+#
+# ★ 为什么必须开 systemd-resolved（原来是关掉的）：
+#   systemd-networkd **不写** /etc/resolv.conf —— 它只把 DHCP 拿到的 DNS
+#   交给 systemd-resolved，由后者统一提供解析。
+#   而 Debian 13 的 systemd 与 systemd-resolved 两个包**都不带** /etc/resolv.conf
+#   （实测 packages.debian.org 的 filelist：systemd-resolved 只有
+#    /usr/lib/systemd/resolv.conf 这个 stub 文件，/etc/resolv.conf 不在其中；
+#    systemd 包里一个 resolv 都没有）。
+#   ⇒ 原来的镜像里 /etc/resolv.conf 根本不存在 ⇒ 没有 DNS 数据源 ⇒
+#     systemd-timesyncd 拿不到时间（它的默认 NTP 服务器是域名）⇒ 时钟停在 1970
+#     ⇒ 所有 HTTPS/TLS 证书校验失败 ⇒ agent 一条命令都跑不了。
+#   修法：开 systemd-resolved，并把 /etc/resolv.conf 指向它的 stub。
 enable_unit systemd-networkd.service multi-user.target
-for svc in systemd-resolved avahi-daemon; do
-    chroot "$TARGET" systemctl disable "$svc" >/dev/null 2>&1 || true
-done
+enable_unit systemd-resolved.service multi-user.target
+if [ -f "$TARGET/usr/lib/systemd/resolv.conf" ]; then
+    ln -sf /usr/lib/systemd/resolv.conf "$TARGET/etc/resolv.conf"
+    echo "[hook01] /etc/resolv.conf → /usr/lib/systemd/resolv.conf（systemd-resolved stub）"
+else
+    echo "[hook01][warn] 找不到 /usr/lib/systemd/resolv.conf —— /etc/resolv.conf 未配置" >&2
+fi
+# avahi-daemon 保持关闭（2GB 内存，少一个常驻服务）；resolved 不再 disable。
+chroot "$TARGET" systemctl disable avahi-daemon >/dev/null 2>&1 || true
 
 # 时间同步必须开：这台机器没有电池、没有 RTC 时钟从 1970 年开始，
 # 而 TLS 证书有效期校验、agent 任务调度、日志时间戳全都依赖正确时钟。
@@ -75,7 +92,39 @@ enable_unit systemd-timesyncd.service timers.target
 enable_unit bluetooth.service multi-user.target
 
 # --- 首次启动不要在硬件随机数池上等太久 ------------------------------------
+# 这台机器没有电池、没有 RTC，系统冷启动时时钟从 1970 年开始；
+# 同时 /dev/random 在启动早期可能阻塞（没有熵就出不来 random-seed）。
+# 解法不是"信任 CPU 的 RNG"（random.trust_cpu=on 会降低安全性），
+# 而是在**构建期**就播种一份随机种子，开机就不用等熵。
+mkdir -p "$TARGET/var/lib/systemd"
+if [ ! -s "$TARGET/var/lib/systemd/random-seed" ]; then
+    dd if=/dev/urandom of="$TARGET/var/lib/systemd/random-seed" bs=512 count=1 \
+       status=none 2>/dev/null || true
+    chmod 0600 "$TARGET/var/lib/systemd/random-seed" 2>/dev/null || true
+fi
+
+# 全局默认启动超时：原来是 30s。
+# ★ 30s 太短，会**直接把慢单元杀掉**，而且是在它还没来得及报错的时候：
+#   qm1-wifi@.service 的 ExecStartPre 要等最多 60 秒 SDIO 卡把 wlan0 枚举出来，
+#   30s 的全局上限会让它在接口出现之前就被 systemd 掐掉 —— 表现为"Wi-Fi 永远起不来"。
+#   单元自己的 TimeoutStartSec 会覆盖这个默认值（qm1-firstboot 是 180s），
+#   但没写这一项的单元就按 30s 算，取证日志也会被截断。
 mkdir -p "$TARGET/etc/systemd/system.conf.d"
-printf '[Service]\nTimeoutStartSec=30s\n' > "$TARGET/etc/systemd/system.conf.d/quick-boot.conf"
+printf '[Service]\nTimeoutStartSec=120s\n' > "$TARGET/etc/systemd/system.conf.d/quick-boot.conf"
+
+# --- 可用账号 --------------------------------------------------------------
+# 原来整个仓库没有 useradd/adduser/chpasswd ⇒ 装完之后**没有任何账号能登进**：
+#   sshd 只允许公钥（PasswordAuthentication no）+ PermitRootLogin no，
+#   而机器上既没有用户、也没有 authorized_keys。
+# 现在建一个普通用户 qm1（uid 1000，sudo 组），**镜像里不设默认口令**
+# （账号默认锁定），口令由安装器在装机时随机生成并打印在屏幕上，
+# 同时写进目标系统的 /etc/qm1-installed-to-emmc（root 可读，0600）。
+if ! chroot "$TARGET" id qm1 >/dev/null 2>&1; then
+    chroot "$TARGET" useradd --create-home --shell /bin/bash --uid 1000 qm1
+    echo "[hook01] 已创建用户 qm1（uid 1000，初始无口令）"
+fi
+chroot "$TARGET" usermod -aG sudo qm1 2>/dev/null || true
+# 明确锁定密码：镜像里不留任何可用口令
+chroot "$TARGET" passwd -l qm1 >/dev/null 2>&1 || true
 
 echo "[hook01] 基础配置完成"

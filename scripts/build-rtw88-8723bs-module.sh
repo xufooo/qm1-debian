@@ -22,8 +22,8 @@
 # Three sources are supported:
 #   upstream        the upstream rtw88 chip driver, compiled against the rtw88
 #                   headers of the target kernel series (v6.12)
-#   upstream-full   the *whole* upstream rtw88 tree of --upstream-ref (master),
-#                   built as out-of-tree modules against the target kernel.
+#   upstream-full   the *whole* upstream rtw88 tree of --upstream-ref, built
+#                   as out-of-tree modules against the target kernel.
 #                   This is the root-cause path: upstream restructured rtw88
 #                   (main.c split into fw.c/efuse.c/mac80211.c/... and the
 #                   8723b chip driver moved to the new core API), so mixing
@@ -44,7 +44,13 @@ SOURCE="vendor"
 JOBS="$(nproc --ignore=1 2>/dev/null || echo 2)"
 KERNEL_REPO="https://github.com/torvalds/linux.git"
 KERNEL_REF="v6.12"
-UPSTREAM_REF="master"
+# The upstream rtw88 tree is pinned to one commit.  A floating "master" makes
+# the build irreproducible: if upstream puts the 500 ms TX report purge
+# timeout back, the image silently falls back to the "the link comes up but
+# the throughput collapses" symptom and *nothing* in this build fails.
+# The pin is checked against the tree itself further down (the 2500 ms
+# RTW_TX_PROBE_TIMEOUT_LONG assertion in build_upstream_full).
+UPSTREAM_REF="05441d697f7f9a927264f4058cbbc6a03dfcac9d"
 VENDOR_REPO="MocLG/rtw88-rtl8723bs"
 VENDOR_REF="0f64b72d8ec091d811a1a44f8b314e9df1b72d78"
 FIRMWARE_DIR=""
@@ -52,6 +58,9 @@ DEB_NAME="qm1-rtw88-8723bs"
 # 本仓库对 vendor 树的本地补丁（patches/rtw88/*.patch）。这些补丁承载上游
 # 还没进 vendor 树的修复，例如 8723BS 的 TX report purge 超时（上游 4d688f22ebbf）。
 PATCH_DIR=""
+# 对上游整棵 rtw88 树的本地补丁（patches/rtw88-upstream/*.patch），用来把上游
+# 的 mac80211 胶水层适配到 6.12 的 API。
+UPSTREAM_PATCH_DIR=""
 KERNEL_BUILD_DIR=""
 UPSTREAM_TREE=""
 
@@ -69,13 +78,15 @@ Usage: build-rtw88-8723bs-module.sh --kver <kernel-abi> [options]
   --jobs <n>            parallel make jobs
   --kernel-repo <url>   linux.git URL used for the rtw88 headers
   --kernel-ref <ref>    ref of the kernel tree (default: v6.12)
-  --upstream-ref <ref>  ref that carries the 8723b chip driver (default: master)
+  --upstream-ref <ref>  ref that carries the 8723b chip driver; a 40 hex
+                         commit is pinned and verified (default: the pinned
+                         upstream commit 05441d697f7f9a927264f4058cbbc6a03dfcac9d)
   --vendor-repo <repo>  github repo of the vendor rtw88 tree
   --vendor-ref <sha>    commit of the vendor tree
   --patch-dir <dir>     directory with local *.patch files applied to the
-                        vendor tree (default: <repo>/patches/rtw88)
+                         vendor tree (default: <repo>/patches/rtw88)
   --upstream-tree <dir>   an existing kernel checkout that carries the rtw88
-                        tree (skips the git clone)
+                         tree (skips the git clone)
   --kernel-build-dir <dir>
                         explicit kernel build tree (overrides the automatic
                         lookup of /lib/modules/<abi>/build)
@@ -106,11 +117,14 @@ done
 [ -n "$KVER" ] || { usage; die "--kver is required"; }
 case "$SOURCE" in auto|upstream|upstream-full|vendor) ;; *) die "invalid --source: $SOURCE" ;; esac
 
-if [ -z "$PATCH_DIR" ]; then
-    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-    PATCH_DIR="$SCRIPT_DIR/../patches/rtw88"
-    UPSTREAM_PATCH_DIR="$SCRIPT_DIR/../patches/rtw88-upstream"
-fi
+# The patch directories always get a default, no matter whether --patch-dir was
+# given: with --source upstream-full the upstream patch directory is used even
+# when the caller only overrode the vendor patch directory, and an unset
+# variable would abort the run under `set -u`.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+PATCH_DIR="${PATCH_DIR:-$REPO_ROOT/patches/rtw88}"
+UPSTREAM_PATCH_DIR="${UPSTREAM_PATCH_DIR:-$REPO_ROOT/patches/rtw88-upstream}"
 
 for cmd in make gcc git curl dpkg-deb modinfo; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing tool: $cmd"
@@ -211,6 +225,48 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# Hard assertion: the rtw88 tree that gets compiled must carry the fixed TX
+# report purge timeout.
+#
+# The whole point of the backport is the TX report purge timeout: upstream
+# 4d688f22ebbf gives the 8723BS 2500 ms instead of 500 ms.  If the upstream
+# tree ever carries the old 500 ms value again, the image silently falls back
+# to "the link comes up but the throughput collapses" — and no other check in
+# this script would notice.  So the value is read out of the tree and checked.
+# ---------------------------------------------------------------------------
+assert_tx_probe_timeout() {   # assert_tx_probe_timeout <rtw88/tx.h>
+    local tx_h="$1" hit
+    [ -f "$tx_h" ] || die "no rtw88/tx.h in the upstream tree ($tx_h)"
+    # the *same* line has to carry the symbol name and the 2500 ms value
+    hit="$(grep -n 'RTW_TX_PROBE_TIMEOUT_LONG' "$tx_h" | grep '2500' || true)"
+    if [ -z "$hit" ]; then
+        printf '[rtw88][fail] the upstream tree has no 2500 ms TX report purge timeout (RTW_TX_PROBE_TIMEOUT_LONG) in %s\n' "$tx_h" >&2
+        printf '[rtw88][fail] the image would fall back to the old "link up, throughput collapsed" symptom\n' >&2
+        printf -- '--- %s (first 40 lines) ---\n' "$tx_h" >&2
+        head -n 40 "$tx_h" >&2
+        printf -- '--- the timeout defines in %s ---\n' "$tx_h" >&2
+        grep -n -B2 -A2 'RTW_TX_PROBE_TIMEOUT' "$tx_h" >&2 || true
+        printf -- '--- end of the excerpt ---\n' >&2
+        die "上游树没有 2500 ms 的 TX report purge 超时，镜像会退回吞吐塌陷的老症状 (the upstream tree does not carry the 2500 ms TX report purge timeout)"
+    fi
+    log "TX report purge timeout: $(printf '%s' "$hit" | tr '\n' ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# Does the in-tree kernel export this symbol from one of its rtw88 modules?
+#
+# The out-of-tree module replaces the in-tree rtw88 modules (they are
+# blacklisted in the image), so symbols that *only* the in-tree rtw88 modules
+# export stay unresolved on purpose.  Every other unresolved symbol is a real
+# defect and has to fail the build.
+# ---------------------------------------------------------------------------
+tree_exports_symbol() {   # tree_exports_symbol <symbol>
+    local sym="$1" sv="$KSRC/Module.symvers"
+    [ -f "$sv" ] || return 1
+    awk -v s="$sym" '$2 == s { print $3 }' "$sv" | grep -q '^rtw88'
+}
+
+# ---------------------------------------------------------------------------
 # upstream-full: the complete upstream rtw88 tree of --upstream-ref, built as
 # out-of-tree modules against the target kernel.
 #
@@ -237,8 +293,7 @@ build_upstream_full() {
     local up_src="$WORK/linux-upstream/drivers/net/wireless/realtek/rtw88"
     if [ -z "$src" ] && [ ! -f "$up_src/rtw8723bs.c" ]; then
         rm -rf "$WORK/linux-upstream"
-        git_clone_retry "$KERNEL_REPO" "$WORK/linux-upstream" \
-            --depth 1 --filter=blob:none --sparse --branch "$UPSTREAM_REF" \
+        git_clone_retry "$KERNEL_REPO" "$WORK/linux-upstream" "$UPSTREAM_REF" \
             || { warn "kernel tree clone failed"; return 1; }
         git -C "$WORK/linux-upstream" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
             || { warn "sparse checkout failed"; return 1; }
@@ -258,34 +313,47 @@ build_upstream_full() {
 
     # The upstream tree needs the local compatibility patch: its mac80211 glue
     # uses the multi-radio and the MLO callbacks that Linux 6.12 does not have.
-    apply_patches "$mod" "$UPSTREAM_PATCH_DIR" || return 1
+    apply_patches "$mod" "$UPSTREAM_PATCH_DIR" "upstream" || return 1
+
+    # Hard assertion on the tree that is about to be compiled: the TX report
+    # purge timeout has to be the fixed 2500 ms value.
+    assert_tx_probe_timeout "$mod/tx.h"
 
     # Object list: upstream's own core list plus the SDIO transport and the
     # 8723x / 8723B / 8723BS chip files.  Everything is built into a single
     # module named rtw88_qm1, so it never collides with the in-tree modules
     # rtw88_core / rtw88_sdio that the distribution ships.
+    #
+    # All `rtw88_core-y +=` / `rtw88_core-y :=` blocks are collected — upstream
+    # may split the list into several blocks, and taking only the first one
+    # silently drops objects (sar.o / bf.o and friends), which shows up as a
+    # missing symbol at runtime while the build still succeeds.
     local up_mk="$src/Makefile"
     [ -f "$up_mk" ] || { warn "upstream rtw88 Makefile not found"; return 1; }
     local core_objs chip_8723b chip_8723bs chip_8723x sdio_objs
-    core_objs=$(awk '
-        /^rtw88_core-y[ \t]*\+=/ {
-            inblk=1
-            line=$0
-            sub(/^[^=]*\+=[ \t]*/, "", line)
+    core_objs="$(awk '
+        # a core block starts here (both += and := are accepted)
+        /^rtw88_core-y[ \t]*(\+=|:=)/ {
+            inblk = 1
+            line = $0
+            sub(/^[^=]*[+]?=[ \t]*/, "", line)
             gsub(/\\/, "", line)
-            gsub(/^[ \t]+/, "", line)
-            if (line != "") print line
+            gsub(/^[ \t]+|[ \t]+$/, "", line)
+            if (line ~ /\.o$/) print line
             next
         }
+        # a conditional core item closes the current block
+        /^rtw88_core-\$\(CONFIG_/ { inblk = 0; next }
         inblk {
-            line=$0
+            line = $0
             cont = (line ~ /\\$/)
             gsub(/\\/, "", line)
-            gsub(/^[ \t]+/, "", line)
-            if (line != "") print line
-            if (!cont) exit
+            gsub(/^[ \t]+|[ \t]+$/, "", line)
+            if (line == "") next              # blank line: keep the block open
+            if (line ~ /\.o$/) print line
+            if (!cont) inblk = 0
         }
-    ' "$up_mk" | tr '\n' ' ' | tr -s ' ')
+    ' "$up_mk" | tr '\n' ' ' | tr -s ' ')"
     chip_8723b=$(awk '/^rtw88_8723b-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
     chip_8723bs=$(awk '/^rtw88_8723bs-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
     chip_8723x=$(awk '/^rtw88_8723x-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
@@ -294,19 +362,50 @@ build_upstream_full() {
         && [ -n "$sdio_objs" ] \
         || { warn "could not read the upstream object lists"; return 1; }
 
-    # CONFIG gated parts, same rules as upstream
+    # Conditional core objects (rtw88_core-$(CONFIG_PM) += wow.o,
+    # rtw88_core-$(CONFIG_RTW88_LEDS) += led.o, ...) are resolved against the
+    # config of the *target* kernel, exactly like upstream does.
     local kcfg=""
     for c in "$KSRC/.config" "$KSRC/../../linux-headers-$KVER/.config" "/boot/config-$KVER"; do
         if [ -f "$c" ]; then kcfg="$c"; break; fi
     done
-    if [ -n "$kcfg" ] && grep -q '^CONFIG_PM=y' "$kcfg"; then
-        core_objs="$core_objs wow.o"
-    fi
-    if [ -n "$kcfg" ] && grep -q '^CONFIG_RTW88_LEDS=y' "$kcfg"; then
-        core_objs="$core_objs led.o"
-    else
-        log "target kernel has no CONFIG_RTW88_LEDS; leaving led.o out (as upstream does)"
-    fi
+    [ -n "$kcfg" ] \
+        || die "cannot find the config of the target kernel (tried $KSRC/.config and /boot/config-$KVER); the conditional rtw88 core objects cannot be resolved"
+    log "target kernel config: $kcfg"
+    local cond_pairs cfg obj
+    cond_pairs="$(awk '
+        /^rtw88_core-\$\(CONFIG_[A-Za-z0-9_]+\)[ \t]*\+=/ {
+            cfg = $0
+            sub(/^rtw88_core-\$\(/, "", cfg)
+            sub(/\).*/, "", cfg)
+            obj = $0
+            sub(/^[^=]*\+=[ \t]*/, "", obj)
+            gsub(/\\/, "", obj)
+            gsub(/^[ \t]+|[ \t]+$/, "", obj)
+            if (obj != "") print cfg " " obj
+        }' "$up_mk")"
+    while read -r cfg obj; do
+        if [ -z "$cfg" ] || [ -z "$obj" ]; then
+            continue
+        fi
+        if grep -q "^${cfg}=\(y\|m\)$" "$kcfg"; then
+            core_objs="$core_objs $obj"
+            log "conditional core object $obj included ($cfg is set in the target kernel)"
+        else
+            log "conditional core object $obj left out ($cfg is not set in the target kernel)"
+        fi
+    done <<< "$cond_pairs"
+
+    # merge and de-duplicate
+    core_objs="$(printf '%s' "$core_objs" | tr ' ' '\n' | sed '/^$/d' | sort -u | tr '\n' ' ')"
+    core_objs="$(printf '%s' "$core_objs" | sed 's/^ *//; s/ *$//')"
+    local core_count
+    core_count="$(printf '%s\n' "$core_objs" | tr ' ' '\n' | sed '/^$/d' | wc -l)"
+    log "upstream rtw88 core objects ($core_count): $core_objs"
+    # The 6.12 adapted upstream tree has ~17 core objects.  Fewer means the
+    # Makefile parsing lost a block — that must not reach the compiler.
+    [ "$core_count" -ge 15 ] \
+        || die "the upstream rtw88 core object list has only $core_count objects (expected at least 15); the upstream Makefile parsing is incomplete"
 
     cat > "$mod/Kbuild" <<EOF
 # Out-of-tree build of the complete upstream rtw88 tree.
@@ -317,8 +416,11 @@ ccflags-y += -I\$(src)
 EOF
 
     log "compiling against $KSRC"
-    # KBUILD_MODPOST_WARN: the module exports symbols that the 6.12 kernel
-    # does not know yet, so modpost cannot give them a version.
+    # KBUILD_MODPOST_WARN is deliberately NOT set on the first attempt: an
+    # unresolved symbol has to fail the build.  With the warning mode the .deb
+    # is produced anyway, the module refuses to load on the QM1 ("Unknown
+    # symbol") and no wlan0 ever appears — while the build reports success.
+    #
     # CONFIG_DEBUG_INFO_BTF_MODULES: the distribution headers ship a vmlinux
     # that pahole cannot use as the BTF base, so the module BTF step is off.
     local ld_bin cc_bin
@@ -328,10 +430,43 @@ EOF
     # (x86_64-linux-gnu-gcc-14); fall back to any available gcc.
     cc_bin="$(command -v x86_64-linux-gnu-gcc-14 || command -v gcc-14 || command -v gcc || true)"
     [ -n "$cc_bin" ] || { warn "no C compiler found"; return 1; }
-    make -C "$KSRC" M="$mod" -j"$JOBS" modules \
-        KBUILD_MODPOST_WARN=1 CONFIG_DEBUG_INFO_BTF_MODULES= \
-        CC="$cc_bin" LD="$ld_bin" \
-        || { warn "the full upstream rtw88 tree does not compile against $KVER"; return 1; }
+
+    local build_log="$WORK/build-upstream-full.log"
+    local undef_syms bad_syms sym
+    if make -C "$KSRC" M="$mod" -j"$JOBS" modules \
+        CONFIG_DEBUG_INFO_BTF_MODULES= CC="$cc_bin" LD="$ld_bin" \
+        2>&1 | tee "$build_log"; then
+        :
+    else
+        # The build failed.  If it failed on unresolved symbols, every one of
+        # them has to be accounted for before the build may continue.
+        undef_syms="$(grep -E 'modpost.*undefined' "$build_log" \
+            | grep -oE '"[^"]+"' | tr -d '"' | sed '/^$/d' | sort -u || true)"
+        if [ -z "$undef_syms" ]; then
+            die "the full upstream rtw88 tree does not compile against $KVER (log: $build_log)"
+        fi
+        bad_syms=""
+        for sym in $undef_syms; do
+            if ! tree_exports_symbol "$sym"; then
+                bad_syms="$bad_syms $sym"
+            fi
+        done
+        if [ -n "$bad_syms" ]; then
+            printf '[rtw88][fail] unresolved symbols that do not come from the in-tree rtw88 exports:%s\n' "$bad_syms" >&2
+            printf '[rtw88][fail] those symbols have to be provided by the out-of-tree module itself (log: %s)\n' "$build_log" >&2
+            die "the out-of-tree rtw88 module has unresolved symbols"
+        fi
+        printf '[rtw88] %s\n' "rebuilding with the in-tree rtw88 export symbols blacklisted:" >&2
+        for sym in $undef_syms; do
+            printf '[rtw88]   - %s\n' "$sym" >&2
+        done
+        printf '[rtw88] %s\n' "these symbols come from the in-tree rtw88 exports; the image blacklists the corresponding modules, so this is expected" >&2
+        make -C "$KSRC" M="$mod" -j"$JOBS" modules \
+            KBUILD_MODPOST_WARN=1 CONFIG_DEBUG_INFO_BTF_MODULES= \
+            CC="$cc_bin" LD="$ld_bin" \
+            2>&1 | tee -a "$build_log" \
+            || die "the full upstream rtw88 tree does not compile against $KVER (log: $build_log)"
+    fi
 
     [ -f "$mod/rtw88_qm1.ko" ] || { warn "upstream build produced no module"; return 1; }
     MOD_DIR="$mod"
@@ -348,32 +483,39 @@ EOF
 # patches/rtw88/ and are applied here; a missing patch directory is fatal,
 # because building the unpatched vendor tree would ship the very symptom
 # this backport is meant to cure.
+#
+# The function returns non-zero instead of dying, so that --source auto can
+# actually fall back to the other tree when the patches do not apply.
 # ---------------------------------------------------------------------------
-apply_patches() {   # apply_patches <tree-dir> [patch-dir]
-    local dir="$1" p n=0
-    local pdir="${2:-$PATCH_DIR}"
-    [ -d "$dir" ] || die "patch target $dir does not exist"
-    [ -d "$pdir" ] || die "patch directory $pdir does not exist"
+apply_patches() {   # apply_patches <tree-dir> <patch-dir> <tree-label>
+    local dir="$1" pdir="$2" label="$3"
+    local p n=0
+    [ -d "$dir" ] || { warn "patch target $dir does not exist"; return 1; }
+    [ -d "$pdir" ] || { warn "patch directory $pdir does not exist"; return 1; }
     for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         n=$((n + 1))
     done
-    [ "$n" -gt 0 ] || die "no *.patch found in $PATCH_DIR"
+    [ "$n" -gt 0 ] || { warn "no *.patch found in $pdir"; return 1; }
     for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         log "dry-run $(basename "$p")"
         if ! (cd "$dir" && patch -p1 --dry-run --batch --forward < "$p"); then
-            die "patch does not apply to the vendor tree: $(basename "$p")"
+            warn "patch does not apply to the $label tree: $(basename "$p")"
+            return 1
         fi
     done
     for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         log "applying $(basename "$p")"
-        (cd "$dir" && patch -p1 --batch --forward < "$p") \
-            || die "failed to apply $(basename "$p")"
+        if ! (cd "$dir" && patch -p1 --batch --forward < "$p"); then
+            warn "failed to apply $(basename "$p") to the $label tree"
+            return 1
+        fi
     done
     find "$dir" \( -name '*.rej' -o -name '*.orig' \) -delete
     log "$n patch(es) applied to $dir"
+    return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -392,7 +534,7 @@ build_vendor() {
 
     # 本仓库的本地补丁（TX report purge 超时等）必须打上，否则编出来的模块
     # 仍带着 500 ms 的旧超时。
-    apply_patches "$WORK/vendor" || return 1
+    apply_patches "$WORK/vendor" "$PATCH_DIR" "vendor" || return 1
 
     log "compiling the vendor tree against $KSRC"
     make -C "$KSRC" M="$WORK/vendor" -j"$JOBS" modules \
@@ -415,18 +557,59 @@ build_vendor() {
 }
 
 # git clone from github fails now and then with a TLS EOF; retry a few times.
-git_clone_retry() {   # git_clone_retry <url> <dir> [extra args...]
-    local url="$1" dir="$2"; shift 2
+# The ref may be a branch/tag or a pinned 40 hex commit: a commit cannot be
+# selected with `git clone --branch`, so it is fetched explicitly and checked
+# out as FETCH_HEAD.  A pinned commit is verified after the checkout, so a
+# wrong tree can never sneak into the build.
+git_clone_retry() {   # git_clone_retry <url> <dir> <ref>
+    local url="$1" dir="$2" ref="$3"
     local attempt
     for attempt in 1 2 3 4 5; do
         rm -rf "$dir"
-        if git clone --quiet "$@" "$url" "$dir"; then
+        if clone_ref "$url" "$dir" "$ref"; then
             return 0
         fi
-        warn "git clone of $url failed (attempt $attempt), retrying"
+        warn "git clone of $url@$ref failed (attempt $attempt), retrying"
         sleep $((attempt * 3))
     done
     return 1
+}
+
+clone_ref() {   # clone_ref <url> <dir> <ref>
+    local url="$1" dir="$2" ref="$3"
+    local got=""
+    if [[ "$ref" =~ ^[0-9a-f]{40}$ ]]; then
+        # A pinned commit cannot be selected with --branch.  The sparse
+        # checkout is set up *before* the checkout, so the working tree never
+        # materializes the whole kernel.
+        if git clone --quiet --filter=blob:none --no-checkout "$url" "$dir" \
+            && git -C "$dir" sparse-checkout init --cone \
+            && git -C "$dir" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
+            && git -C "$dir" fetch --quiet --depth 1 origin "$ref" \
+            && git -C "$dir" checkout --quiet --detach FETCH_HEAD; then
+            :
+        else
+            # fallback for servers that refuse a by-SHA fetch: take the full
+            # history (blobs stay filtered) and check the commit out locally
+            rm -rf "$dir"
+            git clone --quiet --filter=blob:none --no-checkout "$url" "$dir" \
+                && git -C "$dir" sparse-checkout init --cone \
+                && git -C "$dir" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
+                && git -C "$dir" checkout --quiet --detach "$ref" \
+                || return 1
+        fi
+    else
+        git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$ref" "$url" "$dir" \
+            || return 1
+    fi
+    got="$(git -C "$dir" rev-parse HEAD 2>/dev/null || true)"
+    [ -n "$got" ] || return 1
+    if [[ "$ref" =~ ^[0-9a-f]{40}$ ]] && [ "$got" != "$ref" ]; then
+        warn "the clone resolved to $got but $ref was pinned"
+        return 1
+    fi
+    log "cloned $url at $got (requested: $ref)"
+    return 0
 }
 
 MOD_DIR=""
@@ -439,6 +622,8 @@ case "$SOURCE" in
         # 上游 7.4 的芯片驱动需要 7.4 时期的 rtw88 核心 API（mac_postinit /
         # query_phy_status / set_ampdu_factor / led_set / hw_feature_report …），
         # 在 6.12 上编不过；能编过的是维护中的 vendor rtw88 树，所以默认先试它。
+        # build_vendor 内部的失败（包括补丁打不上）都以非零状态返回，所以这个
+        # 回退分支是真的能走到的。
         build_vendor || { warn "falling back to the upstream backport"; build_upstream || die "both builds failed"; }
         ;;
 esac
@@ -458,7 +643,7 @@ for m in $MOD_NAMES; do
 done
 # the SDIO bind has to claim the QM1 wireless device
 _aliases="$(modinfo "$MOD_DIR"/*.ko 2>/dev/null | grep -i 'alias' || true)"
-    if ! grep -qi 'b723' <<<"$_aliases"; then
+if ! grep -qi 'b723' <<<"$_aliases"; then
     die "no built module claims the SDIO device 0x024c:0xb723"
 fi
 log "modules verified against $KVER"
@@ -522,6 +707,7 @@ CORE_PARAMS="disable_lps_deep support_bf debug_mask"
 
 # every parameter we write must really exist, otherwise modprobe fails to load
 CORE_KO="$PKG/lib/modules/$KVER/extra/rtw88/$CORE_MODULE.ko"
+[ -f "$CORE_KO" ] || die "the core module $CORE_MODULE.ko is not in the package"
 AVAILABLE_PARAMS="$(modinfo -p "$CORE_KO" | awk -F: '{print $1}' | tr '\n' ' ')"
 for param in $CORE_PARAMS; do
     case " $AVAILABLE_PARAMS " in
@@ -568,25 +754,49 @@ ExecStop=-/sbin/modprobe -r $SDIO_MODULE
 WantedBy=multi-user.target
 EOF
 
+# The package version carries the target kernel ABI: the modules are built for
+# one kernel only, so two kernels must never end up with the same package
+# version.  The kernel ABI is not part of the Debian version syntax (it holds
+# '+' and '-'), so it is reduced to dots.
+KVER_SLUG="$(printf '%s' "$KVER" | sed 's/[^A-Za-z0-9.]/./g')"
+PKG_VERSION="1.0.0+${KVER_SLUG}-1"
+
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: $DEB_NAME
-Version: 1.0
+Version: $PKG_VERSION
 Section: kernel
 Priority: optional
 Architecture: amd64
+Depends: linux-image-$KVER | linux-image-amd64
 Maintainer: QM1 image build
 Description: Out-of-tree rtw88 driver for the Realtek RTL8723BS SDIO Wi-Fi chip
  The upstream RTL8723B and RTL8723BS support that was merged into the rtw88
  driver is built against the kernel of the image, together with the firmware
  blob that the distribution does not ship.
+ .
+ This package is built for the kernel ABI $KVER only; the modules are
+ installed below /lib/modules/$KVER and are unusable with any other kernel.
 EOF
 
 mkdir -p "$PKG/DEBIAN"
 cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
+# dpkg calls a maintainer script with the *package version* as $1, never with
+# the kernel ABI.  A condition like [ -d "/lib/modules/$1" ] was therefore
+# never true and depmod never ran: after a manual "dpkg -i" the module index
+# (modules.alias, modules.dep) stayed stale and "modprobe rtw88_qm1" failed
+# with "not found in directory /lib/modules/...".
+#
+# depmod -a refreshes the index of every installed kernel.  A missing or
+# failing depmod must not abort the package installation, so the failure is
+# only reported.
 set -e
-if [ -d "/lib/modules/$1" ]; then
-    depmod -a "/lib/modules/$1" || true
+if command -v depmod >/dev/null 2>&1; then
+    if ! depmod -a; then
+        echo "qm1-rtw88-8723bs: depmod -a failed; run it manually" >&2
+    fi
+else
+    echo "qm1-rtw88-8723bs: depmod not found; the module index was not refreshed" >&2
 fi
 exit 0
 EOF
@@ -599,7 +809,9 @@ log "built $DEB"
 
 {
     echo "kernel=$KVER"
+    echo "package_version=$PKG_VERSION"
     echo "source=$SOURCE"
+    echo "upstream_ref=$UPSTREAM_REF"
     echo "modules=$MOD_NAMES"
     echo "sdio_module=$SDIO_MODULE"
     for m in $MOD_NAMES; do

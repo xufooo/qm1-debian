@@ -17,6 +17,10 @@
 #                           冻结 bug 受影响名单内（Launchpad #1471989、AskUbuntu 803640），
 #                           深 C-state 与 SDIO/eMMC 的 DMA 冲突同源；本机无电池常供电
 #   qm1.install=1           触发 qm1-install.service（把系统写进 eMMC）
+#   qm1.install.mode=emmc   明确目标是 eMMC（不靠自动猜测）
+#   qm1.install.yes=1       非交互环境下也确认破坏性操作
+#                            （systemd 单元里跑，没有 TTY；不给这个参数，
+#                              安装器会在"确认覆盖 eMMC？"那一步停下）
 #
 # 安装动作由 systemd 单元 qm1-install.service 执行
 # （ConditionKernelCommandLine=qm1.install=1，所以正常启动不会误触发）。
@@ -28,7 +32,7 @@ search --label QM1ESP --set=root
 
 # ① 安装到 eMMC：备份 → 写分区 → 校验 → 换成正常菜单
 menuentry "① 安装 QM1 @SUITE_AMD64@ 到 eMMC（备份 → 写入 → 校验）" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1
     initrd /initrd.img
 }
 

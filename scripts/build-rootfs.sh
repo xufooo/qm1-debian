@@ -31,7 +31,9 @@ HOOKS_DIR="$REPO_ROOT/hooks"
 KERNEL_VERSION=""   # 空 = 用发行版元包；非空 = 固定某个 point release
 WIFI_MODULE_DEB=""  # 空 = 不装外部 Wi-Fi 模块；非空 = 装这个打了补丁的 .deb
 RTW88_MODULE_DEB="" # 空 = 不装 rtw88 回移模块；非空 = 装这个 .deb（推荐路径）
-BT_HCIATTACH_DEB="" # 空 = 不装蓝牙厂商初始化包；非空 = 装这个 .deb
+# 蓝牙：不再有用户态厂商包 —— 内核 hci_uart（含 hci_h5）+ btrtl + 发行版
+# firmware-realtek 的 rtl_bt/rtl8723bs_{fw.bin,config-OBDA8723.bin} 就够了，
+# 用户态 rtk_hciattach 与内核抢同一个串口，只会两边都没有 hci0。
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -45,7 +47,6 @@ while [ $# -gt 0 ]; do
         --kernel-version) KERNEL_VERSION="$2"; shift 2 ;;
         --wifi-module-deb) WIFI_MODULE_DEB="$2"; shift 2 ;;
         --rtw88-module-deb) RTW88_MODULE_DEB="$2"; shift 2 ;;
-        --bt-hciattach-deb) BT_HCIATTACH_DEB="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -95,9 +96,11 @@ BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sud
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
-kmod,initramfs-tools,zstd,apt-transport-https,fdisk"
+kmod,initramfs-tools,zstd,apt-transport-https,fdisk,efibootmgr"
 # fdisk 提供 sfdisk：安装介质在设备上给 eMMC 分区时要用
 # （util-linux 是 Debian 的 Essential 包，lsblk/findmnt/mount 随它来）。
+# efibootmgr：安装器要在写完 eMMC 后登记 UEFI 启动项
+# （安装环境就是这套根文件系统 —— U 盘里的 ext4 分区直接被引导）。
 
 # 运行时（Hermes CLI + headless Chrome）
 # 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），
@@ -171,18 +174,11 @@ else
     export QM1_RTW88_MODULE_DEB=""
 fi
 
-# 蓝牙：RTL8723BS 的 BT 部分是 ACPI 枚举的 UART（OBDA8723/OBDA0623），
-# 主线没有 Realtek UART HCI 驱动，需要用户态 rtk_hciattach 下发厂商固件；
-# 空 = 不装（蓝牙不可用）。
-if [ -n "$BT_HCIATTACH_DEB" ]; then
-    [ -f "$BT_HCIATTACH_DEB" ] || die "--bt-hciattach-deb 指向的文件不存在：$BT_HCIATTACH_DEB"
-    _bt_deb_dir="$(cd "$(dirname "$BT_HCIATTACH_DEB")" && pwd)"
-    _bt_deb_name="$(basename "$BT_HCIATTACH_DEB")"
-    QM1_BT_HCIATTACH_DEB="$_bt_deb_dir/$_bt_deb_name"
-    export QM1_BT_HCIATTACH_DEB
-else
-    export QM1_BT_HCIATTACH_DEB=""
-fi
+# 蓝牙：RTL8723BS 的 BT 部分是 ACPI 枚举的 UART（OBDA8723/OBDA0623）。
+# 内核 hci_h5 的 h5_acpi_match[] 认这两个 HID，btrtl 按名字取发行版固件
+# （firmware-realtek 里的 rtl_bt/rtl8723bs_fw.bin 与
+# rtl8723bs_config-OBDA8723.bin）。所以这里不需要任何用户态厂商包 ——
+# hooks/customize02-drivers.sh 会在镜像里核对固件与内核模块，缺了就直接失败。
 
 log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"
 if ! mmdebstrap \

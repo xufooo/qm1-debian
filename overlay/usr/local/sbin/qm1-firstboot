@@ -18,6 +18,7 @@
 #   hostname              可选：主机名
 #
 # 幂等：成功后写标记 /var/lib/qm1/firstboot-done，再次运行会跳过。
+#       加 --force 可强制重跑（会先清掉标记）。
 set -euo pipefail
 
 PROV_DIR="/etc/qm1/provision"
@@ -25,13 +26,25 @@ MARKER="/var/lib/qm1/firstboot-done"
 ESP_LABEL="QM1ESP"
 ESP_MOUNT="/run/qm1/firstboot-esp"
 
+FORCE=0
+for _arg in "$@"; do
+    case "$_arg" in
+        --force) FORCE=1 ;;
+        *) echo "用法：qm1-firstboot [--force]" >&2; exit 2 ;;
+    esac
+done
+
 log()  { printf '[qm1-firstboot] %s\n' "$*"; }
 warn() { printf '[qm1-firstboot][warn] %s\n' "$*" >&2; }
 
 [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; exit 1; }
 
-if [ -f "$MARKER" ]; then
+if [ "$FORCE" = 1 ]; then
+    rm -f "$MARKER"
+    log "--force：已清掉标记 $MARKER，强制重跑"
+elif [ -f "$MARKER" ]; then
     log "已完成过首启配置（$MARKER），跳过"
+    log "要重跑：sudo qm1-firstboot --force"
     exit 0
 fi
 
@@ -62,11 +75,12 @@ else
 fi
 
 if [ -z "$SRC" ]; then
-    log "没有发现 provisioning 文件 —— 跳过自动配置"
+    log "没有发现 provisioning 文件 —— 跳过自动配置（下次开机还会再找一次）"
     log "  之后可以这样配："
-    log "    sudo nmcli dev wifi list && nmcli dev wifi connect <SSID> password <密码>"
+    log "    sudo nano /etc/wpa_supplicant/wpa_supplicant.conf   # 填 SSID/PSK"
     log "    sudo systemctl enable --now qm1-wifi@wlan0"
     log "    sudo systemctl enable --now ssh"
+    log "  （这台机器用 systemd-networkd + wpa_supplicant，没有 NetworkManager，nmcli 用不了）"
     exit 0
 fi
 
@@ -78,9 +92,17 @@ if [ -f "$SRC/wpa_supplicant.conf" ]; then
     install -m 0600 "$SRC/wpa_supplicant.conf" /etc/wpa_supplicant/wpa_supplicant.conf
     log "已写入 Wi-Fi 配置：/etc/wpa_supplicant/wpa_supplicant.conf"
     systemctl enable qm1-wifi@wlan0 >/dev/null 2>&1 \
-        || ln -sf /lib/systemd/system/qm1-wifi@.service \
+        || ln -sf /etc/systemd/system/qm1-wifi@.service \
                /etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service
-    systemctl restart qm1-wifi@wlan0 >/dev/null 2>&1 \
+    # 链接必须不是悬空的（单元就在 /etc/systemd/system）
+    if [ ! -e /etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service ]; then
+        warn "qm1-wifi@wlan0 的 wants 链接是悬空的，Wi-Fi 不会自动启动"
+    fi
+    # --no-block 是必须的：本单元 (qm1-firstboot.service) 排在这个单元**之后**
+    # （qm1-wifi@.service 有 After=qm1-firstboot.service），所以在首启脚本里
+    # 直接 `systemctl restart` 会互相等待 —— 首启脚本等 wifi 重启完成，
+    # 而 wifi 的启动作业又排在首启脚本结束之后 ⇒ 自死锁。
+    systemctl restart --no-block qm1-wifi@wlan0 >/dev/null 2>&1 \
         || warn "Wi-Fi 服务重启失败（接口可能还没出现，稍后会自动重试）"
     CHANGED=1
 else
@@ -112,7 +134,9 @@ if [ -f "$SRC/authorized_keys" ]; then
         log "公钥已在 $KEYFILE 里，跳过"
     fi
     SSH_USER=""
-    [ -f "$SRC/ssh_user" ] && SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
+    if [ -f "$SRC/ssh_user" ]; then
+        SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
+    fi
     if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
         UHOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
         [ -n "$UHOME" ] || UHOME="/home/$SSH_USER"
@@ -138,13 +162,19 @@ if [ -f "$SRC/hostname" ]; then
 fi
 
 # ---------- 6. 收尾 ----------
-mkdir -p "$(dirname "$MARKER")"
-{
-    echo "applied_at=$(date -Is)"
-    echo "source=$SRC"
-    echo "changed=$CHANGED"
-} > "$MARKER"
-log "首启配置完成（标记：$MARKER）"
+# 只有真的改了东西才写标记 —— 否则"配置存在但还没生效"（比如只放了
+# authorized_keys、Wi-Fi 还没关联上）会被永久记住，再也不会重试。
+if [ "$CHANGED" = 1 ]; then
+    mkdir -p "$(dirname "$MARKER")"
+    {
+        echo "applied_at=$(date -Is)"
+        echo "source=$SRC"
+        echo "changed=$CHANGED"
+    } > "$MARKER"
+    log "首启配置完成（标记：$MARKER）"
+else
+    log "provisioning 目录里没有可应用的项目 —— 不写标记，下次开机继续检查"
+fi
 
 if [ "$CHANGED" = 1 ]; then
     log "提示：Wi-Fi 关联可能需要几十秒，可用 'ip addr' / 'iw dev wlan0 link' 查看"

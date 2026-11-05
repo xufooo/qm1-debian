@@ -33,49 +33,67 @@ if [ -d "$TARGET/etc/systemd/system" ]; then
     chroot "$TARGET" systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
+# ---------------------------------------------------------------------------
+# overlay 单元的 wants 链接
+#
+# 之前的写法有个致命错位：overlay 的单元是用 cp -a 落在 **/etc/systemd/system**
+# 下面的（见本文件开头的 cp -a "$QM1_OVERLAY_DIR/." "$TARGET/"），而 wants 链接
+# 却指向 /lib/systemd/system/<unit> —— 那个路径在镜像里根本不存在，于是每一个
+# 链接都是悬空的。systemd 只看链接在不在，不看目标在不在，于是：
+#   * 单元永远不会启动；
+#   * CI 侧用 [ -L ... ] 判定（有悬空链接也满足）⇒ 流水线全绿。
+# 最典型的后果是 qm1-install.service 悬空 ⇒ GRUB 菜单里那条"安装到 eMMC"
+# 选下去什么都不会发生。
+#
+# 现在统一：链接指向单元的**真实所在路径**，并且建完立刻断言不是悬空的。
+# systemctl enable 在构建 chroot 里不可靠（没有运行中的 systemd），所以
+# 链接由我们自己写一份确定的出来，而不是靠 systemctl 的副作用。
+# ---------------------------------------------------------------------------
+enable_overlay_unit() {
+    _unit_file="$1"   # 单元文件名，例如 qm1-wifi@.service
+    _link_name="$2"   # wants 目录里的链接名，例如 qm1-wifi@wlan0.service
+    _wants="$3"       # multi-user.target / timers.target / network.target ...
+
+    _src="/etc/systemd/system/$_unit_file"
+    if [ ! -f "$TARGET$_src" ]; then
+        echo "[hook03][warn] 单元不存在，跳过：$_unit_file"
+        return 0
+    fi
+
+    mkdir -p "$TARGET/etc/systemd/system/$_wants.wants"
+    chroot "$TARGET" systemctl enable "$_unit_file" >/dev/null 2>&1 || true
+
+    ln -sf "$_src" "$TARGET/etc/systemd/system/$_wants.wants/$_link_name"
+
+    # 悬空链接是这次要根除的病根 —— 建完必须验一次。
+    if [ ! -e "$TARGET/etc/systemd/system/$_wants.wants/$_link_name" ]; then
+        echo "[hook03][fail] wants 链接悬空：$_wants.wants/$_link_name -> $_src"
+        exit 1
+    fi
+    echo "[hook03] 已启用 $_link_name（$_wants.wants -> $_src）"
+}
+
 # Wi-Fi 是这台机器唯一的主联网链路（没有 RJ45）→ 开机自启。
 # 单元是模板（qm1-wifi@.service），实例名就是无线接口名（wlan0）。
-if [ -f "$TARGET/etc/systemd/system/qm1-wifi@.service" ]; then
-    chroot "$TARGET" systemctl enable qm1-wifi@wlan0 >/dev/null 2>&1 \
-        || ln -sf /lib/systemd/system/qm1-wifi@.service \
-               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service"
-    echo "[hook03] 已启用 qm1-wifi@wlan0（内置 Wi-Fi 主链路）"
-fi
+enable_overlay_unit "qm1-wifi@.service" "qm1-wifi@wlan0.service" "multi-user.target"
 
 # 首启自动配置（Wi-Fi / SSH / 主机名）：开机自启，读取启动分区或根文件系统里的
 # provisioning 文件 —— 装完就能联网、能 SSH，不用接显示器手动敲配置。
-if [ -f "$TARGET/etc/systemd/system/qm1-firstboot.service" ]; then
-    mkdir -p "$TARGET/var/lib/qm1"
-    chroot "$TARGET" systemctl enable qm1-firstboot.service >/dev/null 2>&1 \
-        || ln -sf /lib/systemd/system/qm1-firstboot.service \
-               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-firstboot.service"
-    echo "[hook03] 已启用 qm1-firstboot.service（首启自动配置 Wi-Fi/SSH）"
-fi
+mkdir -p "$TARGET/var/lib/qm1"
+enable_overlay_unit "qm1-firstboot.service" "qm1-firstboot.service" "multi-user.target"
 
 # 稳定性取证采集器：周期快照（整机卡死 / eMMC 掉卡 / Wi-Fi 断流的判据）。
 # 没有计数器就无法判断某个缓解到底有没有用，所以它是第一优先级的组件。
-if [ -f "$TARGET/etc/systemd/system/qm1-hardware-fixups.service" ]; then
-    chroot "$TARGET" systemctl enable qm1-hardware-fixups.service >/dev/null 2>&1 \
-        || ln -sf /lib/systemd/system/qm1-hardware-fixups.service \
-               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-hardware-fixups.service"
-    echo "[hook03] 已启用 qm1-hardware-fixups.service（eMMC runtime PM / 调频 / HDMI 音频 / 蓝牙绑定）"
-fi
+enable_overlay_unit "qm1-hardware-fixups.service" "qm1-hardware-fixups.service" "multi-user.target"
 
-if [ -f "$TARGET/etc/systemd/system/qm1-health-collect.timer" ]; then
-    mkdir -p "$TARGET/var/log/qm1-health"
-    chroot "$TARGET" systemctl enable qm1-health-collect.timer >/dev/null 2>&1 \
-        || ln -sf /lib/systemd/system/qm1-health-collect.timer \
-               "$TARGET/etc/systemd/system/timers.target.wants/qm1-health-collect.timer"
-    echo "[hook03] 已启用 qm1-health-collect.timer（周期采集稳定性证据）"
-fi
+mkdir -p "$TARGET/var/log/qm1-health"
+enable_overlay_unit "qm1-health-collect.timer" "qm1-health-collect.timer" "timers.target"
+
+# 蓝牙控制器初始化（内核 hci_uart + btrtl 路线，见单元里的说明）
+enable_overlay_unit "qm1-bluetooth.service" "qm1-bluetooth.service" "multi-user.target"
 
 # 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
 # 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
-if [ -f "$TARGET/etc/systemd/system/qm1-install.service" ]; then
-    mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
-    ln -sf /lib/systemd/system/qm1-install.service \
-        "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-install.service"
-    echo "[hook03] 已启用安装单元 qm1-install.service（仅 qm1.install=1 时触发）"
-fi
+enable_overlay_unit "qm1-install.service" "qm1-install.service" "multi-user.target"
 
 echo "[hook03] 完成"

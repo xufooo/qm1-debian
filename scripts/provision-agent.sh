@@ -42,9 +42,56 @@ command -v apt-get >/dev/null 2>&1 || die "这不是 Debian 系系统"
 log "系统：$(. /etc/os-release 2>/dev/null && echo "$PRETTY_NAME")  内核：$(uname -r)"
 log "内存：$(free -m | awk '/^Mem:/{print $2" MiB 总 / "$7" MiB 可用"}')"
 
-# ---------- 1. 运行时依赖 ----------
-log "安装运行时依赖（Chromium 运行库 / 字体 / ripgrep / ffmpeg / 工具链）"
-export DEBIAN_FRONTEND=noninteractive
+# ---------- 1. Wi-Fi（必须最先做）----------
+# ★ 顺序原来反了：先 apt-get update 再写 Wi-Fi 配置。
+#   在一台刚装好、还没有任何网络配置的系统上，apt-get update 会先卡住/失败
+#   （仓库域名要 DNS 解析，而 DNS 要先联网），于是"配网"这一步永远轮不到。
+#   现在：先把 Wi-Fi 拉起来 → 等 DNS 能解析 → 再动 apt。
+if [ -n "$WIFI_SSID" ]; then
+    log "写入 Wi-Fi 配置：$WIFI_SSID"
+    install -d -m 0755 /etc/wpa_supplicant
+    umask 077
+    cat > /etc/wpa_supplicant/wpa_supplicant.conf <<EOF
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+country=CN
+
+network={
+    ssid="$WIFI_SSID"
+    psk="$WIFI_PASS"
+    key_mgmt=WPA-PSK
+}
+EOF
+    # 单元名是 qm1-wifi@**.service（模板单元，%i = 接口名），
+    # 不是 qm1-wifi.service —— 原来写的那个名字不存在，enable 永远失败。
+    systemctl enable --now qm1-wifi@wlan0.service \
+        || warn "qm1-wifi@wlan0.service 启用失败，可稍后手工配置"
+else
+    log "未提供 Wi-Fi 参数，跳过（如需联网可改用 USB 以太网适配器）"
+fi
+
+# ---------- 2. 等网络与 DNS ----------
+# 这台机器的 DNS 由 systemd-resolved 提供（/etc/resolv.conf 指向它的 stub）。
+# 没有 DNS 就没法 apt、没法拉官方安装器、连时钟都对不上。
+wait_for_dns() {
+    local waited=0
+    while [ "$waited" -lt "${QM1_DNS_WAIT:-90}" ]; do
+        if getent hosts deb.debian.org >/dev/null 2>&1; then
+            log "DNS 已就绪（${waited}s）"
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    return 1
+}
+if [ -n "$WIFI_SSID" ]; then
+    if ! wait_for_dns; then
+        warn "DNS 仍未就绪 —— 下面的 apt/安装步骤可能失败（检查 Wi-Fi 是否关联成功）"
+    fi
+fi
+
+# ---------- 3. 时钟 ----------
 # 时钟必须先对：官方安装器走 HTTPS，证书有效期校验依赖正确时钟；
 # 这台机器没有 RTC，冷启动时系统时间从 1970 年开始。
 wait_for_clock() {
@@ -65,6 +112,9 @@ if ! wait_for_clock; then
     warn "系统时钟仍未同步（$(date -u)）——TLS 证书校验可能失败，请检查 systemd-timesyncd"
 fi
 
+# ---------- 4. 运行时依赖 ----------
+log "安装运行时依赖（Chromium 运行库 / 字体 / ripgrep / ffmpeg / 工具链）"
+export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     ca-certificates curl git gnupg ripgrep ffmpeg \
@@ -74,29 +124,7 @@ apt-get install -y --no-install-recommends \
     libpango-1.0-0 libxcomposite1 libxdamage1 libxfixes3 libxrandr2 \
     zram-tools e2fsprogs rsync || warn "部分包安装失败（离线？），继续"
 
-# ---------- 2. Wi-Fi ----------
-if [ -n "$WIFI_SSID" ]; then
-    log "写入 Wi-Fi 配置：$WIFI_SSID"
-    install -d -m 0755 /etc/wpa_supplicant
-    umask 077
-    cat > /etc/wpa_supplicant/wpa_supplicant.conf <<EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=CN
-
-network={
-    ssid="$WIFI_SSID"
-    psk="$WIFI_PASS"
-    key_mgmt=WPA-PSK
-}
-EOF
-    systemctl enable --now qm1-wifi.service 2>/dev/null \
-        || warn "qm1-wifi.service 启用失败，可稍后手工配置"
-else
-    log "未提供 Wi-Fi 参数，跳过（如需联网可改用 USB 以太网适配器）"
-fi
-
-# ---------- 3. Hermes（官方安装方式）----------
+# ---------- 5. Hermes（官方安装方式）----------
 if [ "$SKIP_HERMES" -eq 1 ]; then
     warn "按要求跳过 Hermes 安装"
 else
@@ -115,7 +143,7 @@ else
     fi
 fi
 
-# ---------- 4. systemd 单元与资源限额 ----------
+# ---------- 6. systemd 单元与资源限额 ----------
 log "写入 systemd --user 单元（gateway 常驻 + 浏览器会话）"
 install -d -m 0755 /etc/systemd/system
 install -d -m 0755 "$RUN_HOME/.config/systemd/user" 2>/dev/null || true
@@ -164,10 +192,10 @@ EOF
 chown -R "$RUN_AS" "$RUN_HOME/.config/systemd/user" 2>/dev/null || true
 loginctl enable-linger "$RUN_AS" 2>/dev/null || warn "enable-linger 失败（需 systemd-logind）"
 
-# ---------- 5. SSH ----------
+# ---------- 7. SSH ----------
 systemctl enable --now ssh 2>/dev/null || warn "ssh 启用失败"
 
-# ---------- 6. 验收提示 ----------
+# ---------- 8. 验收提示 ----------
 cat <<EOF
 
 运行时部署完成。验收步骤：

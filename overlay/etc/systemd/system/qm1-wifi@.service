@@ -2,6 +2,7 @@
 Description=QM1 internal Wi-Fi (%i) managed by wpa_supplicant
 After=systemd-modules-load.service network.target qm1-firstboot.service
 Wants=systemd-modules-load.service qm1-firstboot.service
+Before=network-online.target
 ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant.conf
 
 [Service]
@@ -12,6 +13,10 @@ ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip link show %i >/dev/null 2>&
 ExecStart=/usr/sbin/wpa_supplicant -i %i -c /etc/wpa_supplicant/wpa_supplicant.conf
 Restart=always
 RestartSec=5
+# 上面那个 ExecStartPre 最多要等 60 秒（等 SDIO 把 wlan0 枚举出来）。
+# 全局默认的 TimeoutStartSec 一旦比它短，systemd 会在接口出现之前
+# 就把这个单元掐掉 —— 现象是"Wi-Fi 永远起不来，而且日志里什么都没有"。
+TimeoutStartSec=120s
 
 [Install]
 WantedBy=multi-user.target

@@ -94,7 +94,44 @@ else
         "/lib/firmware/rtlwifi/rtl8723bs_nic.bin" "内置 RTL8723BS Wi-Fi 固件"
 fi
 
-echo "-- 伪文件系统应为��� --"
+echo "-- 内置 Wi-Fi 驱动（rtw88 回移 / 树外 staging）--"
+# 出货的 Wi-Fi 驱动有两条合法路径：
+#   1) 上游 rtw88 整树回移成树外模块 rtw88_qm1（推荐，根治路径）
+#      → 需要 rtw88/rtw8723b_fw.bin 固件 + /etc/modprobe.d/qm1-rtw88-8723bs.conf
+#   2) 打 P1–P5 补丁的树外 staging 模块 r8723bs_qm1
+#      → 需要 rtlwifi/rtl8723bs_nic.bin 固件
+# 两条都必须是"驱动 + 固件"成对出现，只有一个等于 Wi-Fi 上不了网。
+rtw88_ko=""
+for _m in rtw88_qm1 rtw88_8723bs rtw_8723bs; do
+    if [ -n "$KVER" ] && debugfs -R "stat /lib/modules/$KVER/extra/rtw88/$_m.ko" "$IMG" >/dev/null 2>&1; then
+        rtw88_ko="/lib/modules/$KVER/extra/rtw88/$_m.ko"
+        break
+    fi
+done
+if [ -n "$rtw88_ko" ]; then
+    printf '  OK   %-46s (%s)\n' "$rtw88_ko" "出货的 Wi-Fi 驱动（rtw88 回移模块）"
+    check_exists "/lib/firmware/rtw88/rtw8723b_fw.bin" "rtw88 固件（缺它 rtw88 起不来）"
+    check_exists "/etc/modprobe.d/qm1-rtw88-8723bs.conf" "rtw88 模块参数与树内 staging 的 blacklist"
+else
+    printf '  WARN %-46s (%s)\n' "/lib/modules/*/extra/rtw88/*.ko" "镜像里没有 rtw88 回移模块"
+    # 没有 rtw88 时，树外补丁模块是唯一可用的根治路径
+    if [ -n "$KVER" ] \
+       && debugfs -R "stat /lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "$IMG" >/dev/null 2>&1; then
+        printf '  OK   %-46s (%s)\n' \
+            "/lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "出货的 Wi-Fi 驱动（打补丁的树外 staging 模块）"
+    else
+        printf '  FAIL %-46s (%s)\n' "/lib/modules/*/extra/*/*.ko" \
+            "镜像里既没有 rtw88 回移模块，也没有打了补丁的 r8723bs_qm1 —— 内置 Wi-Fi 无法工作"
+        fail=$((fail + 1))
+    fi
+fi
+
+echo "-- 蓝牙（内核 hci_uart + btrtl + 发行版固件）--"
+check_exists "/etc/systemd/system/qm1-bluetooth.service" "蓝牙初始化单元（内核路线）"
+check_exists "/lib/firmware/rtl_bt/rtl8723bs_fw.bin" "蓝牙固件（缺它 btrtl 无法下发）"
+check_exists "/lib/firmware/rtl_bt/rtl8723bs_config-OBDA8723.bin" "蓝牙配置固件（按 ACPI HID 取名）"
+
+echo "-- 伪文件系统应为空 --"
 for d in /dev /proc /sys /run; do
     n="$(debugfs -R "ls -l $d" "$IMG" 2>/dev/null | grep -cv '^d' || true)"
     if [ "${n:-0}" -le 1 ]; then

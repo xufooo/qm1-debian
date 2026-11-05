@@ -138,12 +138,30 @@ sed -e "s|@ROOT_UUID@|$SLOT64_UUID|g" \
     "$CONFIG_TEMPLATE" > "$CFG"
 
 # 删除"内核/UUID 缺失"那一侧的菜单项（64 位侧与 32 位侧互相独立）
+#
+# 注意：这里必须把**保留**的菜单项头一并打印出来。
+# 之前的写法是 `{ skip = (have64 != "1"); next }` —— 无条件 next 把菜单项头吃掉了，
+# 于是留下的块体（linux/initrd 行）前面没有 "menuentry ... {"，GRUB 语法直接是坏的，
+# 而且只剩一个孤零零的 "}"。已用 grep -c '^menuentry' == 0 复现过。
 awk -v have64="$have64" -v have32="$have32" '
-    /^menuentry .*64-bit/ { skip = (have64 != "1"); next }
-    /^menuentry .*32-bit/ { skip = (have32 != "1"); next }
+    /^menuentry .*64-bit/ { skip = (have64 != "1"); if (!skip) print; next }
+    /^menuentry .*32-bit/ { skip = (have32 != "1"); if (!skip) print; next }
     skip && /^}/ { skip = 0; next }
     !skip { print }
 ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
+
+# 菜单项数量自检：生成的 grub.cfg 里，menuentry 的条数必须等于可用槽位数。
+# 这一条是防"哑菜单"回归的最后一道闸 —— 少了就是装出来点不动的 ESP。
+want_menus=0
+[ "$have64" = 1 ] && want_menus=$(( want_menus + 1 ))
+[ "$have32" = 1 ] && want_menus=$(( want_menus + 1 ))
+got_menus=$(grep -c '^menuentry ' "$CFG" || true)
+if [ "$got_menus" != "$want_menus" ]; then
+    die "生成的 grub.cfg 菜单项数量不对（期望 $want_menus 条，实际 $got_menus 条）—— 拒绝写出一个哑菜单"
+fi
+if [ "$want_menus" -gt 0 ] && ! grep -q '^menuentry ' "$CFG"; then
+    die "生成的 grub.cfg 里没有任何 menuentry —— 拒绝写出一个哑菜单"
+fi
 
 mcopy -i "$OUT" "$CFG" ::/EFI/BOOT/grub.cfg
 
