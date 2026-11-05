@@ -1,0 +1,62 @@
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0800
+Subject: [PATCH] wifi: rtw88: 8723b: stay at 20 MHz until the chip variant
+ can be read from the efuse
+
+This is a local policy patch, not an upstream commit.
+
+The upstream tree we build from (05441d697f7f9a927264f4058cbbc6a03dfcac9d,
+a torvalds/linux master snapshot of 2026-11-03) reports 40 MHz as a
+hardware capability of the RTL8723B:
+
+  efuse->hw_cap.bw = BIT(RTW_CHANNEL_WIDTH_20) | BIT(RTW_CHANNEL_WIDTH_40);
+
+Upstream has since worked out that this is not always true.  The rtw-next
+series of 2026-10-20 reads the package type and the chip variant from the
+efuse (0x1fb, bits 2:0 and 5:4) and disables 40 MHz when the chip turns out
+to be the RTL8703AS, which is a variant of the RTL8723BS that does not
+support 40 MHz at all:
+
+  51abe866522f  "wifi: rtw88: 8723b: Read the package type from efuse"
+  10d1312f2f19  "wifi: rtw88: 8723b: Read the chip variant from efuse"
+
+We do not carry those two commits.  They need the physical map in the
+read_efuse chip operation, which changes the signature of that operation
+for every chip in the whole rtw88 tree - a backport across the entire
+driver for one bit of information.
+
+So the question is what to do until that information can be read:
+
+  - The chip in the QM1's AzureWave module reports itself as an
+    RTL8723BS, but nothing in the tree can tell a genuine RTL8723BS
+    from the RTL8703AS variant that upstream found.
+  - The community reports for this chip family (the staging rtl8723bs
+    driver) show random disconnects with 40 MHz, and the staging
+    driver defaults to 40 MHz (rtw_bw_mode=0x01).
+  - On the QM1 this Wi-Fi is the only network link: it carries the SSH
+    session, the time sync and the provisioning download.  Stability is
+    worth more here than the extra throughput of a 40 MHz channel.
+
+Therefore: report 20 MHz only.  The change is one line, and it is the
+conservative direction - a link that stays up at 20 MHz beats a link
+that drops at 40 MHz.
+
+If the QM1 ever proves that 40 MHz works on this module, the change can
+be reverted, or the upstream efuse series can be backported properly.
+
+---
+ drivers/net/wireless/realtek/rtw88/rtw8723b.c | 4 ++--
+ 1 file changed, 2 insertions(+), 2 deletions(-)
+diff --git a/drivers/net/wireless/realtek/rtw88/rtw8723b.c b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
+--- a/drivers/net/wireless/realtek/rtw88/rtw8723b.c
++++ b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
+@@ -2361,8 +2361,7 @@
+ 	/* No firmware hardware feature report exists, so fill it in here. */
+ 	efuse->hw_cap.nss = 1;
+ 	efuse->hw_cap.ant_num = 1;
+-	efuse->hw_cap.bw = BIT(RTW_CHANNEL_WIDTH_20) |
+-			   BIT(RTW_CHANNEL_WIDTH_40);
++	efuse->hw_cap.bw = BIT(RTW_CHANNEL_WIDTH_20);
+ 
+ 	return 0;
+ }

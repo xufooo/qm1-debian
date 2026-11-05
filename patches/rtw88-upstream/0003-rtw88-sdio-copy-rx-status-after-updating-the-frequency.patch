@@ -1,0 +1,53 @@
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0800
+Subject: [PATCH] wifi: rtw88: sdio: copy RX status after updating the frequency
+
+Carried from the upstream rtw-next commit
+
+  c76f73c36343f041adee1d0875fc7f3597d00443
+  "wifi: rtw88: sdio: copy RX status after updating the frequency"
+  (Hungyu Lin, 2026-10-09)
+
+which is *not* part of the upstream snapshot this module is built from
+(05441d697f7f9a927264f4058cbbc6a03dfcac9d, a torvalds/linux master
+snapshot of 2026-11-03): master only merged rtw-next up to the
+"rtw-next-2026-10-08" tag, so every 8723B fix from 2026-10-09 onwards
+is missing from the tree we ship.
+
+Why we carry it:
+
+  rtw_sdio_rx_skb() copies rx_status into the skb *before* it calls
+  rtw_update_rx_freq_for_invalid().  When the frequency is corrected,
+  the skb still carries the stale value when mac80211 sees the frame.
+  The PCI and USB RX paths already copy the status after the update.
+
+  The QM1's RTL8723BS is SDIO, so this is the path it actually takes:
+  the frame frequency that mac80211 gets to see is the wrong one, and
+  mac80211 rejects a beacon whose frequency does not match the channel
+  it expects (ieee80211_rx_beacon_freq_valid()).  The symptom is
+  "beacon loss" on a link that is otherwise up - one of the ways the
+  QM1's Wi-Fi used to drop off.
+
+  The change moves three lines; the PCI and USB paths are unaffected.
+---
+diff --git a/drivers/net/wireless/realtek/rtw88/sdio.c b/drivers/net/wireless/realtek/rtw88/sdio.c
+index dc2fd0f8f9ff..7c22f0ba5329 100644
+--- a/drivers/net/wireless/realtek/rtw88/sdio.c
++++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+@@ -1332,8 +1332,6 @@ static void rtw_sdio_rx_skb(struct rtw_dev *rtwdev, struct sk_buff *skb,
+ 			    u32 pkt_offset, struct rtw_rx_pkt_stat *pkt_stat,
+ 			    struct ieee80211_rx_status *rx_status)
+ {
+-	*IEEE80211_SKB_RXCB(skb) = *rx_status;
+-
+ 	if (pkt_stat->is_c2h) {
+ 		skb_put(skb, pkt_stat->pkt_len + pkt_offset);
+ 		rtw_fw_c2h_cmd_rx_irqsafe(rtwdev, pkt_offset, skb);
+@@ -1346,6 +1344,7 @@ static void rtw_sdio_rx_skb(struct rtw_dev *rtwdev, struct sk_buff *skb,
+ 	rtw_update_rx_freq_for_invalid(rtwdev, skb, rx_status, pkt_stat);
+ 	rtw_rx_stats(rtwdev, pkt_stat->vif, skb);
+ 
++	*IEEE80211_SKB_RXCB(skb) = *rx_status;
+ 	ieee80211_rx_irqsafe(rtwdev->hw, skb);
+ }
+ 

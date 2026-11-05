@@ -624,6 +624,23 @@ else
     row WARN "Wi-Fi 关联" "没有 iw 或 wlan0 不存在"
 fi
 
+# 信道宽度：出货模块把 8723B 的能力收窄到 20 MHz（patches/rtw88-upstream/
+# 0006）。40 MHz 在这颗芯片的一个变体上根本不支持，而社区报告里 40 MHz
+# 正是随机断连的来源 —— 这台机器没有第二条链路，稳定性优先。所以这里核对
+# 实际协商到的宽度，宽度不是 20 MHz 就报出来。
+if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
+    _width="$(iw dev wlan0 link 2>/dev/null | sed -n 's/.*width:[[:space:]]*//p' | head -1)"
+    if [ -z "$_width" ]; then
+        row WARN "Wi-Fi 信道宽度" "读不到协商宽度（可能还没关联）"
+    elif [ "$_width" = "20 MHz" ]; then
+        row PASS "Wi-Fi 信道宽度" "20 MHz（出货策略：不启用 40 MHz）"
+    else
+        row FAIL "Wi-Fi 信道宽度" "协商到的是 $_width —— 应当是 20 MHz（模块没有带上 0006 补丁？）"
+    fi
+else
+    row WARN "Wi-Fi 信道宽度" "没有 iw 或 wlan0 不存在"
+fi
+
 if systemctl is-enabled --quiet ssh 2>/dev/null; then
     row PASS "SSH" "已启用"
 else

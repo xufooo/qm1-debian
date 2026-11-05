@@ -320,6 +320,11 @@ build_upstream_full() {
 
     # The upstream tree needs the local compatibility patch: its mac80211 glue
     # uses the multi-radio and the MLO callbacks that Linux 6.12 does not have.
+    # It also needs the 8723B fixes that upstream made after 2026-10-09 and
+    # that are therefore not in this snapshot -- see
+    # patches/rtw88-upstream/README.md.
+    assert_required_patches "$UPSTREAM_PATCH_DIR" "upstream" \
+        "$REQUIRED_UPSTREAM_PATCHES" || return 1
     apply_patches "$mod" "$UPSTREAM_PATCH_DIR" "upstream" || return 1
 
     # Hard assertion on the tree that is about to be compiled: the TX report
@@ -499,6 +504,47 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# The patches that must be present, per tree.
+#
+# The upstream snapshot we build from (a torvalds/linux master snapshot of
+# 2026-11-03) only merged rtw-next up to the "rtw-next-2026-10-08" tag, so
+# the 8723B fixes that upstream made from 2026-10-09 onwards are not in it.
+# We carry them ourselves (see patches/rtw88-upstream/README.md).
+#
+# A missing patch is not a build error by itself: the module would still
+# compile, still load and still bring the interface up.  It would just be
+# missing the fix -- the RX path that can overflow the skb, the beacon loss
+# on a 40 MHz connection, the 40 MHz capability itself.  That is exactly the
+# kind of quiet regression this repository refuses to ship, so the presence
+# of every required patch is checked before anything is compiled.
+# ---------------------------------------------------------------------------
+REQUIRED_UPSTREAM_PATCHES="0001-rtw88-adapt-the-mac80211-api-to-linux-6.12.patch
+0002-rtw88-sdio-reject-oversized-rx-packets.patch
+0003-rtw88-sdio-copy-rx-status-after-updating-the-frequency.patch
+0004-rtw88-8723b-do-not-set-channel-invalid-in-query-phy-status.patch
+0005-rtw88-8723b-always-report-a-single-spatial-stream.patch
+0006-rtw88-8723b-stay-at-20mhz-until-the-chip-variant-can-be-read.patch"
+
+REQUIRED_VENDOR_PATCHES="0001-rtw88-8723bs-extend-the-tx-report-purge-timeout.patch"
+
+assert_required_patches() {   # assert_required_patches <patch-dir> <label> <list>
+    local pdir="$1" label="$2" list="$3" p missing=0
+    for p in $list; do
+        if [ ! -f "$pdir/$p" ]; then
+            warn "the $label patch set is missing $p"
+            missing=$((missing + 1))
+        fi
+    done
+    if [ "$missing" -ne 0 ]; then
+        warn "the $label tree would build without $missing patch(es) -- it would still"
+        warn "load and still bring the interface up, but silently without the fixes"
+        return 1
+    fi
+    log "the $label patch set is complete ($(printf '%s' "$list" | wc -w | tr -d ' ') patch(es))"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # local patches for the vendor tree
 #
 # The vendor tree misses fixes that upstream already merged for this chip --
@@ -558,6 +604,8 @@ build_vendor() {
 
     # 本仓库的本地补丁（TX report purge 超时等）必须打上，否则编出来的模块
     # 仍带着 500 ms 的旧超时。
+    assert_required_patches "$PATCH_DIR" "vendor" \
+        "$REQUIRED_VENDOR_PATCHES" || return 1
     apply_patches "$WORK/vendor" "$PATCH_DIR" "vendor" || return 1
 
     log "compiling the vendor tree against $KSRC"

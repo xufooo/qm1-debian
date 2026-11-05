@@ -1,0 +1,51 @@
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0800
+Subject: [PATCH] wifi: rtw88: sdio: reject oversized RX packets
+
+Carried from the upstream rtw-next commit
+
+  83ca360e85280ecaf0ded1b84d184a2839fea20f
+  "wifi: rtw88: sdio: reject oversized RX packets"
+  (Luka Gejak, 2026-10-09)
+
+which is *not* part of the upstream snapshot this module is built from
+(05441d697f7f9a927264f4058cbbc6a03dfcac9d, a torvalds/linux master
+snapshot of 2026-11-03): master only merged rtw-next up to the
+"rtw-next-2026-10-08" tag, so every 8723B fix from 2026-10-09 onwards
+is missing from the tree we ship.
+
+Why we carry it:
+
+  rtw_sdio_rxfifo_recv() takes the last-entry path when the RX
+  descriptor claims more data than rx_len.  The skb is then handed to
+  rtw_sdio_rx_skb(), which calls skb_put() with pkt_len without ever
+  checking it against the space that is left.  A bad descriptor can
+  therefore overflow the skb, which is kernel memory corruption.
+
+  The QM1's RTL8723BS is an SDIO device and its only network link, so
+  an RX path that can corrupt memory is not an acceptable risk.  The
+  fix is eight lines and self-contained.
+
+---
+ drivers/net/wireless/realtek/rtw88/sdio.c | 8 ++++++++
+ 1 file changed, 8 insertions(+)
+
+diff --git a/drivers/net/wireless/realtek/rtw88/sdio.c b/drivers/net/wireless/realtek/rtw88/sdio.c
+index 7c22f0ba5329..ecd4d751c05a 100644
+--- a/drivers/net/wireless/realtek/rtw88/sdio.c
++++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+@@ -1388,6 +1388,14 @@ static void rtw_sdio_rxfifo_recv(struct rtw_dev *rtwdev, u32 rx_len)
+ 		curr_pkt_len = ALIGN(pkt_offset + pkt_stat.pkt_len,
+ 				     RTW_SDIO_DATA_PTR_ALIGN);
+
++		if (unlikely(pkt_offset + pkt_stat.pkt_len > rx_len)) {
++			rtw_dbg(rtwdev, RTW_DBG_SDIO,
++				"oversized RX packet: %u, %u bytes left\n",
++				pkt_offset + pkt_stat.pkt_len, rx_len);
++			dev_kfree_skb_any(skb);
++			return;
++		}
++
+ 		if ((curr_pkt_len + pkt_desc_sz) >= rx_len) {
+ 			/* Use the original skb (with it's adjusted offset)
+ 			 * when processing the last (or even the only) entry to
