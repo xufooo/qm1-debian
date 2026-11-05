@@ -181,7 +181,7 @@ QM1 内置无线已实测确认为 **Realtek RTL8723BS**（SDIO 模组，AzureWa
 | 内核驱动 | Debian 13（6.12）**和** Debian 12（6.1 / 686-pae）都自带主线 staging 驱动 `r8723bs`（`CONFIG_RTL8723BS=m`），模块随 `linux-image-*` 一起发布 → **不需要 DKMS** |
 | 固件 | `firmware-realtek` 提供 `/usr/lib/firmware/rtlwifi/rtl8723bs_nic.bin`（驱动实际请求的文件名）。`rtl8723bs_fw.bin` 是蓝牙固件（`rtl_bt/`），别拿它当 Wi-Fi blob 核对 |
 | 加密 | 仅 WPA2-PSK，无 WPA3/SAE（staging 版仍是 Realtek 私有协议栈） |
-| 上游路线 | staging 版已被上游在 7.4 删除，官方并入 `rtw88`（`CONFIG_RTW88_8723BS`，需内核 ≥ 7.4；Debian 尚无 7.4 内核包，trixie 也缺 `rtw88/rtw8723b_fw.bin`） |
+| 上游路线 | staging 版已被上游在 7.4 删除，官方并入 `rtw88`（`CONFIG_RTW88_8723BS`，需内核 ≥ 7.4；Debian 尚无 7.4 内核包，trixie 也缺 `rtw88/rtw8723b_fw.bin`）→ 本仓库把上游芯片驱动**按镜像内核回移成树外模块**（见下） |
 | 稳定性 | staging 版是 Realtek 私有栈，**没有逐包发送反馈**：数据帧无 report、无主机超时、无重传反馈，速率是关联时查表定死的 → 弱信号下固件内部丢弃对主机不可见，表现为 TCP 超时重传。同时存在多条**永久卡死路径**（见下） |
 
 镜像侧对应处理：驱动表纳入 `r8723bs`，firmware blob 核对改查 `rtl8723bs_nic.bin`，`/etc/modprobe.d/qm1-rtl8723bs-in-tree.conf` 关掉驱动的省电与 40MHz 带宽（`rtw_power_mgnt=0 rtw_smart_ps=0 rtw_ips_mode=0 rtw_bw_mode=0`）；打了补丁的外部模块另用 `/etc/modprobe.d/qm1-rtl8723bs.conf`（blacklist 内置 `r8723bs`，改用 `r8723bs_qm1`），`drv-selfcheck.sh` 报出真实绑定驱动并在检测到 `r8723bs` 时给出稳定性告警。
@@ -239,6 +239,48 @@ bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
 CI 里 `build-image` 已经把这两步串起来了（先装 `6.12.113+deb13-amd64` 的内核头文件
 → 编译模块 → 带着 `--kernel-version` 与 `--wifi-module-deb` 构建 rootfs），
 所以 CI 产出的镜像自带打了补丁的 Wi-Fi 驱动。
+
+#### 上游 rtw88 回移模块（根治路线，推荐）
+
+staging 驱动那四条永久卡死路径的根因是 Realtek 私有协议栈没有逐包发送反馈。上游的解法是把这颗芯片
+**并入 rtw88**（mac80211 化，有逐包反馈），并把 staging 驱动删掉：
+
+| 上游提交 | 内容 |
+|----------|------|
+| `d726c70ce082` | `wifi: rtw88: 8723b: add the RTL8723B chip driver`（新增 `rtw8723b.c` / `rtw8723b.h`） |
+| `269946cba92e` | `rtw88: 8723bs: add the RTL8723BS SDIO bind` |
+| `b2d251aa7f16` | `rtw88: 8723bs: enable building…`（Kconfig + Makefile） |
+| `c520f3af7df4` | `staging: rtl8723bs: remove the obsolete driver` |
+
+这组提交**没有改动 rtw88 核心的既有文件**，只新增芯片驱动，所以按目标内核回移的成本很低。
+但**还没有发行版内核带着它**：Debian sid 的内核是 7.2.15（< 7.4），trixie 是 6.12；
+Debian 13 的 `firmware-realtek` 里也没有 `rtw88/rtw8723b_fw.bin`（sid 才有）。
+
+因此本仓库把上游芯片驱动**回移成树外模块**，按镜像内核编译：
+
+| 文件 | 作用 |
+|------|------|
+| `scripts/build-rtw88-8723bs-module.sh` | ① 上游回移：用 v6.12 的 rtw88 头文件 + 上游的芯片文件，编成 `rtw88_8723b.ko` / `rtw88_8723bs.ko`；② 上游编不过时回退到维护中的 vendor rtw88 树（`rtw_core.ko` / `rtw_sdio.ko` / `rtw_8723b.ko` / `rtw_8723bs.ko`）。校验 vermagic 必须与目标内核一致、模块 alias 必须认领 `0x024c:0xb723`，最后打成 `.deb` |
+| `scripts/fetch-rtw8723b-firmware.sh` | 从 Debian sid 的 `firmware-realtek` 里只取 `rtw88/rtw8723b_fw.bin`（用 sid 包索引里的 SHA256 校验 .deb 本身） |
+
+打好的 deb 里包含：模块（`/lib/modules/<abi>/extra/rtw88/`）、固件（`/lib/firmware/rtw88/`）、
+`/etc/modprobe.d/qm1-rtw88-8723bs.conf`（`blacklist r8723bs` + 关省电、限 20MHz 的参数）、
+以及 `qm1-rtw88-8723bs.service`（先 rmmod 树内 staging 驱动，再 modprobe 回移模块）。
+
+**装进镜像**：
+
+```bash
+bash scripts/build-rtw88-8723bs-module.sh --kver 6.12.113+deb13-amd64 \
+     --out-dir build/rtw88-module
+bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
+     --kernel-version 6.12.113 \
+     --rtw88-module-deb build/rtw88-module/qm1-rtw88-8723bs_*.deb
+```
+
+hook 会核对 vermagic 与镜像内核一致、固件在位，并把 `/etc/modules-load.d/qm1-hardware.conf`
+里的 `r8723bs` 换成回移后的模块名；`drv-selfcheck.sh` 看到 rtw88 模块时直接报 PASS。
+CI 里 `build-image` 已经把这条链路串起来了；rtw88 模块构建失败时流水线会回退到打了补丁的
+staging 模块，不阻断镜像产出。
 
 ## 设备端自检
 
