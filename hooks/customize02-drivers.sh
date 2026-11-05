@@ -377,13 +377,24 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     #   按 modalias 抢先加载它 —— 那就等于换了个名字的老驱动，
     #   永久卡死路径一条没少。
     _iso_conf="$TARGET/etc/modprobe.d/qm1-rtw88-8723bs.conf"
+    # 挡住 staging 驱动的行单独放一个文件：出货模块装不上、机器又没网口时，
+    # 现场删掉这一个文件就能让打了补丁的 staging 模块接手。
+    _fb_conf="$TARGET/etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
     mkdir -p "$TARGET/etc/modprobe.d"
     if [ ! -f "$_iso_conf" ]; then
         {
             echo "# QM1 内置 RTL8723BS：出货驱动是上游 rtw88 整树回移模块（$_sdio_mod），"
             echo "# 树内 staging 驱动 r8723bs 必须挡住，否则它会按 SDIO modalias 抢先绑定，"
             echo "# 把我们装好的 rtw88 模块晾在一边（现象：装了根治模块却仍在用老驱动）。"
+            echo "# 树内 rtw88 系列的隔离也在这个文件里 —— 出货模块导出的符号与"
+            echo "# 树内 rtw88_core 同名，两边同时加载会 \"exported symbol already defined\"。"
         } > "$_iso_conf"
+    fi
+    if [ ! -f "$_fb_conf" ]; then
+        {
+            echo "# QM1 的 Wi-Fi 回退开关 —— 出货驱动装不上时用它。"
+            echo "# 删掉本文件，再 modprobe r8723bs_qm1（打过 P1–P6 补丁的树外 staging 模块）。"
+        } > "$_fb_conf"
     fi
     # 树内 rtw88 系列：与包内 conf 用同一份名单（build 脚本的 INTREE_RTW88），
     # 免得"包里有、钩子里没有"这种两边不一致。
@@ -393,10 +404,7 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     #   模块名就叫 rtw88_8723bs，而且它依赖树内的 rtw88_core ⇒ 这两种情况下
     #   把树内 rtw88 拉黑 = 把出货模块自己拉死（insmod 找不到符号）。
     #   整树回移模式（rtw88_qm1）才需要把树内 rtw88 全部挡住。
-    _iso_lines="blacklist r8723bs
-install r8723bs /bin/false
-blacklist r8723bs_qm1
-install r8723bs_qm1 /bin/false"
+    _iso_lines=""
     if [ "$_sdio_mod" != "rtw88_8723bs" ]; then
         for _m in rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_usb rtw88_pci; do
             # 绝不挡出货模块自己。
@@ -408,19 +416,28 @@ install $_m /bin/false"
     else
         log "出货模块是 rtw88_8723bs（复用树内 rtw88 核心）⇒ 不隔离树内 rtw88"
     fi
+    # staging 驱动的隔离放在**另一个文件**里：现场没网时删掉它就能回退。
+    _fb_lines="blacklist r8723bs
+install r8723bs /bin/false
+blacklist r8723bs_qm1
+install r8723bs_qm1 /bin/false"
     # ★ 用临时文件 + `while ... done < file`，不用 `printf | while`：
     #   管道右侧的 while 跑在**子 shell** 里，子 shell 的变量改动不回传
     #   （写文件没问题，但任何计数/状态都会丢）。`done < file` 在当前 shell 跑。
-    _iso_tmp="$(mktemp)"
-    printf '%s\n' "$_iso_lines" > "$_iso_tmp"
-    while IFS= read -r _iso_line; do
-        [ -n "$_iso_line" ] || continue
-        grep -qxF "$_iso_line" "$_iso_conf" 2>/dev/null \
-            || printf '%s\n' "$_iso_line" >> "$_iso_conf"
-    done < "$_iso_tmp"
-    rm -f "$_iso_tmp"
-    chmod 0644 "$_iso_conf"
-    log "已补齐隔离配置：$_iso_conf（挡住树内 r8723bs、树外 r8723bs_qm1 与树内 rtw88）"
+    _append_iso() {   # _append_iso <conf 文件> <要补的行>
+        _tmp="$(mktemp)"
+        printf '%s\n' "$2" > "$_tmp"
+        while IFS= read -r _line; do
+            [ -n "$_line" ] || continue
+            grep -qxF "$_line" "$1" 2>/dev/null \
+                || printf '%s\n' "$_line" >> "$1"
+        done < "$_tmp"
+        rm -f "$_tmp"
+        chmod 0644 "$1"
+    }
+    _append_iso "$_iso_conf" "$_iso_lines"
+    _append_iso "$_fb_conf" "$_fb_lines"
+    log "已补齐隔离配置：$_iso_conf（树内 rtw88）与 $_fb_conf（树内 r8723bs、树外 r8723bs_qm1；删掉它即可回退）"
 
     # 模块包自带的 qm1-rtw88-8723bs.service 做的是「运行时兜底」：
     # ExecStartPre=-/sbin/modprobe -r r8723bs 把可能已经被 udev 抢先

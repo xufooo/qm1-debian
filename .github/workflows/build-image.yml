@@ -355,14 +355,24 @@ jobs:
             echo "::error::modules-load.d 里还留着 staging r8723bs / r8723bs_qm1，会和 rtw88 抢 SDIO 设备"
             exit 1
           fi
-          grep -q 'blacklist r8723bs' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-            || { echo "::error::modprobe 配置里没有 blacklist staging 驱动"; exit 1; }
+          # ★ 隔离分成两个文件：
+          #   qm1-rtw88-8723bs.conf      → 树内 rtw88（必须一直在：出货模块导出的
+          #                                符号与树内 rtw88_core 同名，撞车就装不上）
+          #   qm1-rtl8723bs-fallback.conf → 树内 r8723bs 与树外 r8723bs_qm1
+          #                                （现场没网时删掉它就能回退到 staging 模块）
+          FB="$ROOT/etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
+          [ -f "$FB" ] \
+            || { echo "::error::没有 $FB（现场没网时就没有退路了）"; exit 1; }
+          grep -q 'rm /etc/modprobe.d/qm1-rtl8723bs-fallback.conf' "$FB" \
+            || { echo "::error::$FB 里没写怎么切回 staging（现场唯一提示）"; exit 1; }
           # ★ 隔离必须有两道：blacklist 挡 udev 的 modalias 自动加载，
           #   install ... /bin/false 再挡一次显式 modprobe。
           #   少了任一道，树内 r8723bs 就会抢先绑定 SDIO 卡，
           #   于是"装了根治模块"却仍在用有永久卡死路径的老驱动 —— 而且一切看起来正常。
-          grep -qx 'install r8723bs /bin/false' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-            || { echo "::error::modprobe 配置里没有 install r8723bs /bin/false（隔离只有一道）"; exit 1; }
+          grep -qx 'blacklist r8723bs' "$FB" \
+            || { echo "::error::回退开关文件里没有 blacklist 树内 staging 驱动"; exit 1; }
+          grep -qx 'install r8723bs /bin/false' "$FB" \
+            || { echo "::error::回退开关文件里没有 install r8723bs /bin/false（隔离只有一道）"; exit 1; }
           # ★ 树内 rtw88 也要"安装屏蔽"，不能只有 blacklist。
           #   blacklist 只挡 udev 的 modalias 自动加载；显式 modprobe rtw88_sdio
           #   仍会把树内模块塞进去 —— 树内 rtw88_core 导出的是**同名**符号
@@ -387,10 +397,10 @@ jobs:
           #   按 modalias 抢先加载它 —— 那就等于换了个名字的老驱动，
           #   永久卡死路径一条没少（现象：装了根治模块却仍在用老驱动）。
           for m in r8723bs_qm1; do
-            grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-              || { echo "::error::modprobe 配置里没有 blacklist $m（树外 staging 模块会抢 SDIO 设备）"; exit 1; }
-            grep -qx "install $m /bin/false" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-              || { echo "::error::modprobe 配置里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
+            grep -qx "blacklist $m" "$FB" \
+              || { echo "::error::回退开关文件里没有 blacklist $m（树外 staging 模块会抢 SDIO 设备）"; exit 1; }
+            grep -qx "install $m /bin/false" "$FB" \
+              || { echo "::error::回退开关文件里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
           done
           # ★ 模块包自带的 qm1-rtw88-8723bs.service 必须真的被启用：
           #   它的 ExecStartPre=-/sbin/modprobe -r r8723bs 是运行时兜底

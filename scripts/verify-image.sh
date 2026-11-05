@@ -22,15 +22,11 @@ need_cmd debugfs "apt install e2fsprogs"
 fail=0
 
 # 存在性检查：debugfs -R "stat <path>"
-check_exists() {
-    local path="$1" desc="$2"
-    if debugfs -R "stat $path" "$IMG" >/dev/null 2>&1; then
-        printf '  OK   %-46s (%s)\n' "$path" "$desc"
-    else
-        printf '  FAIL %-46s (%s) —— 镜像里没有这个路径\n' "$path" "$desc"
-        fail=$((fail + 1))
-    fi
-}
+#
+# ★★ 判断"路径在不在"必须看 debugfs 的**输出**，不能看它的退出码
+#   （细节与理由见 scripts/lib/img-check.sh；这里只 source，不重复实现）。
+# shellcheck source=lib/img-check.sh
+source "$SCRIPT_DIR/lib/img-check.sh"
 
 # 属主/权限检查：stat 输出里的 User:/Group:/Mode:
 check_attr() {
@@ -123,16 +119,6 @@ check_absent_content() {
 }
 
 # 不存在检查：某个路径**不应该**在镜像里（用于"我们已经把它摘掉了"这类断言）
-check_absent() {
-    local path="$1" desc="$2"
-    if debugfs -R "stat $path" "$IMG" >/dev/null 2>&1; then
-        printf '  FAIL %-46s (%s)\n' "$path" "$desc"
-        fail=$((fail + 1))
-    else
-        printf '  OK   %-46s (%s)\n' "$path" "$desc"
-    fi
-}
-
 # 软链目标检查：debugfs 的 stat 对软链会给出 Fast link dest
 # ★ 必须在镜像内部判断软链是否指向存在的目标；直接在宿主机上 readlink -e
 #   会跑到宿主根去解析绝对目标，必然误判成悬空。
@@ -224,7 +210,7 @@ for blob in brcmfmac4365-pcie.bin brcmfmac4352-pcie.bin rtl8723a_fw.bin; do
 done
 # 内置 Realtek RTL8723BS 的 Wi-Fi blob 是 staging 驱动实际请求的文件名。
 # 它在 rtlwifi/ 子目录下，上面的顶层 ls 看不到，必须单独 stat。
-if debugfs -R "stat /lib/firmware/rtlwifi/rtl8723bs_nic.bin" "$IMG" >/dev/null 2>&1; then
+if _img_has "/lib/firmware/rtlwifi/rtl8723bs_nic.bin"; then
     printf '  OK   %-46s (%s)\n' "/lib/firmware/rtlwifi/rtl8723bs_nic.bin" "内置 RTL8723BS Wi-Fi 固件"
 else
     printf '  WARN %-46s (%s) —— 缺它则内置 Wi-Fi 无法工作（装 firmware-realtek）\n' \
@@ -240,7 +226,7 @@ echo "-- 内置 Wi-Fi 驱动（rtw88 回移 / 树外 staging）--"
 # 两条都必须是"驱动 + 固件"成对出现，只有一个等于 Wi-Fi 上不了网。
 rtw88_ko=""
 for _m in rtw88_qm1 rtw88_8723bs rtw_8723bs; do
-    if [ -n "$KVER" ] && debugfs -R "stat /lib/modules/$KVER/extra/rtw88/$_m.ko" "$IMG" >/dev/null 2>&1; then
+    if [ -n "$KVER" ] && _img_has "/lib/modules/$KVER/extra/rtw88/$_m.ko"; then
         rtw88_ko="/lib/modules/$KVER/extra/rtw88/$_m.ko"
         break
     fi
@@ -248,7 +234,8 @@ done
 if [ -n "$rtw88_ko" ]; then
     printf '  OK   %-46s (%s)\n' "$rtw88_ko" "出货的 Wi-Fi 驱动（rtw88 回移模块）"
     check_exists "/lib/firmware/rtw88/rtw8723b_fw.bin" "rtw88 固件（缺它 rtw88 起不来）"
-    check_exists "/etc/modprobe.d/qm1-rtw88-8723bs.conf" "rtw88 模块参数与树内 staging 的 blacklist"
+    check_exists "/etc/modprobe.d/qm1-rtw88-8723bs.conf" "rtw88 模块参数与树内 rtw88 的 blacklist"
+    check_exists "/etc/modprobe.d/qm1-rtl8723bs-fallback.conf" "staging 驱动的隔离（回退开关：删掉它才能回退）"
     # 出货模块的实际名字（rtw88_ko 的 basename，去掉 .ko）
     _ship_mod="$(basename "$rtw88_ko" .ko)"
     # ★ modprobe 是靠 modules.dep 找模块的：文件在 extra/ 下但索引里没有 ⇒
@@ -268,6 +255,12 @@ if [ -n "$rtw88_ko" ]; then
     #   两道隔离都要：blacklist 挡 udev 的 modalias 自动加载，
     #   install ... /bin/false 再挡一次显式 modprobe。
     _iso="/etc/modprobe.d/qm1-rtw88-8723bs.conf"
+    # ★ 隔离分成两个文件：
+    #   qm1-rtw88-8723bs.conf      → 树内 rtw88（必须一直在：出货模块导出的
+    #                                符号与树内 rtw88_core 同名）
+    #   qm1-rtl8723bs-fallback.conf → 树内 r8723bs 与树外 r8723bs_qm1
+    #                                （现场没网时删掉它就能回退到 staging）
+    _fb="/etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
     # 名单与 build 脚本的 INTREE_RTW88 一致：树内 rtw88 的每个模块都要
     # "blacklist + install /bin/false"两道。少一道就有可能被显式 modprobe
     # 装进去 —— 树内 rtw88_core 导出的符号与树外模块同名，撞车之后树外模块
@@ -277,8 +270,7 @@ if [ -n "$rtw88_ko" ]; then
     #   上游芯片回移模式（只编 rtw8723bs.c，复用树内 rtw88 核心）产出的
     #   模块名就叫 rtw88_8723bs，而且它依赖树内的 rtw88_core ⇒ 这种模式下
     #   树内 rtw88 一个都不能拉黑（build 脚本与 hook02 也是这么判的）。
-    _iso_lines=("blacklist r8723bs" "install r8723bs /bin/false"
-                "blacklist r8723bs_qm1" "install r8723bs_qm1 /bin/false")
+    _iso_lines=()
     if [ "$_ship_mod" != "rtw88_8723bs" ]; then
         for _m in rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_usb rtw88_pci; do
             [ "$_m" = "$_ship_mod" ] && continue
@@ -291,6 +283,15 @@ if [ -n "$rtw88_ko" ]; then
     for _line in "${_iso_lines[@]}"; do
         check_content_fixed "$_iso" "$_line" "隔离配置含：$_line"
     done
+    # staging 驱动的隔离在另一个文件里 —— 两道都要（blacklist 挡 modalias
+    # 自动加载，install /bin/false 再挡一次显式 modprobe）。
+    for _line in "blacklist r8723bs" "install r8723bs /bin/false" \
+                 "blacklist r8723bs_qm1" "install r8723bs_qm1 /bin/false"; do
+        check_content_fixed "$_fb" "$_line" "回退开关文件含：$_line"
+    done
+    # 回退开关必须写着怎么用：现场没网时，机器上只有这一行提示。
+    check_content "$_fb" 'rm /etc/modprobe.d/qm1-rtl8723bs-fallback.conf' \
+        "回退开关文件写明了怎么切回 staging（现场没网时的唯一提示）"
     for _p in disable_lps_deep support_bf debug_mask; do
         check_content "$_iso" "^options .*${_p}=" "rtw88 模块参数 ${_p} 已下发"
     done
@@ -318,7 +319,7 @@ else
     printf '  WARN %-46s (%s)\n' "/lib/modules/*/extra/rtw88/*.ko" "镜像里没有 rtw88 回移模块"
     # 没有 rtw88 时，树外补丁模块是唯一可用的根治路径
     if [ -n "$KVER" ] \
-       && debugfs -R "stat /lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "$IMG" >/dev/null 2>&1; then
+       && _img_has "/lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko"; then
         printf '  OK   %-46s (%s)\n' \
             "/lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "出货的 Wi-Fi 驱动（打补丁的树外 staging 模块）"
         check_content "/lib/modules/$KVER/modules.dep" 'r8723bs_qm1\.ko' \
