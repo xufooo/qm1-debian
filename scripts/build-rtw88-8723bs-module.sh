@@ -126,6 +126,18 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 PATCH_DIR="${PATCH_DIR:-$REPO_ROOT/patches/rtw88}"
 UPSTREAM_PATCH_DIR="${UPSTREAM_PATCH_DIR:-$REPO_ROOT/patches/rtw88-upstream}"
 
+# assert_required_patches() and apply_patches() live in scripts/lib/patch-tree.sh
+# so that the build here and scripts/test-upstream-patches.sh walk exactly the
+# same code path.  They used to be two copies, and the copies drifted: the
+# build dry-ran the whole patch set against the *unpatched* tree before
+# applying anything, while the self test applied patch by patch.  A patch
+# written against the state its predecessors leave behind (0006, which
+# rewrites the chip capability lines that 0004 and 0005 replace) can never
+# pass such a dry-run -- the build then fell back to the staging driver with
+# a warning, and only the image guard noticed, three layers away from the
+# cause.
+. "$SCRIPT_DIR/lib/patch-tree.sh"
+
 for cmd in make gcc git curl dpkg-deb modinfo; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing tool: $cmd"
 done
@@ -527,66 +539,7 @@ REQUIRED_UPSTREAM_PATCHES="0001-rtw88-adapt-the-mac80211-api-to-linux-6.12.patch
 
 REQUIRED_VENDOR_PATCHES="0001-rtw88-8723bs-extend-the-tx-report-purge-timeout.patch"
 
-assert_required_patches() {   # assert_required_patches <patch-dir> <label> <list>
-    local pdir="$1" label="$2" list="$3" p missing=0
-    for p in $list; do
-        if [ ! -f "$pdir/$p" ]; then
-            warn "the $label patch set is missing $p"
-            missing=$((missing + 1))
-        fi
-    done
-    if [ "$missing" -ne 0 ]; then
-        warn "the $label tree would build without $missing patch(es) -- it would still"
-        warn "load and still bring the interface up, but silently without the fixes"
-        return 1
-    fi
-    log "the $label patch set is complete ($(printf '%s' "$list" | wc -w | tr -d ' ') patch(es))"
-    return 0
-}
 
-# ---------------------------------------------------------------------------
-# local patches for the vendor tree
-#
-# The vendor tree misses fixes that upstream already merged for this chip --
-# most importantly the TX report purge timeout (upstream 4d688f22ebbf gives
-# the 8723BS 2500 ms instead of 500 ms).  Those patches live in
-# patches/rtw88/ and are applied here; a missing patch directory is fatal,
-# because building the unpatched vendor tree would ship the very symptom
-# this backport is meant to cure.
-#
-# The function returns non-zero instead of dying, so that --source auto can
-# actually fall back to the other tree when the patches do not apply.
-# ---------------------------------------------------------------------------
-apply_patches() {   # apply_patches <tree-dir> <patch-dir> <tree-label>
-    local dir="$1" pdir="$2" label="$3"
-    local p n=0
-    [ -d "$dir" ] || { warn "patch target $dir does not exist"; return 1; }
-    [ -d "$pdir" ] || { warn "patch directory $pdir does not exist"; return 1; }
-    for p in "$pdir"/*.patch; do
-        [ -e "$p" ] || continue
-        n=$((n + 1))
-    done
-    [ "$n" -gt 0 ] || { warn "no *.patch found in $pdir"; return 1; }
-    for p in "$pdir"/*.patch; do
-        [ -e "$p" ] || continue
-        log "dry-run $(basename "$p")"
-        if ! (cd "$dir" && patch -p1 --dry-run --batch --forward < "$p"); then
-            warn "patch does not apply to the $label tree: $(basename "$p")"
-            return 1
-        fi
-    done
-    for p in "$pdir"/*.patch; do
-        [ -e "$p" ] || continue
-        log "applying $(basename "$p")"
-        if ! (cd "$dir" && patch -p1 --batch --forward < "$p"); then
-            warn "failed to apply $(basename "$p") to the $label tree"
-            return 1
-        fi
-    done
-    find "$dir" \( -name '*.rej' -o -name '*.orig' \) -delete
-    log "$n patch(es) applied to $dir"
-    return 0
-}
 
 # ---------------------------------------------------------------------------
 # vendor tree: self contained rtw88 copy with the RTL8723BS support

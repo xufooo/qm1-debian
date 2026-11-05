@@ -31,10 +31,9 @@ Why we carry it:
   The change removes seven lines and nothing else depends on them.
 ---
 diff --git a/rtw8723b.c b/rtw8723b.c
-index 8bb9c03d769c..0c37e981ec84 100644
 --- a/rtw8723b.c
 +++ b/rtw8723b.c
-@@ -1303,13 +1303,6 @@ static void rtw8723b_query_phy_status_ofdm(struct rtw_dev *rtwdev, void *phy_raw
+@@ -1303,13 +1303,6 @@
  static void rtw8723b_query_phy_status(struct rtw_dev *rtwdev, u8 *phy_status,
  				      struct rtw_rx_pkt_stat *pkt_stat)
  {

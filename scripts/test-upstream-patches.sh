@@ -20,6 +20,9 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BUILD_SCRIPT="$SCRIPT_DIR/build-rtw88-8723bs-module.sh"
 PATCH_DIR="${PATCH_DIR:-$REPO_ROOT/patches/rtw88-upstream}"
 
+# 打补丁的逻辑只有一份：构建脚本和这个自测脚本共用。
+. "$SCRIPT_DIR/lib/patch-tree.sh"
+
 SHA=""
 WORK=""
 while [ $# -gt 0 ]; do
@@ -90,18 +93,14 @@ log "已取到 $(echo $FILES | wc -w) 个源文件"
 
 # ---------- 3. 按顺序应用 ----------
 #
-# 必须真的 apply（--dry-run 不会改文件，后面的补丁就会拿旧上下文去试，
-# 于是得出"打不上"的假结论）。每一步失败都立刻停。
-for p in "$PATCH_DIR"/000*.patch; do
-    [ -f "$p" ] || continue
-    name="$(basename "$p")"
-    if out="$(cd "$WORK" && patch -p1 --batch --forward --no-backup-if-mismatch < "$p" 2>&1)"; then
-        log "应用成功：$name"
-    else
-        printf '%s\n' "$out" >&2
-        fail "补丁 $name 打不上（上面是 patch 的原话）"
-    fi
-done
+# 这里调用的是**构建脚本用的同一个函数**（scripts/lib/patch-tree.sh）。
+# 之前两边各写了一份：构建脚本先把整个补丁集在未打补丁的树上 dry-run 一遍
+# 再统一打，这个自测脚本是边 dry-run 边打 —— 于是出现了只有构建才会踩的
+# 坑（照着前面补丁的结果写的补丁，在 dry-run 阶段必然失败，构建只 warn
+# 就回退到 staging 驱动）。测的就得是出货那条路。
+if ! apply_patches "$WORK" "$PATCH_DIR" "upstream"; then
+    fail "补丁集打不上（上面是 patch 的原话）"
+fi
 
 # ---------- 4. 结果必须符合我们写这份补丁的目的 ----------
 check() {  # check <说明> <文件> <正则>

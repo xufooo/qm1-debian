@@ -26,10 +26,9 @@ Why we carry it:
   capability is reported.
 ---
 diff --git a/rtw8723b.c b/rtw8723b.c
-index f2164a7333e6..19bb9fd7417b 100644
 --- a/rtw8723b.c
 +++ b/rtw8723b.c
-@@ -2397,12 +2397,9 @@ static int rtw8723b_read_efuse(struct rtw_dev *rtwdev, u8 *log_map, u8 *phy_map)
+@@ -2358,12 +2358,9 @@
  	if (efuse->power_track_type != 0)
  		rtw_warn(rtwdev, "unsupported power track type\n");
  
