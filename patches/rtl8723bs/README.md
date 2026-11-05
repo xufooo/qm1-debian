@@ -184,7 +184,8 @@ success — so no partially merged data is sent.
 
 ## Field observations on the real QM1 (2026-11-04/05)
 
-The QM1 that this project targets was reachable over Wi-Fi ([withheld]) and
+The QM1 that this project targets was reachable over Wi-Fi on a private LAN
+(address and host name withheld) and
 was inspected read-only. It runs **Void Linux**, kernel **6.18.60_1**, and it
 loads the **staging** driver, not the rtw88 driver:
 
@@ -217,7 +218,7 @@ bad defaults (`/sys/module/r8723bs/parameters/`):
 
 With those values the link itself is fine (signal −55 dBm, `tx bitrate:
 150.0 MBit/s`, 0 % packet loss to the router) but the latency is not: 30 ICMP
-echoes to the gateway [withheld] gave `rtt min/avg/max/mdev = 6.4/25.8/87.9/20.3
+echoes to the gateway gave `rtt min/avg/max/mdev = 6.4/25.8/87.9/20.3
 ms`, while the same test from another machine on the same AP measures 3.3 ms
 average. The jitter is therefore produced on the QM1 side, not by the AP.
 

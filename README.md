@@ -373,7 +373,7 @@ Debian 13 的 6.12.113+deb13-amd64 是 `CONFIG_BT_HCIUART=m`（**模块**，不�
 `rtl_bt/rtl8723bs_fw.bin`（52116 B）**首字节就不同** —— 后者是 Linux 侧**打过补丁**的版本
 （把 UART 波特率改成 1500000 bps）。配置也一样：ASUS 的
 `rtl8723b_config_internal.bin`（64 B）与 Debian 的 `rtl8723bs_config.bin`（64 B）
-只有 0x20–0x25 一段不同，**蓝牙地址字节 `[withheld]` 完全一致** ⇒ Debian 的那份
+只有 0x20–0x25 一段不同，**蓝牙地址字节完全一致**（地址本身属设备唯一标识，已脱敏） ⇒ Debian 的那份
 就是 ASUS/Realtek 配置改过波特率后的产物。Windows 那份不能直接塞进 Linux。
 
 **装进镜像**：
@@ -474,7 +474,7 @@ overlay/                 随镜像分发的定制层
 
 ## 已知限制
 
-- **内置 Wi-Fi 是 Realtek RTL8723BS（SDIO），不是 USB 型号**：实测确认（AzureWave 模组，SDIO ID `0x024c:0xb723`，MAC OUI `[withheld]`）。
+- **内置 Wi-Fi 是 Realtek RTL8723BS（SDIO），不是 USB 型号**：实测确认（AzureWave 模组，SDIO ID `0x024c:0xb723`；设备的 MAC/OUI 等唯一标识已从本仓库脱敏）。
   - Debian 13（6.12）与 Debian 12（6.1 / 686-pae）**都自带主线 staging 驱动 `r8723bs`**（`CONFIG_RTL8723BS=m`），固件 `rtl8723bs_nic.bin` 由 `firmware-realtek` 提供 → **不需要 DKMS**。（注意 `rtl8723bs_fw.bin` 是蓝牙固件，不是 Wi-Fi blob。）
   - Debian 13 稳定仓当前内核是 **6.12.107-1**，它**不含**上游 2026-07/08 回移到 6.12.y 的那批安全修复（kfree_sensitive 等要到 6.12.111 才有）；**6.12.113-1 已全部包含**（见 `trixie-proposed-updates`）。构建时固定内核版本可避免带上有已知 OOB 读取的旧内核。
   - 但 `r8723bs` 是 Realtek 私有协议栈（未迁到 mac80211），只支持 **WPA2-PSK，无 WPA3/SAE**；上游已在 7.4 删除该驱动，官方路线是并入 `rtw88`（`CONFIG_RTW88_8723BS`，需内核 ≥ 7.4，而 Debian 尚无 7.4 内核包，且 trixie 缺 `rtw88/rtw8723b_fw.bin`）。
@@ -484,8 +484,8 @@ overlay/                 随镜像分发的定制层
     - 这与现役设备实测到的「ping 抖动 18–168 ms、SSH 偶发拿不到 host key、ping 路由器 0% 丢包而 ping 盒子 5% 丢包」一致：**问题集中在 QM1 侧的无线链路，不是 AP 或网线**。
   - 镜像侧对策：`patches/rtl8723bs/` 提供 5 个修复永久卡死路径的补丁（外部模块 `r8723bs_qm1` 方式安装，见 `scripts/rtl8723bs-module.README.md`）；`/etc/modprobe.d/qm1-rtl8723bs-in-tree.conf` 关掉省电与 40MHz 带宽；`drv-selfcheck.sh` 报出真实绑定驱动并对 `r8723bs` 给出稳定性告警。
   - 结论：**内置 Wi-Fi 可以做主链路**，前提是打上补丁并关掉省电；无法根治的是弱信号下的吞吐塌陷与 WPA3 缺失 —— 前者要靠固定信道 20MHz + 靠近 AP，后者要等 rtw88 内核（≥ 7.4）。
-  - **2026-11-04/05 实机只读侦察**（[withheld]，主机名 [withheld]，SSH 凭据由用户提供）：该机当前跑的是 **Void Linux、内核 6.18.60_1、PID 1 为 runit**，加载的是 **staging 的 `r8723bs`**（`/sys/class/net/wlan0/device/driver -> ../../bus/sdio/drivers/rtl8723bs`，dmesg 无 `failed to get tx report from firmware`，进一步印证不是 rtw88）。实时参数全是坏默认值：`rtw_power_mgnt=1 rtw_smart_ps=2 rtw_ips_mode=1 rtw_bw_mode=1`（40MHz），设备 `/etc/modprobe.d/` 为空。链路本身正常（signal −55 dBm、tx bitrate 150 Mbit/s、到网关 0% 丢包），但**抖动全在 QM1 侧**：到网关 30 包 rtt min/avg/max/mdev = 6.4/25.8/87.9/20.3 ms，而同 AP 上另一台机器只有 3.3 ms 均值。staging 驱动无运行时开关（iwpriv 层已移除、无 cfg80211 `.set_power_save`），参数只能在模块加载时给，改参数必须 reload 模块或重启。
-  - **硬件拓扑核实（同期）**：eMMC 为 **SanDisk S10032 28.5 GiB**，manfid `0x000070`，CID `[withheld]`，serial `[withheld]`，rev 0x7，走 `mmc1` = **SDHCI on ACPI [80860F14:00]**（HS200）；分区 p1 200M vfat → `/boot/efi`、p2 1G swap、p3 27.3G f2fs → `/`。**Wi-Fi 走 mmc0（INT33BB:00）且与 eMMC 不共用 SD 主机**（mmc2 = 80860F14:01 空）⇒ 不存在 SDIO 总线争用，不是断流原因。UEFI：`efi: EFI v2.4 by INSYDE Corp.`，`fw_platform_size`=32，efibootmgr `BootCurrent: 0001` → `\EFI\void_grub\grubia32.efi`，ESP 下只有 32 位 grub ⇒ **该固件实际以 32 位 IA32 EFI 引导**（是否支持 64 位 EFI 仍待实测）。
+  - **2026-11-04/05 实机只读侦察**（设备的 LAN 地址、主机名等唯一标识已脱敏；SSH 凭据由用户在会话中提供，未入库）：该机当前跑的是 **Void Linux、内核 6.18.60_1、PID 1 为 runit**，加载的是 **staging 的 `r8723bs`**（`/sys/class/net/wlan0/device/driver -> ../../bus/sdio/drivers/rtl8723bs`，dmesg 无 `failed to get tx report from firmware`，进一步印证不是 rtw88）。实时参数全是坏默认值：`rtw_power_mgnt=1 rtw_smart_ps=2 rtw_ips_mode=1 rtw_bw_mode=1`（40MHz），设备 `/etc/modprobe.d/` 为空。链路本身正常（signal −55 dBm、tx bitrate 150 Mbit/s、到网关 0% 丢包），但**抖动全在 QM1 侧**：到网关 30 包 rtt min/avg/max/mdev = 6.4/25.8/87.9/20.3 ms，而同 AP 上另一台机器只有 3.3 ms 均值。staging 驱动无运行时开关（iwpriv 层已移除、无 cfg80211 `.set_power_save`），参数只能在模块加载时给，改参数必须 reload 模块或重启。
+  - **硬件拓扑核实（同期）**：eMMC 为 **SanDisk S10032 28.5 GiB**（manfid `0x000070`，rev 0x7；CID 与序列号等唯一标识已脱敏），走 `mmc1` = **SDHCI on ACPI [80860F14:00]**（HS200）；分区 p1 200M vfat → `/boot/efi`、p2 1G swap、p3 27.3G f2fs → `/`。**Wi-Fi 走 mmc0（INT33BB:00）且与 eMMC 不共用 SD 主机**（mmc2 = 80860F14:01 空）⇒ 不存在 SDIO 总线争用，不是断流原因。UEFI：`efi: EFI v2.4 by INSYDE Corp.`，`fw_platform_size`=32，efibootmgr `BootCurrent: 0001` → `\EFI\void_grub\grubia32.efi`，ESP 下只有 32 位 grub ⇒ **该固件实际以 32 位 IA32 EFI 引导**（是否支持 64 位 EFI 仍待实测）。
   - 若识别为 Broadcom，注意 brcmfmac 的 PCIe 型号还需要对应的 NVRAM（`.txt`）文件，`firmware-brcm80211` 未包含全部型号。
 - **32 位变体用 Debian 12（bookworm）**：Debian 13 起不再提供 i386 内核包（`binary-i386` 里没有 `linux-image-*`，也没有 i386 安装器），所以 i386 变体固定用 bookworm 的 `linux-image-686-pae`（PAE flavour，适配 Bay Trail）。它只能当救援兜底 —— 32 位 x86 的 Node.js 自 v10 起为 Experimental，Hermes 要求的 Python 3.14 也没有 i686 预编译产物。
 - **Bay Trail 无 AVX**：本地 LLM（llama.cpp）会退化到 SSE 路径；无头 agent 编排逻辑几乎不受影响。

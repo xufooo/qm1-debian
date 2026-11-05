@@ -53,12 +53,47 @@ jobs:
           done
           echo "all scripts executable"
 
-      - name: Privacy scan (no local paths / private strings)
+      - name: Privacy scan (no local paths / private strings / device identifiers)
         run: |
           set -euo pipefail
+          # 这个仓库是公开的。凡是「只对这台机器有意义」的东西都不能进来：
+          #   * 本机/他人路径（/Users/…、/home/…）
+          #   * 私有记忆库与联系方式（viking://、OpenViking、邮箱）
+          #   * 内网地址、MAC 地址、eMMC CID/序列号、SSH host key、主机名
+          # 之前只拦了路径和邮箱，设备局域网地址、MAC OUI、eMMC CID 都是从这条缝里漏出去的。
           if grep -rInE '(/home/[a-z]|/Users/|gmail\.com|qq\.com|viking://|OpenViking|BEGIN [A-Z ]*PRIVATE KEY)' \
                --exclude-dir=.git --exclude=lint.yml . ; then
             echo "::error::仓库中出现疑似本机路径或私人信息"
+            exit 1
+          fi
+          # 内网地址（RFC1918）
+          if grep -rInE '\b(192\.168\.[0-9]{1,3}\.[0-9]{1,3}|10\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}|172\.(1[6-9]|2[0-9]|3[01])\.[0-9]{1,3}\.[0-9]{1,3})\b' \
+               --exclude-dir=.git --exclude=lint.yml . ; then
+            echo "::error::仓库中出现内网地址（设备/网关 IP 不该进公开仓库）"
+            exit 1
+          fi
+          # MAC 地址
+          if grep -rInE '\b([0-9a-fA-F]{2}:){5}[0-9a-fA-F]{2}\b' \
+               --exclude-dir=.git --exclude=lint.yml . ; then
+            echo "::error::仓库中出现 MAC 地址"
+            exit 1
+          fi
+          # eMMC CID / 序列号等唯一标识
+          if grep -rInE '(CID `|serial `|serial=)0x?[0-9a-fA-F]{12,}' \
+               --exclude-dir=.git --exclude=lint.yml . ; then
+            echo "::error::仓库中出现存储卡 CID/序列号等唯一标识"
+            exit 1
+          fi
+          # SSH host key 指纹
+          if grep -rInE 'SHA256:[A-Za-z0-9+/]{20,}' \
+               --exclude-dir=.git --exclude=lint.yml . ; then
+            echo "::error::仓库中出现 SSH host key 指纹"
+            exit 1
+          fi
+          # 设备主机名（[withheld] / [withheld] 这类）
+          if grep -rInE '\b(pkt\.lan)\b' \
+               --exclude-dir=.git --exclude=lint.yml . ; then
+            echo "::error::仓库中出现设备主机名"
             exit 1
           fi
           echo "privacy scan clean"
