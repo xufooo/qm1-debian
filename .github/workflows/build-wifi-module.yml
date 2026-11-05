@@ -284,19 +284,17 @@ jobs:
             | tar -xO ./etc/modprobe.d/qm1-rtw88-8723bs.conf > build/rtw88-module/modprobe.conf
           grep -q '^blacklist r8723bs$' build/rtw88-module/modprobe.conf
           # 每个 options 的参数都必须真实存在于模块里，否则 modprobe 会拒绝加载
-          dpkg-deb --fsys-tarfile "$DEB" \
-            | tar -xO "./lib/modules/$KVER/extra/rtw88/rtw_core.ko" > build/rtw88-module/rtw_core.ko
-          modinfo -p build/rtw88-module/rtw_core.ko | awk -F: '{print $1}' | tr '\n' ' ' \
-            | tee build/rtw88-module/rtw_core.params
-          while read -r line; do
-            mod="${line%% *}"; param="${line#* }"; param="${param%%=*}"
-            case "$param" in
-              ''|'#'*) continue ;;
-            esac
-            grep -q "$mod" build/rtw88-module/rtw_core.params \
-              || { echo "::error::modprobe 选项指向未知模块 $mod"; exit 1; }
-            grep -qw "$param" build/rtw88-module/rtw_core.params \
+          while read -r _ mod param; do
+            [ -n "$mod" ] && [ -n "$param" ] || continue
+            param="${param%%=*}"
+            grep -q "extra/rtw88/$mod.ko" build/rtw88-module/contents.txt \
+              || { echo "::error::modprobe 选项指向包内不存在的模块 $mod"; exit 1; }
+            dpkg-deb --fsys-tarfile "$DEB" \
+              | tar -xO "./lib/modules/$KVER/extra/rtw88/$mod.ko" > "build/rtw88-module/$mod.ko"
+            modinfo -p "build/rtw88-module/$mod.ko" | awk -F: '{print $1}' > "build/rtw88-module/$mod.params"
+            grep -qw "$param" "build/rtw88-module/$mod.params" \
               || { echo "::error::模块 $mod 没有参数 $param，modprobe 会拒绝加载"; exit 1; }
+            echo "OK  $mod $param"
           done < <(grep '^options ' build/rtw88-module/modprobe.conf)
           echo "包内容校验通过"
 
