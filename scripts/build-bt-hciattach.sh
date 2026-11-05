@@ -174,16 +174,20 @@ echo "qm1-bt-attach: 使用 $TTY（BT_PROTOCOL=${BT_PROTOCOL:-rtk_h5}, BT_SPEED=
 }
 
 # Debian 13 的内核 CONFIG_BT_HCIUART=m（实测 6.12.113+deb13-amd64），
-# hci_uart 是模块 bt_hciuart.ko —— 固件下发完要把它加载起来，
+# 驱动是**模块** hci_uart.ko（Linux 6.x 里这个模块叫 hci_uart，
+# 早期内核才叫 bt_hciuart.ko）—— 固件下发完要把它加载起来，
 # 内核才会把这个串口认成蓝牙控制器并注册 hci0。
-# 编进内核的发行版上 modprobe 会失败，忽略即可。
-modprobe bt_hciuart 2>/dev/null || true
+#
+# 实测 hci_uart.ko 的 alias 里有 acpi*:OBDA8723:* 与 acpi*:OBDA0623:*，
+# 正好是 ASUS QM1 官方 Win 驱动 rtkuart.inf 里的蓝牙设备 ID，
+# 所以主线驱动确实能接管这个口。
+modprobe hci_uart 2>/dev/null || modprobe bt_hciuart 2>/dev/null || true
 
 sleep 2
 if [ -d /sys/class/bluetooth/hci0 ]; then
     echo "qm1-bt-attach: 蓝牙已就绪（hci0 已出现）"
 else
-    echo "qm1-bt-attach: 固件已下发但 hci0 没出现 —— 试 modprobe bt_hciuart，或检查 /etc/default/qm1-bluetooth 里的 BT_TTY/协议" >&2
+    echo "qm1-bt-attach: 固件已下发但 hci0 没出现 —— 试 modprobe hci_uart，或检查 /etc/default/qm1-bluetooth 里的 BT_TTY/协议" >&2
 fi
 EOF
 chmod 0755 "$PKG/usr/local/bin/qm1-bt-attach.sh"

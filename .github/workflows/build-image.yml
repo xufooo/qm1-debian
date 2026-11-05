@@ -307,7 +307,8 @@ jobs:
           [ -L "$ROOT/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service" ] \
             || { echo "::error::蓝牙服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
           # 内核侧必须有 btuart（CONFIG_BT_HCIUART），否则厂商固件下发后没人接手串口。
-          # 实测 Debian 13 的 6.12.113+deb13-amd64 是 CONFIG_BT_HCIUART=m（模块 bt_hciuart.ko），
+          # 实测 Debian 13 的 6.12.113+deb13-amd64 是 CONFIG_BT_HCIUART=m（模块 hci_uart.ko，
+          # Linux 6.x 里这个模块叫 hci_uart，早期内核才叫 bt_hciuart.ko），
           # 不是编进内核，所以 =y 与 =m 都要接受；=m 时必须能在镜像里找到模块文件。
           KCFG=$(ls "$ROOT"/boot/config-* 2>/dev/null | head -1 || true)
           [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件，无法确认 CONFIG_BT_HCIUART"; exit 1; }
@@ -315,10 +316,10 @@ jobs:
             echo "OK   CONFIG_BT_HCIUART=y（编进内核）"
           elif grep -qE '^CONFIG_BT_HCIUART=m$' "$KCFG"; then
             KVER=$(basename "$KCFG" | sed 's/^config-//')
-            if find "$ROOT/lib/modules/$KVER" -name 'bt_hciuart.ko*' -print -quit | grep -q .; then
-              echo "OK   CONFIG_BT_HCIUART=m，bt_hciuart.ko 在镜像里（随包加载）"
+            if find "$ROOT/lib/modules/$KVER" \( -name 'hci_uart.ko*' -o -name 'bt_hciuart.ko*' \) -print -quit | grep -q .; then
+              echo "OK   CONFIG_BT_HCIUART=m，hci_uart.ko 在镜像里（随包加载）"
             else
-              echo "::error::CONFIG_BT_HCIUART=m 但镜像里没有 bt_hciuart.ko"; exit 1
+              echo "::error::CONFIG_BT_HCIUART=m 但镜像里没有 hci_uart.ko"; exit 1
             fi
           else
             echo "::error::内核缺少 CONFIG_BT_HCIUART（既不是 y 也不是 m）"; exit 1
