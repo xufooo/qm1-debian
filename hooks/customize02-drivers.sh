@@ -355,8 +355,9 @@ if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
             log "内核 btuart：编进内核（CONFIG_BT_HCIUART=y）"
         elif grep -qE '^CONFIG_BT_HCIUART=m$' "$TARGET/boot/config-$_bt_kver"; then
             # Linux 6.x 里这个模块叫 hci_uart.ko（早期内核才叫 bt_hciuart.ko）
-            if find "$TARGET/lib/modules/$_bt_kver" \( -name 'hci_uart.ko*' -o -name 'bt_hciuart.ko*' \) \
-                 -print -quit 2>/dev/null | grep -q .; then
+            _bt_mod="$(find "$TARGET/lib/modules/$_bt_kver" \( -name 'hci_uart.ko*' -o -name 'bt_hciuart.ko*' \) \
+                 -print -quit 2>/dev/null || true)"
+            if [ -n "$_bt_mod" ]; then
                 log "内核 btuart：模块 hci_uart.ko（CONFIG_BT_HCIUART=m），随包加载"
             else
                 warn "内核 CONFIG_BT_HCIUART=m，但镜像里找不到 hci_uart.ko —— 厂商固件下发后没人接手串口"

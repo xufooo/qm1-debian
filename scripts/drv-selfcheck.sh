@@ -372,7 +372,8 @@ else
     row WARN "wpa_supplicant" "没在运行 —— Wi-Fi 不会关联"
 fi
 
-if ip -br addr show wlan0 2>/dev/null | grep -q 'wlan0'; then
+_addr="$(ip -br addr show wlan0 2>/dev/null || true)"
+    if grep -q 'wlan0' <<<"$_addr"; then
     wlan_addr="$(ip -br addr show wlan0 2>/dev/null | awk '{print $3}')"
     if [ -n "$wlan_addr" ]; then
         row PASS "wlan0 地址" "$wlan_addr"
@@ -429,7 +430,8 @@ fi
 section "功能完备性"
 
 # 显示输出
-if cat /sys/class/drm/card*/connector/*/status 2>/dev/null | grep -q connected; then
+_conn="$(cat /sys/class/drm/card*/connector/*/status 2>/dev/null || true)"
+    if grep -q connected <<<"$_conn"; then
     row PASS "显示输出" "有已连接的显示输出"
 else
     row WARN "显示输出" "没有已连接的显示输出（HDMI 未接显示器或假显示器）"

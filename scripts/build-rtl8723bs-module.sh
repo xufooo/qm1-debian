@@ -285,7 +285,8 @@ grep -aq "name=$MOD_NAME" "$KO" \
     || die ".modinfo 里没有 name=$MOD_NAME —— 内核会把模块当成 $mi_name 注册"
 
 # alias：SDIO 设备 024c:b723 必须能被 udev/modprobe 认出来
-if ! modinfo -F alias "$KO" | grep -qF 'sdio:c*v024CdB723*'; then
+_alias="$(modinfo -F alias "$KO" 2>/dev/null || true)"
+    if ! grep -qF 'sdio:c*v024CdB723*' <<<"$_alias"; then
     printf 'ERROR: 模块缺少 alias sdio:c*v024CdB723*\n' >&2
     modinfo "$KO" >&2
     die "alias 校验失败"

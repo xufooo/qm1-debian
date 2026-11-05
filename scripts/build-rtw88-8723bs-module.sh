@@ -457,7 +457,8 @@ for m in $MOD_NAMES; do
     esac
 done
 # the SDIO bind has to claim the QM1 wireless device
-if ! modinfo "$MOD_DIR"/*.ko 2>/dev/null | grep -qi 'b723'; then
+_aliases="$(modinfo "$MOD_DIR"/*.ko 2>/dev/null | grep -i 'alias' || true)"
+    if ! grep -qi 'b723' <<<"$_aliases"; then
     die "no built module claims the SDIO device 0x024c:0xb723"
 fi
 log "modules verified against $KVER"
