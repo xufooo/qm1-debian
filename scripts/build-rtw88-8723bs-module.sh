@@ -281,10 +281,32 @@ install -m 0644 "$FW_DIR"/rtw8723b*.bin "$PKG/lib/firmware/rtw88/"
 SDIO_MODULE="rtw88_8723bs"
 [ -f "$PKG/lib/modules/$KVER/extra/rtw88/rtw_8723bs.ko" ] && SDIO_MODULE="rtw_8723bs"
 
+# The module parameters live in the rtw88 core module, not in the SDIO bind.
+# Note: rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode / rtw_bw_mode are the
+# *staging* driver's parameters -- the rtw88 driver does not have them, and
+# modprobe refuses to load a module with an unknown parameter.
+CORE_MODULE="rtw_core"
+[ -f "$PKG/lib/modules/$KVER/extra/rtw88/$CORE_MODULE.ko" ] || CORE_MODULE="rtw88_core"
+CORE_PARAMS="disable_lps_deep support_bf debug_mask"
+
+# every parameter we write must really exist, otherwise modprobe fails to load
+CORE_KO="$PKG/lib/modules/$KVER/extra/rtw88/$CORE_MODULE.ko"
+AVAILABLE_PARAMS="$(modinfo -p "$CORE_KO" | awk -F: '{print $1}' | tr '\n' ' ')"
+for param in $CORE_PARAMS; do
+    case " $AVAILABLE_PARAMS " in
+        *" $param "*) ;;
+        *) die "$CORE_MODULE.ko has no parameter '$param' (available: $AVAILABLE_PARAMS)" ;;
+    esac
+done
+
 {
     echo "# The staging driver r8723bs is superseded by the rtw88 backport."
+    echo "# The staging parameters (rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode /"
+    echo "# rtw_bw_mode) belong to r8723bs only; the rtw88 driver exposes the ones below."
     echo "blacklist r8723bs"
-    echo "options ${SDIO_MODULE} rtw_power_mgnt=0 rtw_smart_ps=0 rtw_ips_mode=0 rtw_bw_mode=0"
+    echo "options ${CORE_MODULE} disable_lps_deep=y"
+    echo "options ${CORE_MODULE} support_bf=y"
+    echo "options ${CORE_MODULE} debug_mask=0"
 } > "$PKG/etc/modprobe.d/qm1-rtw88-8723bs.conf"
 
 cat > "$PKG/lib/systemd/system/qm1-rtw88-8723bs.service" <<EOF

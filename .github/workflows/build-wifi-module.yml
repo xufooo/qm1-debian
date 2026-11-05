@@ -283,6 +283,21 @@ jobs:
           dpkg-deb --fsys-tarfile "$DEB" \
             | tar -xO ./etc/modprobe.d/qm1-rtw88-8723bs.conf > build/rtw88-module/modprobe.conf
           grep -q '^blacklist r8723bs$' build/rtw88-module/modprobe.conf
+          # 每个 options 的参数都必须真实存在于模块里，否则 modprobe 会拒绝加载
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO "./lib/modules/$KVER/extra/rtw88/rtw_core.ko" > build/rtw88-module/rtw_core.ko
+          modinfo -p build/rtw88-module/rtw_core.ko | awk -F: '{print $1}' | tr '\n' ' ' \
+            | tee build/rtw88-module/rtw_core.params
+          while read -r line; do
+            mod="${line%% *}"; param="${line#* }"; param="${param%%=*}"
+            case "$param" in
+              ''|'#'*) continue ;;
+            esac
+            grep -q "$mod" build/rtw88-module/rtw_core.params \
+              || { echo "::error::modprobe 选项指向未知模块 $mod"; exit 1; }
+            grep -qw "$param" build/rtw88-module/rtw_core.params \
+              || { echo "::error::模块 $mod 没有参数 $param，modprobe 会拒绝加载"; exit 1; }
+          done < <(grep '^options ' build/rtw88-module/modprobe.conf)
           echo "包内容校验通过"
 
       - name: Write summary
@@ -293,8 +308,10 @@ jobs:
             echo
             echo "- 目标内核：${{ steps.kernel.outputs.kver }}"
             echo "- 软件包：$(ls build/rtw88-module/*.deb 2>/dev/null || echo '（未产出）')"
-            echo "- 说明：上游把 RTL8723B/BS 并进 rtw88（Linux 7.4 合并窗口）后删掉了 staging 驱动；"
-            echo "  这里按镜像内核回移成树外模块，固件取自 Debian sid 的 firmware-realtek。"
+            echo "- 说明：用维护中的 vendor rtw88 树（已适配 6.12）编成树外模块，"
+            echo "  替换发行版自带、有永久卡死路径的 staging r8723bs 驱动。"
+            echo "- 固件取自 Debian sid 的 firmware-realtek（rtw88/rtw8723b_fw.bin）。"
+            echo "- 上游 7.4 的芯片驱动不能单独回移到 6.12（缺 7.4 时期的 rtw88 核心 API）。"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload module package
