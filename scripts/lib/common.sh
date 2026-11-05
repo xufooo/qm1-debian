@@ -55,23 +55,24 @@ dir_bytes() {
 #   真正要启动一套 32 位系统（32 位内核 + 32 位用户态），只能用 bookworm 的
 #   linux-image-686-pae（PAE 内核，Bay Trail 支持 PAE）。
 default_suite_for_arch() {
+    # 只做 64 位系统：QM1 是 64 位 CPU，32 位变体已按决定取消。
+    # 注意区分两件事：32 位 *系统* 不做了，但 32 位 *EFI 引导器* 仍然要留着 ——
+    # 实机 UEFI 是 32 位 IA32 EFI（fw_platform_size=32），BOOTIA32.EFI 是必需品。
     case "$1" in
         amd64) printf 'trixie\n' ;;
-        i386)  printf 'bookworm\n' ;;
-        *) die "不支持的架构：$1" ;;
+        *) die "只支持 amd64（32 位系统变体已取消）：$1" ;;
     esac
 }
 
 # 每个架构对应的内核包名。
 #
-# 注意 Debian 的 i386 内核 flavour 叫 686 / 686-pae，并没有 linux-image-i386 这个包：
-#   linux-image-686      "Linux for older PCs"（非 PAE，老 CPU 用）
-#   linux-image-686-pae  "Linux for modern PCs"（PAE，Bay Trail 选它）
+# 只做 64 位系统：QM1 是 64 位 CPU，32 位系统变体已按决定取消
+# （Debian 13 起也没有 i386 内核包，32 位只能留在 bookworm + 686-pae）。
+# 仍然保留的是 32 位 *EFI 引导器*（实机固件是 32 位 IA32 EFI）。
 kernel_pkgs_for_arch() {
     case "$1" in
         amd64) printf 'linux-image-amd64,linux-headers-amd64\n' ;;
-        i386)  printf 'linux-image-686-pae,linux-headers-686-pae\n' ;;
-        *) die "不支持的架构：$1" ;;
+        *) die "只支持 amd64（32 位系统变体已取消）：$1" ;;
     esac
 }
 

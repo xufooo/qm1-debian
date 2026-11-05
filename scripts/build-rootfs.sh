@@ -46,7 +46,7 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# 发行版默认值随架构走：i386 没有 trixie 内核，只能留在 bookworm。
+# 只做 64 位系统（32 位系统变体已取消；32 位 EFI 引导器照旧保留）。
 [ -n "$SUITE" ] || SUITE="$(default_suite_for_arch "$ARCH")"
 
 # ---------- 固定内核 point release（可选） ----------

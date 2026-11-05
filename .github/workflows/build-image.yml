@@ -54,9 +54,9 @@ on:
   workflow_dispatch:
     inputs:
       arch:
-        description: "目标架构（i386 仅作救援兜底，不能承载现代 agent 运行时）"
+        description: "目标架构（本项目只做 64 位系统；32 位 EFI 引导器仍然保留）"
         type: choice
-        options: [amd64, i386]
+        options: [amd64]
         default: amd64
       profile:
         description: "base = 最小可运行；runtime = 追加 Chromium 等 agent 运行时依赖"
@@ -163,7 +163,7 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             "linux-headers-${QM1_KERNEL_ABI}" \
             "linux-image-${QM1_KERNEL_ABI}-unsigned" \
-            build-essential patch kmod dpkg curl
+            build-essential patch kmod dpkg curl git ca-certificates
           test -d "/lib/modules/${QM1_KERNEL_ABI}/build"
 
       - name: Build patched RTL8723BS module (r8723bs_qm1)

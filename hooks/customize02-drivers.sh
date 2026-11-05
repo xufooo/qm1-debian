@@ -50,7 +50,7 @@ die()  { printf '[hook02][fail] %s\n' "$*" >&2; exit 1; }
 #     * 装不上 → die，绝不静默回退到元包（静默回退 = 镜像里又少了那批修复）。
 case "$ARCH" in
     amd64) KERNEL_PKGS="linux-image-amd64 linux-headers-amd64" ;;
-    i386)  KERNEL_PKGS="linux-image-686-pae linux-headers-686-pae" ;;
+    i386)  die "32 位系统变体已取消（QM1 是 64 位 CPU）；引导器仍保留 IA32 版本" ;;
     *) die "不支持的架构：$ARCH" ;;
 esac
 

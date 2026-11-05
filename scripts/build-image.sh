@@ -95,7 +95,6 @@ bash "$SCRIPT_DIR/make-esp.sh" \
     --bootloaders "$BOOTLOADERS" \
     --arch "$ARCH" \
     --suite-amd64 "Debian 13" \
-    --suite-i386 "Debian 12" \
     --kernel "$KERNEL" \
     --initrd "$INITRD" \
     ${KERNEL32:+--kernel32 "$KERNEL32"} \
