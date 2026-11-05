@@ -98,14 +98,15 @@ chmod 0700 "$OUT"
 
 # ---------- wpa_supplicant.conf ----------
 # psk 可以是 8..63 字符的明文（加引号）或 64 位十六进制 PSK（不加引号）。
-if [ -z "$PSK" ]; then
-    PSK_LINE=""
-elif printf '%s' "$PSK" | grep -Eq '^[0-9a-fA-F]{64}$'; then
-    PSK_LINE="    psk=$PSK"
-elif [ "${#PSK}" -ge 8 ] && [ "${#PSK}" -le 63 ]; then
-    PSK_LINE="    psk=\"$PSK\""
-else
-    die "Wi-Fi 密码长度非法（${#PSK} 字符）：需要 8..63 字符，或 64 位十六进制"
+# 取值规则统一走 common.sh 的 qm1_wpa_* ：64 位十六进制**不加引号**，
+# 否则它会被当成 64 字符的口令而超过 63 的上限，wpa_supplicant 直接拒绝
+# （现象是"密码是对的却连不上"）。SSID 一律加引号并转义。
+PSK_LINE=""
+if [ -n "$PSK" ]; then
+    if ! PSK_VALUE="$(qm1_wpa_psk_value "$PSK")"; then
+        die "Wi-Fi 密码长度非法（${#PSK} 字符）：需要 8..63 字符，或 64 位十六进制"
+    fi
+    PSK_LINE="    psk=$PSK_VALUE"
 fi
 
 {
@@ -114,7 +115,7 @@ fi
     echo "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev"
     echo "update_config=1"
     echo "network={"
-    echo "    ssid=\"$SSID\""
+    echo "    ssid=$(qm1_wpa_ssid_value "$SSID")"
     [ -n "$PSK_LINE" ] && echo "$PSK_LINE"
     echo "    key_mgmt=WPA-PSK"
     echo "}"

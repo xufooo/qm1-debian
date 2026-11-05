@@ -16,6 +16,23 @@
 #   sudo bash provision-agent.sh --skip-hermes         # 只补依赖与 systemd 单元
 set -euo pipefail
 
+# wpa_supplicant 的取值规则（64 位十六进制 PSK 不能加引号）由 install-lib.sh
+# 提供：这个脚本会被装进镜像（/usr/local/share/qm1/provision-agent.sh），所以不能
+# 依赖仓库里的 scripts/lib/common.sh —— 镜像里对应的是 /usr/local/lib/qm1/。
+_qm1_self="$(readlink -f "${BASH_SOURCE[0]}" 2>/dev/null || echo "${BASH_SOURCE[0]}")"
+_qm1_lib=""
+for _cand in "/usr/local/lib/qm1/install-lib.sh" \
+             "$(dirname "$_qm1_self")/../overlay/usr/local/lib/qm1/install-lib.sh" \
+             "$(dirname "$_qm1_self")/../../overlay/usr/local/lib/qm1/install-lib.sh"; do
+    if [ -r "$_cand" ]; then _qm1_lib="$_cand"; break; fi
+done
+if [ -z "$_qm1_lib" ]; then
+    printf '[provision][fail] 找不到 install-lib.sh（wpa_supplicant 取值规则）\n' >&2
+    exit 1
+fi
+# shellcheck source=/dev/null
+. "$_qm1_lib"
+
 SKIP_HERMES=0
 WIFI_SSID="${QM1_WIFI_SSID:-}"
 WIFI_PASS="${QM1_WIFI_PASS:-}"
@@ -51,14 +68,20 @@ if [ -n "$WIFI_SSID" ]; then
     log "写入 Wi-Fi 配置：$WIFI_SSID"
     install -d -m 0755 /etc/wpa_supplicant
     umask 077
+    # psk 的写法有讲究：64 位十六进制必须不加引号，否则会被当成 64 字符口令
+    # 而超过 wpa_supplicant 的 63 字符上限 ⇒ 密码正确也连不上。
+    if ! _psk_value="$(qm1_wpa_psk_value "$WIFI_PASS")"; then
+        printf '[provision][fail] Wi-Fi 密码长度非法（%s 字符）：需要 8..63 字符，或 64 位十六进制\n' "${#WIFI_PASS}" >&2
+        exit 1
+    fi
     cat > /etc/wpa_supplicant/wpa_supplicant.conf <<EOF
 ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
 update_config=1
 country=CN
 
 network={
-    ssid="$WIFI_SSID"
-    psk="$WIFI_PASS"
+    ssid=$(qm1_wpa_ssid_value "$WIFI_SSID")
+    psk=$_psk_value
     key_mgmt=WPA-PSK
 }
 EOF

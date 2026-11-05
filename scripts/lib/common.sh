@@ -101,3 +101,33 @@ kernel_abi_name() {
 normalize_kernel_version() {
     printf '%s\n' "${1%%+*}"
 }
+
+# ---------- wpa_supplicant.conf 的取值规则 ----------
+#
+# 与 overlay/usr/local/lib/qm1/install-lib.sh 里的同名实现保持一致
+# （scripts/test-install-lib.sh 会断言两边输出相同）：
+#   * 加引号 = 明文口令（8..63 字符），引号里的 " 和 \ 要转义；
+#   * 不加引号 + 64 位十六进制 = 直接给 PMK。
+# 64 位十六进制 PSK 如果加引号，会被当成 64 字符口令而超过上限 ⇒ 认证失败。
+
+qm1_wpa_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+qm1_wpa_ssid_value() {
+    printf '"%s"' "$(qm1_wpa_escape "$1")"
+}
+
+qm1_wpa_psk_value() {
+    local psk="$1"
+    [ -n "$psk" ] || return 0
+    if printf '%s' "$psk" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        printf '%s' "$psk"
+        return 0
+    fi
+    if [ "${#psk}" -ge 8 ] && [ "${#psk}" -le 63 ]; then
+        printf '"%s"' "$(qm1_wpa_escape "$psk")"
+        return 0
+    fi
+    return 1
+}

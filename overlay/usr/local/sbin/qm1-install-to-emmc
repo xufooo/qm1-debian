@@ -75,6 +75,19 @@ ask() {
 
 [ "$(id -u)" -eq 0 ] || die "需要 root 权限"
 
+# 磁盘层面的判断与 wpa_supplicant 的取值规则都在这个库里：
+# 那是"哪些字节写到哪里"和"密码怎么写进配置"的逻辑，写错就是一块报废的 eMMC
+# 或者一台连不上网的机器。单独成文件是为了能在 CI 里用合成的 GPT 镜像直接验证
+# 它，而不必真机。
+QM1_INSTALL_LIB=/usr/local/lib/qm1/install-lib.sh
+if [ -r "$QM1_INSTALL_LIB" ]; then
+    # shellcheck source=/dev/null
+    . "$QM1_INSTALL_LIB"
+else
+    printf '[qm1-install][fail] 缺少 %s，无法继续\n' "$QM1_INSTALL_LIB" >&2
+    exit 1
+fi
+
 TARGET="${QM1_INSTALL_TARGET:-}"
 MODE="${QM1_INSTALL_MODE:-auto}"          # auto | media | emmc
 ASSUME_YES="${QM1_ASSUME_YES:-0}"
@@ -327,19 +340,41 @@ if [ -n "$PROVISION_DIR" ]; then
 fi
 
 # 3c. 交互式补齐 Wi-Fi
-if [ -n "$SSID" ]; then
-    cat > "$WORK_PROV/wpa_supplicant.conf" <<EOF
-# 由安装程序生成
-country=CN
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-network={
-    ssid="$SSID"
-    psk="$PSK"
-    key_mgmt=WPA-PSK
-}
-EOF
+#
+# psk 的写法有讲究（取值规则见 install-lib.sh 的 qm1_wpa_psk_value）：
+# 64 位十六进制 PSK 必须**不加引号**，否则会被当成 64 个字符的口令，
+# 超过 wpa_supplicant 的 63 字符上限 —— 现象是"密码明明是对的却连不上"。
+write_wifi_conf() {
+    local ssid="$1" psk="$2" psk_value
+    if [ -n "$psk" ]; then
+        if ! psk_value="$(qm1_wpa_psk_value "$psk")"; then
+            die "Wi-Fi 密码长度非法（${#psk} 字符）：需要 8..63 字符，或 64 位十六进制"
+        fi
+    else
+        psk_value=""
+    fi
+    {
+        echo "# 由安装程序生成"
+        echo "country=CN"
+        echo "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev"
+        echo "update_config=1"
+        echo "network={"
+        echo "    ssid=$(qm1_wpa_ssid_value "$ssid")"
+        if [ -n "$psk_value" ]; then
+            echo "    psk=$psk_value"
+            echo "    key_mgmt=WPA-PSK"
+        else
+            # 开放网络：没有口令就不能写 key_mgmt=WPA-PSK，否则 wpa_supplicant
+            # 会因为找不到 psk 而拒绝这个网络块。
+            echo "    key_mgmt=NONE"
+        fi
+        echo "}"
+    } > "$WORK_PROV/wpa_supplicant.conf"
     chmod 0600 "$WORK_PROV/wpa_supplicant.conf"
+}
+
+if [ -n "$SSID" ]; then
+    write_wifi_conf "$SSID" "$PSK"
     log "已写入 Wi-Fi 配置：SSID=$SSID"
 elif [ -f "$WORK_PROV/wpa_supplicant.conf" ]; then
     log "使用 provisioning 里已有的 Wi-Fi 配置"
@@ -350,18 +385,7 @@ else
             SSID="$REPLY"
             ask "Wi-Fi 密码" ""
             PSK="$REPLY"
-            cat > "$WORK_PROV/wpa_supplicant.conf" <<EOF
-# 由安装程序生成
-country=CN
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-network={
-    ssid="$SSID"
-    psk="$PSK"
-    key_mgmt=WPA-PSK
-}
-EOF
-            chmod 0600 "$WORK_PROV/wpa_supplicant.conf"
+            write_wifi_conf "$SSID" "$PSK"
             log "已写入 Wi-Fi 配置：SSID=$SSID"
         fi
     fi
@@ -470,17 +494,8 @@ BACKUP_BASE=0        # 备份映像的字节 0 在 BACKUP_SRC 里的偏移
 
 avail_bytes() { df -PB1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
-# 磁盘层面的判断都放在 /usr/local/lib/qm1/install-lib.sh 里：那是"哪些字节写
-# 到哪里"的逻辑，写错就是一块报废的 eMMC。单独成文件是为了能在 CI 里用
-# 合成的 GPT 镜像直接验证它，而不必真机。
-QM1_INSTALL_LIB=/usr/local/lib/qm1/install-lib.sh
-if [ -r "$QM1_INSTALL_LIB" ]; then
-    # shellcheck source=/dev/null
-    . "$QM1_INSTALL_LIB"
-else
-    printf '[qm1-install][fail] 缺少 %s，无法继续\n' "$QM1_INSTALL_LIB" >&2
-    exit 1
-fi
+# 磁盘层面的判断都放在 /usr/local/lib/qm1/install-lib.sh 里（文件在脚本开头
+# 已经 source 过）。
 
 # 源盘上最后一个分区的结束位置（字节）
 source_used_end() {

@@ -180,6 +180,41 @@ else
     bad "镜像范围之外的改动影响了镜像范围内的校验"
 fi
 
+echo "== wpa_supplicant 取值规则（两份实现必须一致） =="
+# 镜像内的 install-lib.sh 与构建链的 scripts/lib/common.sh 各有一份同名实现
+# （前者要随镜像走，后者给 prepare-provision.sh / provision-agent.sh 用）。
+# 两边一旦走样，就会出现"CI 里配好的密码，机器上连不上"。
+COMMON_LIB="$REPO_ROOT/scripts/lib/common.sh"
+[ -r "$COMMON_LIB" ] || { echo "找不到 $COMMON_LIB" >&2; exit 1; }
+wpa_eval() {  # $1=lib $2=ssid $3=psk → "ssid_value|psk_value|rc"
+    bash -c '
+        set -uo pipefail
+        . "$1"
+        s="$(qm1_wpa_ssid_value "$2")"
+        if p="$(qm1_wpa_psk_value "$3")"; then rc=0; else rc=1; p=""; fi
+        printf "%s|%s|%s\n" "$s" "$p" "$rc"
+    ' _ "$1" "$2" "$3"
+}
+wpa_case() {  # $1=说明 $2=ssid $3=psk $4=期望
+    a="$(wpa_eval "$LIB" "$2" "$3")"
+    b="$(wpa_eval "$COMMON_LIB" "$2" "$3")"
+    if [ "$a" != "$b" ]; then
+        bad "$1：两份实现不一致（镜像内 $a / 构建链 $b）"
+    elif [ -n "${4:-}" ] && [ "$a" != "$4" ]; then
+        bad "$1：得到 $a，期望 $4"
+    else
+        ok "$1 → $a"
+    fi
+}
+HEX64="$(printf 'a%.0s' $(seq 1 64))"
+wpa_case "64 位十六进制 PSK 不加引号" "MySSID" "$HEX64" "\"MySSID\"|$HEX64|0"
+wpa_case "普通口令加引号" "MySSID" "passphrase" '"MySSID"|"passphrase"|0'
+wpa_case "含引号与反斜杠的口令" "MySSID" 'pa"ss\word' '"MySSID"|"pa\"ss\\word"|0'
+wpa_case "含空格与引号的 SSID" 'My "Net"\' '"passphrase"' '"My \"Net\"\\"|"passphrase"|0'
+wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||1'
+wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||1'
+wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"||0'
+
 if [ "$fails" -eq 0 ]; then
     echo "install-lib 测试全部通过"
 else

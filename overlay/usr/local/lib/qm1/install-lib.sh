@@ -99,3 +99,41 @@ qm1_verify_backup() {
     qm1_install_log "备份校验：$ok 项一致，$bad 项不一致"
     [ "$bad" -eq 0 ]
 }
+
+# ---------- wpa_supplicant.conf 的取值规则 ----------
+#
+# wpa_supplicant 的 psk 有两种写法，含义完全不同：
+#   * 加引号 = 明文口令，必须是 8..63 个字符，引号里的 " 和 \ 要用 \ 转义；
+#   * 不加引号 + 64 位十六进制 = 直接给出 PMK（就是路由器上显示的那串 64 字符）。
+# 把 64 位十六进制 PSK 加引号写出去，它会被当成 64 个字符的口令 —— 超过 63
+# 的上限，wpa_supplicant 直接拒绝，现象是"密码明明是对的却连不上"。
+# SSID 则一律加引号并转义。
+#
+# 这三个函数在构建链（scripts/lib/common.sh）与镜像内（install-lib.sh）各有一份
+# 同名实现，scripts/test-install-lib.sh 会断言两边输出一致，防止走样。
+
+qm1_wpa_escape() {
+    printf '%s' "$1" | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g'
+}
+
+# SSID 的取值（一律加引号并转义）
+qm1_wpa_ssid_value() {
+    printf '"%s"' "$(qm1_wpa_escape "$1")"
+}
+
+# PSK 的取值：64 位十六进制不加引号；8..63 字符加引号并转义。
+# 空口令 = 开放网络，输出为空（调用方据此省略 psk 行）。
+# 长度非法返回 1，由调用方报错。
+qm1_wpa_psk_value() {
+    local psk="$1"
+    [ -n "$psk" ] || return 0
+    if printf '%s' "$psk" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        printf '%s' "$psk"
+        return 0
+    fi
+    if [ "${#psk}" -ge 8 ] && [ "${#psk}" -le 63 ]; then
+        printf '"%s"' "$(qm1_wpa_escape "$psk")"
+        return 0
+    fi
+    return 1
+}
