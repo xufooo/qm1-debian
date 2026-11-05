@@ -113,8 +113,12 @@ hook 会临时挂 `<suite>-proposed-updates` 精确安装，装完即撤，
 | [6/6] 收尾 | 换回正常菜单、把 provisioning 写进目标、写安装记录 | 下一步提示 |
 
 **「非破坏性」是什么意思**：默认路径是「装到可移动介质，eMMC 一个字节都不动」。
-原系统因此原样保留，取下介质就能回退 —— 这是「还能装回原版系统」的前提。
-只有显式选 eMMC 才会动 eMMC，而那条路必须先做完整备份，否则安装器直接中止。
+原系统因此原样保留，取下介质就能回退。只有显式选 eMMC 才会动 eMMC，
+而那条路必须先做完整备份，否则安装器直接中止。
+
+> ⚠️ 「回退」指的是回退到**当前 eMMC 上原有的系统**，不是恢复出厂 Windows。
+> 见下面「两条硬约束」：出厂 Windows 在这台机器上**已经无法恢复**，
+> 所以请务必默认走 media 模式，别先动 eMMC。
 
 非交互用法（脚本 / CI）：
 
@@ -123,11 +127,18 @@ sudo qm1-install-to-emmc --target /dev/sdb --mode media \
      --provision-dir ./provision --backup-dir /mnt/bigdisk
 ```
 
-### 首次配置：开机即联网（Raspberry Pi 式）
+### 首次配置：开机即联网（Pi 老约定 + cloud-init 增强）
 
 这台机器没有 RJ45，唯一联网链路是内置 Wi-Fi。如果每次装完都要接显示器键盘
-手动敲 `wpa_supplicant`，装机就成了麻烦事。所以照 Pi 的做法：**把配置文件放进
+手动敲 `wpa_supplicant`，装机就成了麻烦事。所以沿用 Pi 的老做法：**把配置文件放进
 启动分区，开机自己读**。
+
+> 口径说明：Pi 的 `wpa_supplicant.conf` 机制属于 **Pi OS 早期约定**，
+> 从 Pi OS Bookworm 起官方已移除（`raspberrypi/documentation` `setting-up.adoc:405`：
+> "This functionality isn't available from Raspberry Pi OS Bookworm and onwards"）。
+> Pi 现行做法是 `touch /boot/firmware/ssh` 开 SSH。
+> 本项目实现的是那套**老约定的等价物**，另可选用 cloud-init 的 `CIDATA` 分区增强
+> （Debian 13 自带 cloud-init 25.1.4；NoCloud 要求卷标必须为 `CIDATA`）。
 
 生成 provisioning 目录：
 
@@ -154,6 +165,40 @@ bash scripts/prepare-provision.sh --out build/provision \
 首次开机时 `qm1-firstboot.service` 会：把 `wpa_supplicant.conf` 写进
 `/etc/wpa_supplicant/` → 启用并拉起 `qm1-wifi@wlan0`；启用 SSH；导入公钥；
 设置主机名；写标记 `/var/lib/qm1/firstboot-done`（幂等，不会重复执行）。
+
+### 两条硬约束（装机前必读）
+
+**1. 出厂 Windows 已经无法恢复 —— 请默认走 media 模式。**
+
+- ASUS 官方**不提供任何系统镜像或 BIOS 条目**：官方驱动接口
+  `https://www.asus.com/support/webapi/ProductV2/GetPDDrivers?...model=qm1` 只返回驱动包
+  （本项目已核对：Win8.1/Win10 的 WLAN 与 Bluetooth 共 4 个包，URL 均可达）。
+- 官方的「恢复出厂」流程**只认用户当年自己制作的 ASUS Backup U 盘**
+  （[uzzf 26550](https://www.uzzf.com/news/26550.html) 的逐步流程：插备份盘 → ESC 进 BIOS →
+  Boot Manager 选 EFI USB Device → 疑难解答 → 初始化电脑 → 选 Windows 8.1 →
+  必须选「是，对驱动器重新分区」→「仅删除我的文件」→ 重置）。
+  没有那块备份盘就没有恢复路径，而且这个流程本身会抹掉全部分区。
+- 本机固件是 **32 位 IA32 EFI**。32 位 EFI 固件**加载不了 PE32+（64 位）引导器**，
+  GRUB 官方手册的平台矩阵同向：`ia32 EFI` 那一行里 `32-bit EFI chainloader = yes`，
+  `64-bit EFI chainloader = no`。所以**唯一还能装上的 Windows 是 32 位版本**，
+  而且需要正版密钥重新激活。
+
+结论：**能保留的只有「当前 eMMC 上原有的系统」**。要留退路，就用 media 模式装到
+microSD / U 盘，别先动 eMMC。
+
+**2. 内置 microSD 槽在开机阶段可能不被识别。**
+
+社区记录显示自带 TF 槽「启动的时候识别不了」（单一来源，未实测）。稳妥做法是用
+**外置 USB 读卡器**接 microSD。注意这台机器只有 **1 个 USB-A 口**，
+插了读卡器就没有第二个口留给救援盘或 USB 网卡了 —— 请按需规划。
+（读卡器实测速度约 23 MB/s 读、15–21 MB/s 写；eMMC 写约 44 MB/s。）
+
+**3. 无显示器启动可能失败。**
+
+社区记录有「拔掉显示器后启动失败」的情况，需要 HDMI 假显示器
+（本机 HDMI 1.4 是**公头**，需母对母转接）。因此安装介质与系统的 GRUB 菜单项
+默认都带 `console=tty0 console=ttyS0,115200n8`，可从串口看到全过程；
+如果这台机器完全没有显示器，务必准备 HDMI 假显示器。
 
 ### 第 1 步：先在 U 盘上试跑（不碰 eMMC）
 
