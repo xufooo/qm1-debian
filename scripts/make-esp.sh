@@ -157,17 +157,28 @@ awk -v have64="$have64" -v have32="$have32" '
     !skip { print }
 ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 
-# 菜单项数量自检：生成的 grub.cfg 里，menuentry 的条数必须等于可用槽位数。
-# 这一条是防"哑菜单"回归的最后一道闸 —— 少了就是装出来点不动的 ESP。
-want_menus=0
-[ "$have64" = 1 ] && want_menus=$(( want_menus + 1 ))
-[ "$have32" = 1 ] && want_menus=$(( want_menus + 1 ))
+# 菜单项数量自检：生成的 grub.cfg 里，menuentry 的条数必须等于「模板里
+# 期望活下来的条数」。
+#
+# 注意：期望值必须**从模板算**，不能拿架构槽位数当期望值 ——
+# 安装介质用的模板（grub-installer.cfg.example）本来就有 3 条菜单
+# （安装到 eMMC / 试用 / 救援），它们跟 64/32 位槽没关系。
+# 早先这里写成 want=have64+have32，结果安装介质这一步直接误报
+# 「期望 1 条，实际 3 条」而中止。
+#
+# 规则：模板里的每一条 menuentry，要么因为对应槽位缺失被删，要么原样留下。
+tpl_menus=$(grep -c '^menuentry ' "$CONFIG_TEMPLATE" || true)
+tpl_64=$(grep -c '^menuentry .*64-bit' "$CONFIG_TEMPLATE" || true)
+tpl_32=$(grep -c '^menuentry .*32-bit' "$CONFIG_TEMPLATE" || true)
+want_menus=$tpl_menus
+if [ "$have64" != 1 ]; then want_menus=$(( want_menus - tpl_64 )); fi
+if [ "$have32" != 1 ]; then want_menus=$(( want_menus - tpl_32 )); fi
 got_menus=$(grep -c '^menuentry ' "$CFG" || true)
 if [ "$got_menus" != "$want_menus" ]; then
     die "生成的 grub.cfg 菜单项数量不对（期望 $want_menus 条，实际 $got_menus 条）—— 拒绝写出一个哑菜单"
 fi
-if [ "$want_menus" -gt 0 ] && ! grep -q '^menuentry ' "$CFG"; then
-    die "生成的 grub.cfg 里没有任何 menuentry —— 拒绝写出一个哑菜单"
+if [ "$want_menus" -lt 1 ]; then
+    die "没有任何可用的启动菜单项（模板 $tpl_menus 条，64 位槽 $tpl_64 条、32 位槽 $tpl_32 条全被删）—— 拒绝写出一个哑菜单"
 fi
 
 mcopy -i "$OUT" "$CFG" ::/EFI/BOOT/grub.cfg

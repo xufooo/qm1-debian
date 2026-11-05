@@ -25,6 +25,9 @@ PROV_DIR="/etc/qm1/provision"
 MARKER="/var/lib/qm1/firstboot-done"
 ESP_LABEL="QM1ESP"
 ESP_MOUNT="/run/qm1/firstboot-esp"
+# EFI System 分区的 GPT 类型 GUID（混合端序）—— 按它找启动分区比按卷标找更稳：
+# 卷标是构建时可配的（QM1_ESP_LABEL），写死在这里就会和实际卷标悄悄对不上。
+ESP_PARTTYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 FORCE=0
 for _arg in "$@"; do
@@ -36,6 +39,15 @@ done
 
 log()  { printf '[qm1-firstboot] %s\n' "$*"; }
 warn() { printf '[qm1-firstboot][warn] %s\n' "$*" >&2; }
+
+# 启动分区是临时挂来读 provisioning 的 —— 读完必须卸掉：
+# 留着会让 /run 下的挂载点一直占着，而且 --force 重跑时挂载会失败。
+cleanup() {
+    if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
+        umount "$ESP_MOUNT" 2>/dev/null || true
+    fi
+}
+trap cleanup EXIT
 
 [ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; exit 1; }
 
@@ -54,23 +66,34 @@ if [ -d "$PROV_DIR" ] && [ -n "$(ls -A "$PROV_DIR" 2>/dev/null || true)" ]; then
     SRC="$PROV_DIR"
     log "使用根文件系统内的配置：$SRC"
 else
-    # 尝试从启动分区（ESP）读：按卷标找，再找 /qm1/provision
+    # 尝试从启动分区（ESP）读：先按卷标找，再按分区类型找
     esp_dev=""
     if command -v lsblk >/dev/null 2>&1; then
         esp_dev="$(lsblk -no LABEL,PATH 2>/dev/null | awk -v l="$ESP_LABEL" '$1==l{print $2; exit}' || true)"
+        if [ -z "$esp_dev" ]; then
+            esp_dev="$(lsblk -no PARTTYPE,PATH 2>/dev/null \
+                | awk -v t="$ESP_PARTTYPE" '$1==t{print $2; exit}' || true)"
+            [ -n "$esp_dev" ] && log "没找到卷标 $ESP_LABEL，改按分区类型找到启动分区：$esp_dev"
+        fi
     fi
     if [ -n "$esp_dev" ]; then
         mkdir -p "$ESP_MOUNT"
+        if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
+            # 上一次运行挂过（--force 重跑）：先卸掉再挂，避免"设备已挂载"直接失败
+            umount "$ESP_MOUNT" 2>/dev/null || warn "卸载旧的 $ESP_MOUNT 失败"
+        fi
         if mount -o ro "$esp_dev" "$ESP_MOUNT" 2>/dev/null; then
             if [ -d "$ESP_MOUNT/qm1/provision" ]; then
                 SRC="$ESP_MOUNT/qm1/provision"
                 log "使用启动分区内的配置：$SRC"
+            else
+                warn "启动分区 $esp_dev 里没有 /qm1/provision"
             fi
         else
             warn "挂载启动分区 $esp_dev 失败"
         fi
     else
-        warn "没找到卷标为 $ESP_LABEL 的启动分区"
+        warn "没找到启动分区（卷标 $ESP_LABEL 或 EFI System 分区类型都没匹配上）"
     fi
 fi
 
@@ -127,25 +150,34 @@ if [ -f "$SRC/authorized_keys" ]; then
     install -d -m 0700 /root/.ssh
     touch "$KEYFILE"
     chmod 0600 "$KEYFILE"
-    if ! grep -qFf "$SRC/authorized_keys" "$KEYFILE" 2>/dev/null; then
-        cat "$SRC/authorized_keys" >> "$KEYFILE"
-        log "已把公钥写入 $KEYFILE"
+    # 空文件不能算"已经装过了"：grep -f 拿空行当模式会匹配任何一行，
+    # 结果是公钥永远装不上去。这里先数一下真正的公钥行。
+    KEY_COUNT="$(grep -cve '^[[:space:]]*$' "$SRC/authorized_keys" 2>/dev/null || true)"
+    if [ "${KEY_COUNT:-0}" -eq 0 ]; then
+        warn "authorized_keys 里没有有效公钥 —— 跳过"
     else
-        log "公钥已在 $KEYFILE 里，跳过"
-    fi
-    SSH_USER=""
-    if [ -f "$SRC/ssh_user" ]; then
-        SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
-    fi
-    if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
-        UHOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
-        [ -n "$UHOME" ] || UHOME="/home/$SSH_USER"
-        install -d -m 0700 "$UHOME/.ssh"
-        touch "$UHOME/.ssh/authorized_keys"
-        chmod 0600 "$UHOME/.ssh/authorized_keys"
-        if ! grep -qFf "$SRC/authorized_keys" "$UHOME/.ssh/authorized_keys" 2>/dev/null; then
-            cat "$SRC/authorized_keys" >> "$UHOME/.ssh/authorized_keys"
-            log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 $SSH_USER）"
+        if ! grep -qFf "$SRC/authorized_keys" "$KEYFILE" 2>/dev/null; then
+            cat "$SRC/authorized_keys" >> "$KEYFILE"
+            log "已把公钥写入 $KEYFILE"
+        else
+            log "公钥已在 $KEYFILE 里，跳过"
+        fi
+        SSH_USER=""
+        if [ -f "$SRC/ssh_user" ]; then
+            SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
+        fi
+        if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
+            UHOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
+            [ -n "$UHOME" ] || UHOME="/home/$SSH_USER"
+            install -d -m 0700 "$UHOME/.ssh"
+            touch "$UHOME/.ssh/authorized_keys"
+            chmod 0600 "$UHOME/.ssh/authorized_keys"
+            if ! grep -qFf "$SRC/authorized_keys" "$UHOME/.ssh/authorized_keys" 2>/dev/null; then
+                cat "$SRC/authorized_keys" >> "$UHOME/.ssh/authorized_keys"
+                log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 $SSH_USER）"
+            fi
+        elif [ -n "$SSH_USER" ]; then
+            warn "ssh_user 指定的用户 $SSH_USER 不存在 —— 只装了 root 的公钥"
         fi
     fi
     CHANGED=1

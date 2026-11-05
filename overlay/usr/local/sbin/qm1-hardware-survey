@@ -1,0 +1,170 @@
+#!/bin/sh
+# qm1-hardware-survey — 把这台机器的硬件事实一次性收集成一份可读的报告
+#
+# 为什么需要它：
+#   有两个问题必须看到真机的事实才能定方案，而这两个问题都不是靠读源码
+#   能回答的：
+#
+#   1) microSD 槽插卡认不出。上游 sdhci-acpi 的 CD pull-up quirk 只匹配
+#      ASUSTeK + T100TA，本机未必匹配；sdhci-acpi 是静态表、又没有任何
+#      module_param ⇒ 运行时注入不了。要修就得改 DSDT（覆盖 ACPI 描述），
+#      而改 DSDT 前必须先看到这台机器真实的 DSDT 与 SD 主机的 ACPI 路径。
+#
+#   2) 内置蓝牙（ACPI HID OBDA8723）没出 hci0。上游 hci_h5 按 ACPI HID
+#      认这个设备；如果 DSDT 把它暴露成普通 16550 串口，8250 会抢先绑定，
+#      内核 hci_uart 就没戏了。判断依据是这台机器真实的 ACPI 设备表。
+#
+# 所以这个脚本只做一件事：**把事实收集齐**。它不改任何配置、不写任何
+# 设备节点、不会让系统变得不稳定。
+#
+# 用法：
+#   sudo qm1-hardware-survey                # 打印到屏幕
+#   sudo qm1-hardware-survey --out /root    # 写一份到 /root/qm1-hardware-survey-<ts>.txt
+set -u
+
+OUT_DIR=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) OUT_DIR="${2:-}"; shift 2 ;;
+        -h|--help) sed -n '2,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "未知参数：$1" >&2; exit 2 ;;
+    esac
+done
+
+STAMP="$(date +%Y%m%d-%H%M%S)"
+if [ -n "$OUT_DIR" ]; then
+    REPORT="$OUT_DIR/qm1-hardware-survey-$STAMP.txt"
+else
+    REPORT=""
+fi
+
+say() { printf '%s\n' "$*"; }
+
+section() { say ""; say "===== $* ====="; }
+
+run() {   # run <标题> <命令...>
+    _title="$1"; shift
+    say ""
+    say "--- $_title ---"
+    if command -v "$1" >/dev/null 2>&1; then
+        "$@" 2>&1 | head -120
+    else
+        say "(缺少 $1)"
+    fi
+}
+
+collect() {
+    section "系统"
+    say "date=$(date -Is)"
+    say "host=$(hostname 2>/dev/null)"
+    say "kernel=$(uname -r) $(uname -m)"
+    say "uptime=$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
+    say "cmdline=$(cat /proc/cmdline 2>/dev/null)"
+
+    section "DMI（决定上游 quirk 能不能命中）"
+    for f in /sys/devices/virtual/dmi/id/*; do
+        [ -r "$f" ] || continue
+        say "$(basename "$f")=$(cat "$f" 2>/dev/null)"
+    done
+
+    section "MMC 主机与卡"
+    for h in /sys/class/mmc_host/*; do
+        [ -e "$h" ] || continue
+        say "host=$(basename "$h")"
+        say "  driver=$(basename "$(readlink -f "$h/device/driver" 2>/dev/null)" 2>/dev/null)"
+        say "  power_control=$(cat "$h/power/control" 2>/dev/null || echo '(无)')"
+        say "  autosuspend_delay_ms=$(cat "$h/power/autosuspend_delay_ms" 2>/dev/null || echo '(无)')"
+        for p in /sys/class/mmc_host/*/device/*; do
+            [ -e "$p" ] || continue
+        done
+    done
+    for b in /sys/class/block/mmcblk*; do
+        [ -e "$b" ] || continue
+        say "block=$(basename "$b") type=$(cat "$b/device/type" 2>/dev/null || echo '?') size_sectors=$(cat "$b/size" 2>/dev/null)"
+        say "  device=$(readlink -f "$b/device" 2>/dev/null)"
+    done
+
+    section "ACPI 设备（hid / 绑定的驱动）"
+    for d in /sys/bus/acpi/devices/*; do
+        [ -e "$d" ] || continue
+        hid=""
+        [ -r "$d/hid" ] && hid="$(cat "$d/hid" 2>/dev/null)"
+        drv=""
+        [ -e "$d/driver" ] && drv="$(basename "$(readlink -f "$d/driver" 2>/dev/null)" 2>/dev/null)"
+        case "$hid$drv" in
+            *OBDA*|*80860F14*|*sdhci*|*8250*|*hci_uart*|*h5*|*Bluetooth*)
+                say "$(basename "$d") hid=$hid driver=$drv path=$(readlink -f "$d" 2>/dev/null)"
+                ;;
+        esac
+    done
+
+    section "DSDT（改 ACPI 描述前必须先看它）"
+    if [ -r /sys/firmware/acpi/tables/DSDT ]; then
+        say "DSDT 大小=$(wc -c < /sys/firmware/acpi/tables/DSDT) 字节"
+        say "校验和=$(head -c 1 /sys/firmware/acpi/tables/DSDT | od -An -tx1 | tr -d ' ')"
+        if command -v iasl >/dev/null 2>&1; then
+            tmp="$(mktemp -d 2>/dev/null || echo /tmp)"
+            cp /sys/firmware/acpi/tables/DSDT "$tmp/DSDT" 2>/dev/null \
+                && (cd "$tmp" && iasl -d DSDT >/dev/null 2>&1) \
+                && say "已反汇编到 $tmp/DSDT.dsl" \
+                || say "iasl 反汇编失败（$tmp）"
+        else
+            say "(没有 iasl：apt install acpica-tools 后重跑本脚本就能拿到 DSDT.dsl)"
+        fi
+    else
+        say "(读不到 /sys/firmware/acpi/tables/DSDT —— 这台机器可能不是用 ACPI 引导的)"
+    fi
+
+    section "串口与蓝牙（看 8250 有没有抢走 BT UART）"
+    say "-- tty --"
+    for t in /sys/class/tty/*; do
+        [ -e "$t" ] || continue
+        drv="$(readlink -f "$t/device/driver" 2>/dev/null)"
+        [ -n "$drv" ] && say "$(basename "$t") driver=$(basename "$drv")"
+    done
+    say "-- serio --"
+    ls -1 /sys/bus/serio/drivers 2>/dev/null | sed 's/^/  /'
+    say "-- hci --"
+    ls -1 /sys/class/bluetooth 2>/dev/null | sed 's/^/  /'
+    say "-- 8250 / hci_uart 模块 --"
+    for m in 8250_generic 8250_serial hci_uart hci_h5 btrtl; do
+        [ -d "/sys/module/$m" ] && say "  $m 已加载"
+    done
+
+    section "GPIO（CD 引脚是不是 ACPI GPIO）"
+    if [ -r /sys/kernel/debug/gpio ]; then
+        head -60 /sys/kernel/debug/gpio 2>/dev/null
+    else
+        say "(debugfs 未挂载：mount -t debugfs none /sys/kernel/debug 后重跑本脚本)"
+    fi
+    for g in /sys/bus/gpio/devices/*; do
+        [ -e "$g" ] || continue
+        say "$(basename "$g") base=$(cat "$g/base" 2>/dev/null) ngpio=$(cat "$g/ngpio" 2>/dev/null) label=$(cat "$g/label" 2>/dev/null)"
+    done
+
+    section "内核日志里与本次调查相关的行"
+    if [ -r /proc/kmsg ]; then :; fi
+    dmesg 2>/dev/null | grep -iE 'mmc|sdhci|acpi|serial|8250|uart|bluetooth|hci|rtw|wlan|cd |card' | tail -120
+
+    section "网络与无线"
+    for n in /sys/class/net/*; do
+        [ -e "$n" ] || continue
+        nm="$(basename "$n")"
+        drv="$(readlink -f "$n/device/driver" 2>/dev/null)"
+        mod="$(readlink -f "$n/device/driver/module" 2>/dev/null)"
+        say "$nm driver=$(basename "$drv" 2>/dev/null) module=$(basename "$mod" 2>/dev/null)"
+    done
+    run "iw dev" iw dev
+    run "iw link" iw link
+    run "rfkill" rfkill list
+}
+
+if [ -n "$REPORT" ]; then
+    collect > "$REPORT" 2>&1
+    printf '报告已写到：%s\n' "$REPORT"
+    printf '把这一个文件发回来就够了 —— 里面包含 DMI、ACPI 设备表、DSDT 线索与内核日志。\n'
+    exit 0
+fi
+
+collect
+exit 0

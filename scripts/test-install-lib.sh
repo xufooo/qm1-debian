@@ -210,7 +210,10 @@ HEX64="$(printf 'a%.0s' $(seq 1 64))"
 wpa_case "64 位十六进制 PSK 不加引号" "MySSID" "$HEX64" "\"MySSID\"|$HEX64|0"
 wpa_case "普通口令加引号" "MySSID" "passphrase" '"MySSID"|"passphrase"|0'
 wpa_case "含引号与反斜杠的口令" "MySSID" 'pa"ss\word' '"MySSID"|"pa\"ss\\word"|0'
-wpa_case "含空格与引号的 SSID" 'My "Net"\' '"passphrase"' '"My \"Net\"\\"|"passphrase"|0'
+# SSID 里同时有空格、引号和反斜杠：这三个都要转义，否则 wpa_supplicant 会
+# 把 SSID 截断或读成别的名字。
+SSID_TRICKY='My "Net"\'
+wpa_case "含空格与引号的 SSID" "$SSID_TRICKY" "passphrase" '"My \"Net\"\\"|"passphrase"|0'
 wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||1'
 wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||1'
 wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"||0'
