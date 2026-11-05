@@ -165,6 +165,16 @@ check_link /etc/systemd/system/wpa_supplicant.service /dev/null \
 # 做（等 DNS + 等时钟），那才是装 Hermes/Chrome 之前真正需要的。
 check_absent /etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service \
     "wait-online 没有挂在 multi-user.target 上（网络不通不挡开机）"
+# ★ 首启标记绝不能随镜像出厂。
+#   qm1-firstboot.service 的启动条件是 ConditionPathExists=!/var/lib/qm1/firstboot-done
+#   —— 标记在，条件就不成立，整个单元被 systemd 跳过，首启配置（Wi-Fi 凭据、
+#   SSH 公钥、主机名）就永远不会执行，而机器看上去一切正常（能开机、
+#   有 SSH），只是连不上网也登不进那个账号。
+#   标记只应该由首启脚本在真的改过东西之后写，所以镜像里必须没有它。
+check_absent /var/lib/qm1/firstboot-done \
+    "首启标记没有随镜像出厂（否则首启配置会被条件跳过，永远不执行）"
+check_absent /var/lib/qm1/provision-done \
+    "运行时部署标记没有随镜像出厂（否则 Hermes/Chrome 永远不会被铺上）"
 # 这份是**回退**参数（发行版树内 staging r8723bs），不是出货配置。
 # 出货配置是 qm1-rtw88-8723bs.conf（在下面的 rtw88 段里按内容校验）。
 # 留着这份是为了"rtw88 起不来、需要临时回退"时不用重踩省电的坑。
