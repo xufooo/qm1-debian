@@ -745,6 +745,48 @@ jobs:
           ls -lh build/out/qm1-installer.img.zst
           sha256sum build/out/qm1-installer.img.zst >> build/out/SHA256SUMS
 
+      - name: Assert the provisioning injection works (no secrets needed)
+        run: |
+          set -eu
+          # 出厂镜像里**不该**带 Wi-Fi 凭据（公开仓库 + CI 日志都不能有密钥），
+          # 但「装进 eMMC、开机即用」要求介质上有 /qm1/provision/。
+          # 交付流程因此是：prepare-provision.sh 生成目录 → inject-provision.sh
+          # 注入已构建好的介质 → 再 dd 到 U 盘。
+          # 这里用占位凭据验证**注入脚本本身可用**（不回读真实密钥）。
+          PROV="$(mktemp -d)"
+          cat > "$PROV/wpa_supplicant.conf" <<'EOF'
+          country=CN
+          ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+          update_config=1
+          network={
+              ssid="qm1-ci-placeholder"
+              psk="qm1-ci-placeholder-psk"
+              key_mgmt=WPA-PSK
+          }
+          EOF
+          : > "$PROV/ssh"
+          printf 'qm1\n' > "$PROV/ssh_user"
+          # a) 裸 ESP 镜像（make-esp.sh 的产物）
+          cp build/out/esp-installer.img build/out/esp-installer.provisioned.img
+          bash scripts/inject-provision.sh \
+            --image build/out/esp-installer.provisioned.img --dir "$PROV" --esp-only
+          mdir -/ -i build/out/esp-installer.provisioned.img ::/qm1/provision \
+            | tee build/out/prov-listing.txt
+          for f in wpa_supplicant.conf ssh ssh_user; do
+            grep -q "$f" build/out/prov-listing.txt \
+              || { echo "::error::注入后 ESP 里没有 $f（/qm1/provision/ 不完整）"; exit 1; }
+          done
+          # b) 整盘镜像：脚本要能自己认出 GPT 里的 ESP 分区并写进去
+          cp build/out/qm1-installer.img build/out/qm1-installer.provisioned.img
+          bash scripts/inject-provision.sh \
+            --image build/out/qm1-installer.provisioned.img --dir "$PROV"
+          # c) 出厂产物本身必须**不含**占位凭据（注入只发生在副本上）
+          mdir -/ -i build/out/esp-installer.img ::/qm1 2>/dev/null \
+            && { echo "::error::出厂 ESP 里出现了 /qm1 —— 凭据不该进产物"; exit 1; } || true
+          rm -f build/out/esp-installer.provisioned.img build/out/qm1-installer.provisioned.img
+          rm -rf "$PROV"
+          echo "OK   provisioning 注入可用（裸 ESP 与整盘镜像两条路径都通过）"
+
       - name: Assert runtime payload (profile=runtime)
         if: inputs.profile == 'runtime' || inputs.profile == ''
         run: |
