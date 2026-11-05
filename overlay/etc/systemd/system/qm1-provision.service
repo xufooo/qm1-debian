@@ -4,7 +4,12 @@ Documentation=file:///usr/local/share/qm1/README-runtime.txt
 # 等网络真的可用：内置 Wi-Fi 是这台机器唯一的联网链路，
 # networkd 的 30-wifi.network 标了 RequiredForOnline=yes ⇒ network-online.target
 # 只有在 wlan0 拿到地址之后才达成。
-After=network-online.target qm1-wifi@wlan0.service
+#
+# After=multi-user.target 是关键：装 Hermes 要下载官方安装器、uv 托管的
+# Python 3.14、Node 运行时，可能要十几分钟。没有这一行的话，这个 oneshot
+# 会被排在 multi-user.target **之前**，机器会看起来"卡在开机画面"。
+# 有了这一行，它在系统已经可用之后才跑 —— 装的时候照样能 SSH 进来。
+After=network-online.target qm1-wifi@wlan0.service multi-user.target
 Wants=network-online.target
 # 没有 agent 脚本（裁剪过的镜像）就什么都不做；已经铺好就不重复铺。
 ConditionPathExists=/usr/local/share/qm1/provision-agent.sh
