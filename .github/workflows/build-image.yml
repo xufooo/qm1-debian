@@ -783,6 +783,28 @@ jobs:
           ls -lh build/out/qm1-disk.img.zst
           sha256sum build/out/qm1-disk.img.zst >> build/out/SHA256SUMS
 
+      - name: Boot the assembled disk image under UEFI (QEMU)
+        run: |
+          set -eu
+          # 出货形态的启动测试：整盘镜像（GPT + ESP + GRUB + 根分区）经 OVMF
+          # 走 UEFI 引导，验证的是"刷完这个盘能不能开机"。
+          # 上面那次只测了根文件系统那一层（直接 -kernel 起）⇒ ESP 里的引导器、
+          # grub.cfg 的 search 行、根 UUID、内核 handover 这一整段没人验过。
+          # GRUB 菜单有 5 秒超时，会自动选第 ① 项（正常启动那条）⇒ 不需要交互。
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends ovmf
+          rc=0
+          bash scripts/boot-smoke.sh \
+            --disk build/out/qm1-disk.img \
+            --timeout 420 \
+            --log build/out/boot-disk-smoke.log || rc=$?
+          if [ "$rc" = "77" ]; then
+            echo "::warning::OVMF 不可用，跳过整盘镜像的启动测试"
+          elif [ "$rc" != "0" ]; then
+            tail -40 build/out/boot-disk-smoke.log || true
+            exit "$rc"
+          fi
+
       - name: Assert the installer image is self-contained
         run: |
           set -eu
