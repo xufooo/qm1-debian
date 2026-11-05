@@ -183,11 +183,11 @@ jobs:
           if bash scripts/build-rtw88-8723bs-module.sh \
                --kver "${QM1_KERNEL_ABI}" \
                --out-dir build/rtw88-module; then
-            echo "rtw88-module=ok" >> "$GITHUB_ENV"
+            echo "RTW88_MODULE=ok" >> "$GITHUB_ENV"
             ls -l build/rtw88-module/
           else
             echo "::warning::rtw88 回移模块构建失败，回退到打了补丁的 staging 模块"
-            echo "rtw88-module=fallback" >> "$GITHUB_ENV"
+            echo "RTW88_MODULE=fallback" >> "$GITHUB_ENV"
           fi
 
       - name: Build root filesystem (mmdebstrap + hooks)
@@ -198,7 +198,7 @@ jobs:
           if [ "$ARCH" = "amd64" ]; then
             # 钉死内核 point release（6.12.113），并装上 Wi-Fi 驱动
             EXTRA+=(--kernel-version "${QM1_KERNEL_VERSION}")
-            if [ "${rtw88-module:-fallback}" = "ok" ]; then
+            if [ "${RTW88_MODULE:-fallback}" = "ok" ]; then
               EXTRA+=(--rtw88-module-deb "$(ls build/rtw88-module/*.deb | head -1)")
             else
               EXTRA+=(--wifi-module-deb "$(ls build/wifi-module/*.deb | head -1)")
