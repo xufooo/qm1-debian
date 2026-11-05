@@ -518,6 +518,25 @@ else
     row WARN "蓝牙" "没有 hci0（厂商固件下发可能没成功）"
 fi
 
+# 时钟同步
+if command -v timedatectl >/dev/null 2>&1; then
+    sync="$(timedatectl show -p NTPSynchronized --value 2>/dev/null || echo unknown)"
+    if [ "$sync" = "yes" ]; then
+        row PASS "时间同步" "已同步（$(date -u)）"
+    else
+        row WARN "时间同步" "未同步（NTPSynchronized=$sync），TLS 证书校验会失败"
+    fi
+else
+    row WARN "时间同步" "没有 timedatectl"
+fi
+
+# 蓝牙栈
+if systemctl is-enabled --quiet bluetooth.service 2>/dev/null; then
+    row PASS "蓝牙栈" "bluetooth.service 已启用"
+else
+    row WARN "蓝牙栈" "bluetooth.service 未启用（只能看到 hci0，无法配对）"
+fi
+
 # 硬件修正服务
 if systemctl is-enabled --quiet qm1-hardware-fixups.service 2>/dev/null; then
     row PASS "硬件修正服务" "qm1-hardware-fixups.service 已启用"
