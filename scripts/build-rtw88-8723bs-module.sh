@@ -19,11 +19,19 @@
 # the chip driver is built as an out-of-tree module against the kernel that
 # goes into the image.
 #
-# Two sources are supported:
-#   upstream  the upstream rtw88 chip driver, compiled against the rtw88
-#             headers of the target kernel series (v6.12)
-#   vendor    a maintained rtw88 tree with the RTL8723BS support and the SDIO
-#             workarounds, used when the upstream backport does not compile
+# Three sources are supported:
+#   upstream        the upstream rtw88 chip driver, compiled against the rtw88
+#                   headers of the target kernel series (v6.12)
+#   upstream-full   the *whole* upstream rtw88 tree of --upstream-ref (master),
+#                   built as out-of-tree modules against the target kernel.
+#                   This is the root-cause path: upstream restructured rtw88
+#                   (main.c split into fw.c/efuse.c/mac80211.c/... and the
+#                   8723b chip driver moved to the new core API), so mixing
+#                   upstream chip files with the old core headers cannot
+#                   work -- the whole tree has to come from one place.
+#   vendor          a maintained rtw88 tree with the RTL8723BS support and the
+#                   SDIO workarounds, used when the upstream backport does not
+#                   compile
 #
 # The result is a .deb that installs the modules, the firmware blob, the
 # modprobe configuration and the systemd unit that loads the driver.
@@ -55,7 +63,7 @@ Usage: build-rtw88-8723bs-module.sh --kver <kernel-abi> [options]
 
   --kver <abi>          target kernel ABI, e.g. 6.12.113+deb13-amd64 (required)
   --out-dir <dir>       output directory (default: out)
-  --source <mode>       auto | upstream | vendor (default: auto)
+  --source <mode>       auto | upstream | upstream-full | vendor (default: auto)
   --jobs <n>            parallel make jobs
   --kernel-repo <url>   linux.git URL used for the rtw88 headers
   --kernel-ref <ref>    ref of the kernel tree (default: v6.12)
@@ -87,7 +95,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$KVER" ] || { usage; die "--kver is required"; }
-case "$SOURCE" in auto|upstream|vendor) ;; *) die "invalid --source: $SOURCE" ;; esac
+case "$SOURCE" in auto|upstream|upstream-full|vendor) ;; *) die "invalid --source: $SOURCE" ;; esac
 
 if [ -z "$PATCH_DIR" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -188,6 +196,78 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# upstream-full: the complete upstream rtw88 tree of --upstream-ref, built as
+# out-of-tree modules against the target kernel.
+#
+# Upstream restructured rtw88 (main.c split into fw.c / efuse.c / mac80211.c
+# / ... and the 8723b chip driver moved onto the new core API), so the chip
+# files cannot be combined with the old core headers.  The root-cause path is
+# therefore to take the whole tree from one place.
+#
+# The module names get a _qm1 suffix: the in-tree kernel already ships modules
+# called rtw88_core / rtw88_sdio, and two modules of the same name cannot
+# coexist in one module tree.
+# ---------------------------------------------------------------------------
+build_upstream_full() {
+    log "building the whole upstream rtw88 tree ($UPSTREAM_REF) against $KVER"
+
+    rm -rf "$WORK/linux-upstream"
+    git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$UPSTREAM_REF" \
+        "$KERNEL_REPO" "$WORK/linux-upstream" \
+        || { warn "kernel tree clone failed"; return 1; }
+    git -C "$WORK/linux-upstream" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
+        || { warn "sparse checkout failed"; return 1; }
+
+    local src="$WORK/linux-upstream/drivers/net/wireless/realtek/rtw88"
+    [ -f "$src/rtw8723bs.c" ] || { warn "$UPSTREAM_REF has no rtw8723bs.c"; return 1; }
+
+    local mod="$WORK/module-upstream-full"
+    rm -rf "$mod"
+    mkdir -p "$mod"
+    cp "$src"/*.c "$src"/*.h "$mod"/ 2>/dev/null || true
+
+    # Split the tree the way upstream does: one module for the core, one for
+    # the SDIO transport and one per chip.  Only the chip we care about and the
+    # SDIO transport are built; PCI and USB are irrelevant on this device.
+    local core_files="" f
+    for f in "$mod"/*.c; do
+        case "$(basename "$f")" in
+            sdio.c|pci.c|usb.c) continue ;;
+            rtw[0-9]*.c) continue ;;
+        esac
+        core_files="$core_files $(basename "$f")"
+    done
+    [ -n "$core_files" ] || { warn "no core sources found in the upstream tree"; return 1; }
+
+    cat > "$mod/Makefile" <<EOF
+# Out-of-tree build of the complete upstream rtw88 tree.
+obj-m += rtw88_qm1_core.o
+rtw88_qm1_core-objs := $core_files
+obj-m += rtw88_qm1_sdio.o
+rtw88_qm1_sdio-objs := sdio.o
+obj-m += rtw88_qm1_8723b.o
+rtw88_qm1_8723b-objs := rtw8723b.o rtw8723b_table.o
+obj-m += rtw88_qm1_8723bs.o
+rtw88_qm1_8723bs-objs := rtw8723bs.o
+ccflags-y += -I\$(src)
+EOF
+
+    log "compiling against $KSRC"
+    make -C "$KSRC" M="$mod" -j"$JOBS" modules \
+        CONFIG_RTW88_CORE=y CONFIG_RTW88=m CONFIG_RTW88_SDIO=m \
+        CONFIG_RTW88_8723B=m CONFIG_RTW88_8723BS=m \
+        || { warn "the full upstream rtw88 tree does not compile against $KVER"; return 1; }
+
+    local m
+    for m in rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko; do
+        [ -f "$mod/$m" ] || { warn "upstream build is missing $m"; return 1; }
+    done
+    MOD_DIR="$mod"
+    MOD_NAMES="rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
 # local patches for the vendor tree
 #
 # The vendor tree misses fixes that upstream already merged for this chip --
@@ -264,7 +344,8 @@ build_vendor() {
 MOD_DIR=""
 MOD_NAMES=""
 case "$SOURCE" in
-    upstream) build_upstream || die "the upstream backport failed" ;;
+    upstream)        build_upstream || die "the upstream backport failed" ;;
+    upstream-full)  build_upstream_full || die "the full upstream rtw88 build failed" ;;
     vendor)   build_vendor   || die "the vendor build failed" ;;
     auto)
         # 上游 7.4 的芯片驱动需要 7.4 时期的 rtw88 核心 API（mac_postinit /
@@ -330,14 +411,24 @@ install -m 0644 "$FW_DIR"/rtw8723b*.bin "$PKG/lib/firmware/rtw88/"
 
 # load the out-of-tree driver instead of the obsolete staging driver
 SDIO_MODULE="rtw88_8723bs"
-[ -f "$PKG/lib/modules/$KVER/extra/rtw88/rtw_8723bs.ko" ] && SDIO_MODULE="rtw_8723bs"
+for cand in rtw_8723bs.ko rtw88_8723bs.ko rtw88_qm1_8723bs.ko; do
+    if [ -f "$PKG/lib/modules/$KVER/extra/rtw88/$cand" ]; then
+        SDIO_MODULE="${cand%.ko}"
+        break
+    fi
+done
 
 # The module parameters live in the rtw88 core module, not in the SDIO bind.
 # Note: rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode / rtw_bw_mode are the
 # *staging* driver's parameters -- the rtw88 driver does not have them, and
 # modprobe refuses to load a module with an unknown parameter.
 CORE_MODULE="rtw_core"
-[ -f "$PKG/lib/modules/$KVER/extra/rtw88/$CORE_MODULE.ko" ] || CORE_MODULE="rtw88_core"
+for cand in rtw_core.ko rtw88_core.ko rtw88_qm1_core.ko; do
+    if [ -f "$PKG/lib/modules/$KVER/extra/rtw88/$cand" ]; then
+        CORE_MODULE="${cand%.ko}"
+        break
+    fi
+done
 CORE_PARAMS="disable_lps_deep support_bf debug_mask"
 
 # every parameter we write must really exist, otherwise modprobe fails to load
