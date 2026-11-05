@@ -354,6 +354,28 @@ jobs:
             || { echo "::error::scripts/grub-installer.cfg.example 缺少 intel_idle.max_cstate=1"; exit 1; }
           echo "OK   内核参数含 intel_idle.max_cstate=1"
 
+      - name: Assert the health collector is inside the image
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          # 稳定性取证采集器：没有周期快照就判断不了"整机卡死 / eMMC 掉卡 / Wi-Fi 断流"
+          # 到底发没发生，参数调整就成了盲改。
+          [ -x "$ROOT/usr/local/sbin/qm1-health-collect" ] \
+            || { echo "::error::镜像里没有 /usr/local/sbin/qm1-health-collect"; exit 1; }
+          [ -x "$ROOT/usr/local/bin/qm1-stress" ] \
+            || { echo "::error::镜像里没有 /usr/local/bin/qm1-stress"; exit 1; }
+          for u in qm1-health-collect.service qm1-health-collect.timer; do
+            [ -f "$ROOT/lib/systemd/system/$u" ] || [ -f "$ROOT/etc/systemd/system/$u" ] \
+              || { echo "::error::镜像里缺少 systemd 单元 $u"; exit 1; }
+          done
+          [ -L "$ROOT/etc/systemd/system/timers.target.wants/qm1-health-collect.timer" ] \
+            || { echo "::error::qm1-health-collect.timer 没有开机自启（缺 timers.target.wants 链接）"; exit 1; }
+          grep -q 'mmc_error_lines=' "$ROOT/usr/local/sbin/qm1-health-collect" \
+            || { echo "::error::采集器缺少 eMMC 错误计数（mmc_error_lines）"; exit 1; }
+          grep -q 'hung task' "$ROOT/usr/local/sbin/qm1-health-collect" \
+            || { echo "::error::采集器缺少挂死类内核抱怨计数"; exit 1; }
+          echo "OK   稳定性取证采集器、定时器与压测脚本全部就位"
+
       - name: Assert the first-boot provisioning is inside the image
         run: |
           set -eu
