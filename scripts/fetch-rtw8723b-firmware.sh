@@ -66,10 +66,16 @@ for comp in $COMPONENTS; do
     url="$MIRROR/dists/$SUITE/$comp/binary-all/Packages.xz"
     log "下载索引：$url"
     if curl -fsSL --max-time 300 "$url" -o "$WORK/Packages.xz"; then
-        if xzcat "$WORK/Packages.xz" | grep -q "^Package: $PKG\$"; then
-            IDX="$WORK/Packages.xz"
-            log "命中组件：$comp"
-            break
+        # 先整包解压再查文件：grep -q 命中即退出会给管道另一端发 SIGPIPE，
+        # 在 set -o pipefail 下会把整条管道的退出码变成 141，凭空判成「没找到」。
+        if xz -dc "$WORK/Packages.xz" > "$WORK/Packages" 2>/dev/null; then
+            if grep -q "^Package: $PKG\$" "$WORK/Packages"; then
+                IDX="$WORK/Packages"
+                log "命中组件：$comp"
+                break
+            fi
+        else
+            warn "$url 解压失败，换下一个组件"
         fi
         log "$comp 组件里没有 $PKG，换下一个组件"
     fi
@@ -77,8 +83,7 @@ done
 [ -n "$IDX" ] || die "在 $SUITE 的 [$COMPONENTS] 组件里都找不到 $PKG"
 
 # 只取 firmware-realtek 那个 stanza 的 Filename / SHA256 / Version
-read -r DEB_PATH DEB_SHA DEB_VER <<EOF
-$(xzcat "$IDX" | awk -v pkg="$PKG" '
+_stanza="$(awk -v pkg="$PKG" '
     $1 == "Package:" { inpkg = ($2 == pkg) }
     inpkg && $1 == "Filename:"  { fn = $2 }
     inpkg && $1 == "SHA256:"    { sh = $2 }
@@ -88,8 +93,8 @@ $(xzcat "$IDX" | awk -v pkg="$PKG" '
         fn = ""; sh = ""; ver = ""
     }
     END { if (fn != "") print fn, sh, ver }
-')
-EOF
+' "$IDX")"
+read -r DEB_PATH DEB_SHA DEB_VER <<<"$_stanza"
 
 [ -n "$DEB_PATH" ] || die "在 $SUITE 索引里找不到 $PKG（组件可能变了，检查 --suite/--mirror）"
 [ -n "$DEB_SHA" ]  || die "$PKG 在索引里没有 SHA256（索引异常）"
