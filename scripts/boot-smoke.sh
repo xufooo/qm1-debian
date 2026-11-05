@@ -224,6 +224,19 @@ for unit in ssh.service systemd-resolved.service systemd-networkd.service \
     fi
 done
 
+# 出货的 Wi-Fi 驱动单元：只要它出现在日志里，就不允许起失败。
+# QEMU 里没有 SDIO 卡，但模块本身照样能加载成功（modprobe 只做符号解析和
+# 注册驱动，没有设备是正常的）⇒ 这条在 QEMU 里也成立，而且正好能挡住
+# 「模块索引没刷新 ⇒ modprobe 报 not found ⇒ 驱动永远加载不上」这类问题。
+if printf '%s' "$OUT" | grep -q "qm1-rtw88-8723bs.service"; then
+    if printf '%s' "$OUT" | grep -q "Failed to start qm1-rtw88-8723bs.service"; then
+        echo "BOOT-SMOKE: 断言不过：Wi-Fi 驱动单元 qm1-rtw88-8723bs.service 起失败" >&2
+        echo "BOOT-SMOKE:（最常见原因：镜像的 modules.dep 里没有这个模块，modprobe 找不到它）" >&2
+        tail -60 "$CONSOLE" >&2
+        exit 1
+    fi
+fi
+
 if [ "$JOURNAL_OK" = "yes" ]; then
     assert_journal() {
         printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" \

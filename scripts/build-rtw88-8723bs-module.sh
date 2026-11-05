@@ -788,23 +788,45 @@ EOF
 mkdir -p "$PKG/DEBIAN"
 cat > "$PKG/DEBIAN/postinst" <<'EOF'
 #!/bin/sh
-# dpkg calls a maintainer script with the *package version* as $1, never with
-# the kernel ABI.  A condition like [ -d "/lib/modules/$1" ] was therefore
-# never true and depmod never ran: after a manual "dpkg -i" the module index
-# (modules.alias, modules.dep) stayed stale and "modprobe rtw88_qm1" failed
-# with "not found in directory /lib/modules/...".
+# dpkg 调用维护脚本时给的是*包版本*（$1），不是内核 ABI；所以不能靠 $1 取
+# 内核版本 —— 早先写的 [ -d "/lib/modules/$1" ] 永远为假，depmod 从没跑过，
+# 模块索引（modules.alias / modules.dep）一直是旧的，结果就是
+# "modprobe rtw88_qm1" 报 "not found in directory"，驱动永远加载不上。
 #
-# depmod -a refreshes the index of every installed kernel.  A missing or
-# failing depmod must not abort the package installation, so the failure is
-# only reported.
+# 这个包只往 /lib/modules/<KVER>/extra/rtw88/ 里放文件 ⇒ 从自己的文件反推
+# 内核版本，再对**那个版本**跑 depmod。
+#
+# 为什么必须显式给版本：depmod 不带版本参数时用的是**当前运行内核**的版本
+# （uname -r）。在镜像/chroot 里 uname -r 是构建机的内核（CI runner 的
+# 6.11.x 之类），于是 depmod 去刷新一个根本不存在的 /lib/modules/<构建机内核>/，
+# 目标内核的 modules.dep 根本没被更新 —— 这正是之前 CI 里
+# "qm1-rtw88-8723bs: depmod -a failed" 背后真正的问题。
 set -e
-if command -v depmod >/dev/null 2>&1; then
-    if ! depmod -a; then
-        echo "qm1-rtw88-8723bs: depmod -a failed; run it manually" >&2
-    fi
-else
-    echo "qm1-rtw88-8723bs: depmod not found; the module index was not refreshed" >&2
+
+_kvers=""
+for _d in /lib/modules/*/extra/rtw88; do
+    [ -d "$_d" ] || continue
+    _kvers="$_kvers ${_d%/extra/rtw88}"
+done
+_kvers="${_kvers#/lib/modules/}"
+
+if [ -z "$_kvers" ]; then
+    echo "qm1-rtw88-8723bs: 找不到本包装下的模块目录，模块索引没刷新" >&2
+    exit 0
 fi
+
+if ! command -v depmod >/dev/null 2>&1; then
+    echo "qm1-rtw88-8723bs: depmod 不存在，模块索引没刷新" >&2
+    exit 0
+fi
+
+for _kv in $_kvers; do
+    if depmod -a "$_kv"; then
+        echo "qm1-rtw88-8723bs: 已刷新 $_kv 的模块索引"
+    else
+        echo "qm1-rtw88-8723bs: depmod -a $_kv 失败，请手工执行" >&2
+    fi
+done
 exit 0
 EOF
 chmod 0755 "$PKG/DEBIAN/postinst"

@@ -141,6 +141,11 @@ if [ -n "$rtw88_ko" ]; then
     printf '  OK   %-46s (%s)\n' "$rtw88_ko" "出货的 Wi-Fi 驱动（rtw88 回移模块）"
     check_exists "/lib/firmware/rtw88/rtw8723b_fw.bin" "rtw88 固件（缺它 rtw88 起不来）"
     check_exists "/etc/modprobe.d/qm1-rtw88-8723bs.conf" "rtw88 模块参数与树内 staging 的 blacklist"
+    # ★ modprobe 是靠 modules.dep 找模块的：文件在 extra/ 下但索引里没有 ⇒
+    #   "modprobe rtw88_qm1" 报 "not found in directory"，驱动永远加载不上，
+    #   而镜像构建全程绿灯。这条断言就是为拦住那种情况而存在的。
+    check_content "/lib/modules/$KVER/modules.dep" 'rtw88_qm1\.ko' \
+        "模块索引 modules.dep 里有 rtw88_qm1（否则 modprobe 找不到它）"
 else
     printf '  WARN %-46s (%s)\n' "/lib/modules/*/extra/rtw88/*.ko" "镜像里没有 rtw88 回移模块"
     # 没有 rtw88 时，树外补丁模块是唯一可用的根治路径
@@ -148,6 +153,8 @@ else
        && debugfs -R "stat /lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "$IMG" >/dev/null 2>&1; then
         printf '  OK   %-46s (%s)\n' \
             "/lib/modules/$KVER/extra/rtl8723bs/r8723bs_qm1.ko" "出货的 Wi-Fi 驱动（打补丁的树外 staging 模块）"
+        check_content "/lib/modules/$KVER/modules.dep" 'r8723bs_qm1\.ko' \
+            "模块索引 modules.dep 里有 r8723bs_qm1（否则 modprobe 找不到它）"
     else
         printf '  FAIL %-46s (%s)\n' "/lib/modules/*/extra/*/*.ko" \
             "镜像里既没有 rtw88 回移模块，也没有打了补丁的 r8723bs_qm1 —— 内置 Wi-Fi 无法工作"

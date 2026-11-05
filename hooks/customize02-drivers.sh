@@ -258,6 +258,10 @@ if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
         "$_img_kver"*) : ;;
         *) die "Wi-Fi 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
     esac
+    # ★ 模块索引里必须有它（modprobe 靠 modules.dep 找模块）
+    if ! grep -q "r8723bs_qm1\.ko" "$TARGET/lib/modules/$_img_kver/modules.dep" 2>/dev/null; then
+        die "模块索引 modules.dep 里没有 r8723bs_qm1 —— modprobe 会找不到它（检查 depmod 是否对 $_img_kver 跑过）"
+    fi
     log "Wi-Fi 模块 vermagic：$_vm（与镜像内核一致）"
     # modules-load.d 里要改成加载打了补丁的那个
     sed -i 's/^r8723bs$/r8723bs_qm1/' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
@@ -289,7 +293,16 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     fi
     rm -f "$TARGET/tmp/$_deb_name"
     # 刷新模块索引：树外模块装在 extra/ 下，模块名要能被 modprobe 解析出来。
-    chroot "$TARGET" depmod -a || warn "depmod -a 失败，模块索引可能不完整"
+    #
+    # ★ 必须显式给内核版本：depmod 不带版本参数时用的是**当前运行内核**的
+    #   版本（uname -r）。在 chroot 里 uname -r 是构建机的内核（CI runner 的
+    #   6.11.x 之类），于是 depmod 去刷新一个根本不存在的 /lib/modules/<构建机内核>/，
+    #   目标内核的 modules.dep 根本没被更新 —— 后果是
+    #   "modprobe rtw88_qm1" 报 "not found in directory"，驱动永远加载不上，
+    #   而镜像构建照样"成功"。这正是 CI 日志里那句
+    #   "qm1-rtw88-8723bs: depmod -a failed" 背后真正的问题。
+    chroot "$TARGET" depmod -a "$_img_kver" \
+        || die "depmod -a $_img_kver 失败 —— 模块索引没刷新，modprobe 会找不到树外模块"
     # 模块名有三种：上游整树回移是 rtw88_qm1（单模块），上游芯片回移是
     # rtw88_8723bs，vendor 树是 rtw_8723bs。
     #
@@ -307,6 +320,12 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
         fi
     done
     [ -n "$_sdio_mod" ] || die "装完 deb 但镜像里没有 rtw88_qm1 / rtw88_8723bs / rtw_8723bs 模块"
+    # ★ 模块索引里必须有它 —— modprobe 是靠 modules.dep 找模块的。
+    #   文件在 extra/rtw88/ 下但索引里没有 ⇒ "modprobe rtw88_qm1" 会报
+    #   "not found in directory"，驱动永远加载不上，而构建全程绿灯。
+    if ! grep -q "/$_sdio_mod\.ko" "$TARGET/lib/modules/$_img_kver/modules.dep" 2>/dev/null; then
+        die "模块索引 modules.dep 里没有 $_sdio_mod —— modprobe 会找不到它（检查 depmod 是否对 $_img_kver 跑过）"
+    fi
     _vm="$(modinfo -F vermagic "$_sdio_ko" 2>/dev/null | awk '{print $1}')"
     if [ -z "$_vm" ]; then
         # 兜底：直接从 .ko 的 .modinfo 段里读
