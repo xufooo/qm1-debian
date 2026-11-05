@@ -1,7 +1,7 @@
 From 4f91d7d1f0266517b2e851f59c72d449d6a40097 Mon Sep 17 00:00:00 2001
 From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:15:21 +0800
-Subject: [PATCH 3/5] rtl8723bs: reinit the TX completions to keep
+Subject: [PATCH 3/6] rtl8723bs: reinit the TX completions to keep
  complete()/wait counts balanced
 
 The xmit thread waits for SdioXmitStart, which is completed every time a

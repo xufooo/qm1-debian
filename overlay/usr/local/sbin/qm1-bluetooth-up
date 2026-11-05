@@ -1,0 +1,62 @@
+#!/bin/sh
+# qm1-bluetooth-up -- make sure the Bluetooth controller shows up, and say so
+# loudly when it does not.
+#
+# The controller is the BT half of the Realtek RTL8723BS combo chip, exposed
+# by the firmware as an ACPI UART (HID OBDA8723 / OBDA0623).  The kernel
+# driver hci_uart (with the 3WIRE protocol built in) binds it, and btrtl
+# pushes the vendor firmware (rtl_bt/rtl8723bs_fw.bin plus
+# rtl_bt/rtl8723bs_config-OBDA8723.bin).
+#
+# A missing hci0 is NOT a boot-blocking failure: bluez would only report
+# "no adapter", and the rest of the machine has to come up.  But it must not
+# be silent either -- an invisible failure looks like "the Bluetooth function
+# is missing" and nobody knows where to look.  So we leave a marker file and
+# a journal entry with the likely cause.
+
+set -u
+
+MARKER=/run/qm1-bluetooth.failed
+LOG_TAG=qm1-bluetooth
+
+log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; printf '%s\n' "$*" >&2 || true; }
+
+rm -f "$MARKER"
+
+modprobe hci_uart 2>/dev/null || true
+modprobe btrtl 2>/dev/null || true
+
+i=0
+while [ "$i" -lt 30 ]; do
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+        log "hci0 is up"
+        exit 0
+    fi
+    i=$((i + 1))
+    sleep 1
+done
+
+# No hci0.  Find out who owns the Bluetooth ACPI node: if 8250 claimed it,
+# the port is a plain 16550 and hci_uart can never bind it.
+owner=""
+for dev in /sys/bus/acpi/devices/*; do
+    [ -e "$dev" ] || continue
+    hid="$(cat "$dev/hid" 2>/dev/null || true)"
+    case "$hid" in
+        OBDA8723|OBDA0623)
+            owner="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")"
+            ;;
+    esac
+done
+
+{
+    echo "time=$(date -u +%FT%TZ)"
+    echo "acpi_owner=${owner:-none}"
+    echo "firmware=$( [ -f /lib/firmware/rtl_bt/rtl8723bs_fw.bin ] && echo present || echo missing )"
+    echo "serdev_driver=$( [ -d /sys/bus/serio/drivers/hci_uart_h5 ] && echo registered || echo absent )"
+    echo "hint=if acpi_owner is 8250*, blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf"
+} >"$MARKER"
+chmod 0644 "$MARKER" 2>/dev/null || true
+
+log "no hci0 after 30s; ACPI owner=${owner:-none} (details in $MARKER)"
+exit 0

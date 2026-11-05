@@ -1,0 +1,100 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Wed, 5 Nov 2026 23:30:00 +0800
+Subject: [PATCH 6/6] rtl8723bs: protect the TX free page accounting with the
+ lock the driver already has
+
+The driver keeps a software mirror of the firmware's free TX page counter
+in hal_com_data.SdioTxFIFOFreePage[], together with a spinlock
+(SdioTxFIFOFreePageLock) that the vendor wrote for exactly this purpose --
+but then commented the lock out and left the counter unprotected.
+
+Two writers touch the counter:
+
+  * hal/hal_sdio.c:rtw_hal_sdio_update_tx_freepage() subtracts the pages
+    it is about to hand to the firmware.  That is a read-modify-write of
+    one byte.
+  * hal/sdio_ops.c:HalQueryTxBufferStatus8723BSdio() overwrites the whole
+    four byte array with the value read back from the hardware
+    (SDIO_REG_FREE_TXPG).
+
+If the two interleave, the read-modify-write can compute its result from
+a stale value and write it back after the four byte overwrite: the driver
+then believes in TX pages that the firmware has already given away.  The
+consequence is the same failure this whole series is about -- the TX path
+runs out of pages and stops.
+
+Restore the lock the driver already had around the accounting and extend
+it to the hardware query, so that the two writers cannot interleave.  The
+SDIO command itself stays outside the lock, because sdio_local_cmd53_read4byte()
+may sleep and a spinlock may not be held across a sleeping call.
+
+Call sites and their context were checked: the two callers of
+HalQueryTxBufferStatus8723BSdio() (hal/rtl8723bs_xmit.c, TX worker, and
+hal/sdio_halinit.c, driver init) and the callers of the two accounting
+helpers run in process context, so spin_lock_bh() is the right primitive
+and no lock is taken recursively.
+
+This is the last of the hardware level races in the TX page accounting
+that this series does not cover (see the README for the two known
+defects that remain).
+
+---
+ drivers/staging/rtl8723bs/hal/hal_sdio.c | 16 ++++++++++++----
+ drivers/staging/rtl8723bs/hal/sdio_ops.c | 10 ++++++++-
+ 2 files changed, 20 insertions(+), 10 deletions(-)
+
+--- a/drivers/staging/rtl8723bs/hal/hal_sdio.c
++++ b/drivers/staging/rtl8723bs/hal/hal_sdio.c
+@@ -23,8 +23,14 @@
+ )
+ {
+ 	struct hal_com_data	*pHalData = GET_HAL_DATA(padapter);
++	u8 have;
+ 
+-	if ((pHalData->SdioTxFIFOFreePage[PageIdx]+pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX]) >= (RequiredPageNum))
++	spin_lock_bh(&pHalData->SdioTxFIFOFreePageLock);
++	have = (u8)(pHalData->SdioTxFIFOFreePage[PageIdx]
++		+ pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX]);
++	spin_unlock_bh(&pHalData->SdioTxFIFOFreePageLock);
++
++	if (have >= RequiredPageNum)
+ 		return true;
+ 	else
+ 		return false;
+@@ -39,7 +45,7 @@
+ 	u8 RequiredPublicFreePgNum = 0;
+ 	/* _irqL irql; */
+ 
+-	/* spin_lock_bh(&pHalData->SdioTxFIFOFreePageLock); */
++	spin_lock_bh(&pHalData->SdioTxFIFOFreePageLock);
+ 
+ 	DedicatedPgNum = pHalData->SdioTxFIFOFreePage[PageIdx];
+ 	if (RequiredPageNum <= DedicatedPgNum) {
+@@ -50,7 +56,7 @@
+ 		pHalData->SdioTxFIFOFreePage[PUBLIC_QUEUE_IDX] -= RequiredPublicFreePgNum;
+ 	}
+ 
+-	/* spin_unlock_bh(&pHalData->SdioTxFIFOFreePageLock); */
++	spin_unlock_bh(&pHalData->SdioTxFIFOFreePageLock);
+ }
+ 
+ void rtw_hal_set_sdio_tx_max_length(
+--- a/drivers/staging/rtl8723bs/hal/sdio_ops.c
++++ b/drivers/staging/rtl8723bs/hal/sdio_ops.c
+@@ -992,7 +992,15 @@
+ 
+ 	numof_free_page = sdio_local_cmd53_read4byte(adapter, SDIO_REG_FREE_TXPG);
+ 
++	/* The SDIO command above must not run under the lock (it may sleep),
++	 * so only the counter update itself is protected.  Without this the
++	 * four-byte overwrite can interleave with the read-modify-write in
++	 * rtw_hal_sdio_update_tx_freepage() and leave the driver believing in
++	 * free pages that the firmware has already handed out.
++	 */
++	spin_lock_bh(&hal->SdioTxFIFOFreePageLock);
+ 	memcpy(hal->SdioTxFIFOFreePage, &numof_free_page, 4);
++	spin_unlock_bh(&hal->SdioTxFIFOFreePageLock);
+ 
+ 	return true;
+ }

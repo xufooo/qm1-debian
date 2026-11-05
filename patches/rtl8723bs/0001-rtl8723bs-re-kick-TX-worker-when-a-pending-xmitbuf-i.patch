@@ -1,7 +1,7 @@
 From 7e836158fe4696bb042d3f4d2edc7aba036a03de Mon Sep 17 00:00:00 2001
 From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:15:20 +0800
-Subject: [PATCH 1/5] rtl8723bs: re-kick TX worker when a pending xmitbuf is
+Subject: [PATCH 1/6] rtl8723bs: re-kick TX worker when a pending xmitbuf is
  put back
 
 rtl8723_dequeue_writeport() puts the xmitbuf back to the head of the

@@ -58,6 +58,7 @@ jobs:
           shellcheck -s sh -S warning \
             overlay/usr/local/sbin/qm1-hardware-fixups \
             overlay/usr/local/sbin/qm1-health-collect \
+            overlay/usr/local/sbin/qm1-bluetooth-up \
             overlay/usr/local/bin/qm1-selftest \
             overlay/usr/local/bin/qm1-stress
           echo "overlay shellcheck clean"
@@ -140,6 +141,8 @@ jobs:
             overlay/etc/systemd/system/bluetooth.service.d/qm1.conf \
             overlay/etc/systemd/system/qm1-bluetooth.service \
             overlay/etc/systemd/system/qm1-install.service \
+            overlay/usr/local/sbin/qm1-bluetooth-up \
+            overlay/etc/udev/rules.d/60-qm1-emmc-power.rules \
             scripts/grub.cfg.example \
             scripts/grub-installer.cfg.example \
             scripts/prepare-provision.sh \

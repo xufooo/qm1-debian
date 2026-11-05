@@ -1,7 +1,7 @@
 From a4d42419306103554011dbb4a1a9067a61dc5dab Mon Sep 17 00:00:00 2001
 From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:15:21 +0800
-Subject: [PATCH 5/5] rtl8723bs: release the frame and account the drop when
+Subject: [PATCH 5/6] rtl8723bs: release the frame and account the drop when
  xmit coalescing fails
 
 rtw_xmitframe_coalesce() can fail, e.g. when the wlan header cannot be

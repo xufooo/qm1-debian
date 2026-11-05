@@ -1,0 +1,16 @@
+# QM1: keep the eMMC SD host out of runtime suspend.
+#
+# sdhci-acpi enables runtime suspend when the firmware sets
+# SDHCI_ACPI_RUNTIME_PM.  When it suspends mid-transfer the request is lost and
+# the card ends up with a timed-out command or a failed reset ("Reset never
+# completed" on the console).  The kernel exposes the switch per device, so we
+# turn it off at the device level.
+#
+# This has to be a udev rule and not a service: the first read of the root
+# filesystem happens during the initramfs stage, long before any normal
+# service runs.  A unit at multi-user would always be too late.
+#
+# 80860F14:00 is the eMMC on this board.  The second rule covers any other
+# ACPI SD host by driver, so the rule does not depend on the exact HID.
+ACTION=="add", SUBSYSTEM=="platform", KERNEL=="80860F14:00", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"
+ACTION=="add", SUBSYSTEM=="platform", DRIVERS=="sdhci-acpi", ATTR{power/control}="on", ATTR{power/autosuspend_delay_ms}="-1"

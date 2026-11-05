@@ -91,6 +91,8 @@ fi
 # 内核在 MMC 卡的 device/type 里给出 "MMC"(eMMC) / "SD"(SD 卡)，据此判定。
 mmc_summary=""
 emmc_blk=""
+emmc_card_dev=""
+sd_blk=""
 for b in /sys/class/block/mmcblk*; do
     [ -e "$b" ] || continue
     _blk="$(basename "$b")"
@@ -99,7 +101,11 @@ for b in /sys/class/block/mmcblk*; do
     [ -n "$_dev" ] && [ -r "$_dev/type" ] && _kind="$(cat "$_dev/type" 2>/dev/null || echo '?')"
     _cap="$(cat "$b/size" 2>/dev/null | awk '{printf "%.1fGiB", $1*512/1024/1024/1024}')"
     mmc_summary="$mmc_summary ${_blk}[${_kind} ${_cap:-?}]"
-    [ "$_kind" = "MMC" ] && emmc_blk="/dev/$_blk"
+    if [ "$_kind" = "MMC" ]; then
+        emmc_blk="/dev/$_blk"
+        emmc_card_dev="$_dev"
+    fi
+    [ "$_kind" = "SD" ] && sd_blk="$_blk"
 done
 if [ -n "$emmc_blk" ]; then
     _parts="$(lsblk -ndo NAME "$emmc_blk" 2>/dev/null | tail -n +2 | tr '\n' ' ')"
@@ -531,14 +537,55 @@ else
     row WARN "CPU 调频" "没有 cpufreq 策略（CPU 可能锁在 1.3GHz）"
 fi
 
-# eMMC runtime PM
-pc="$(cat /sys/devices/platform/80860F14:00/power/control 2>/dev/null || true)"
-if [ "$pc" = "on" ]; then
-    row PASS "eMMC runtime PM" "已关闭自动挂起（control=on）"
-elif [ -n "$pc" ]; then
-    row WARN "eMMC runtime PM" "control=$pc（自动挂起仍开）"
+# eMMC runtime PM —— 动态发现主机，不再写死 ACPI 路径。
+# 写死路径的坏处：固件换了 HID 就静默读不到，读不到时还要区分
+# 「这台机器根本没开 runtime PM（无风险）」和「开关没关（有掉卡风险）」。
+emmc_host=""
+if [ -n "$emmc_card_dev" ]; then
+    _rel="${emmc_card_dev#/sys/devices/}"
+    case "$_rel" in
+        */*) : ;;
+        *) _rel="" ;;
+    esac
+    if [ -n "$_rel" ]; then
+        _bus="${_rel%%/*}"
+        _rest="${_rel#*/}"
+        case "$_rest" in
+            */*) _devname="${_rest%%/*}" ;;
+            *) _devname="" ;;
+        esac
+        [ -n "$_devname" ] && emmc_host="/sys/devices/$_bus/$_devname"
+    fi
+fi
+if [ -z "$emmc_host" ]; then
+    row WARN "eMMC runtime PM" "找不到 eMMC 的平台设备（无法确认是否已退出 runtime suspend）"
+elif [ ! -e "$emmc_host/power/control" ]; then
+    row INFO "eMMC runtime PM" "主机 $emmc_host 没有 power/control（未启用 runtime PM，无掉卡风险）"
 else
-    row INFO "eMMC runtime PM" "读不到该 ACPI 主机（固件未开 runtime PM 则本就无风险）"
+    pc="$(cat "$emmc_host/power/control" 2>/dev/null || true)"
+    asd="$(cat "$emmc_host/power/autosuspend_delay_ms" 2>/dev/null || true)"
+    if [ "$pc" = "on" ] && { [ -z "$asd" ] || [ "$asd" = "-1" ]; }; then
+        row PASS "eMMC runtime PM" "已关闭自动挂起（$emmc_host：control=on${asd:+，autosuspend_delay_ms=$asd}）"
+    else
+        row WARN "eMMC runtime PM" "control=${pc:-未知} autosuspend_delay_ms=${asd:-未知}（$emmc_host，自动挂起仍开 → 可能在读写中掉卡）"
+    fi
+fi
+
+# microSD 卡检测：上游 sdhci-acpi 的 CD pull-up quirk 只对
+# ASUSTeK + T100TA 生效；这块板子若不匹配，卡槽就是插了也认不出。
+if [ -n "$sd_blk" ]; then
+    row PASS "microSD 卡" "检测到 SD 卡（$sd_blk）"
+else
+    dmi_v="$(cat /sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null || echo '')"
+    dmi_p="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo '')"
+    case "$dmi_v:$dmi_p" in
+        *ASUSTeK*:*T100TA*)
+            row WARN "microSD 卡" "未检出 SD 卡（本板匹配上游 quirk，若卡已插请检查 DSDT 的 CD 引脚）"
+            ;;
+        *)
+            row INFO "microSD 卡" "未检出 SD 卡（上游 CD pull-up quirk 只匹配 ASUSTeK+T100TA，本机=$dmi_v / $dmi_p）"
+            ;;
+    esac
 fi
 
 # 存储设备清单与寿命
@@ -574,18 +621,52 @@ for d in /sys/bus/pci/drivers/ehci-pci /sys/bus/pci/drivers/ohci-pci; do
 done
 row INFO "USB 控制器" "xHCI=${usb3} EHCI/OHCI=${usb2}"
 
-# 无线与蓝牙
-if mod_loaded rtw_8723bs; then
-    row PASS "Wi-Fi 驱动" "rtw_8723bs（rtw88 树外模块）"
-elif mod_loaded r8723bs; then
-    row PASS "Wi-Fi 驱动" "r8723bs（发行版 staging 模块）"
+# 无线与蓝牙（模块名以上面算出的 wlan_mod 为准，不在这里重新猜一套）
+if [ -n "$wlan_mod" ]; then
+    case "$wlan_mod" in
+        *rtw88_qm1*|*rtw88_8723bs*|*rtw_8723bs*)
+            row PASS "Wi-Fi 驱动" "${wlan_mod}（rtw88 树外模块）"
+            ;;
+        *r8723bs_qm1*)
+            row PASS "Wi-Fi 驱动" "${wlan_mod}（打了补丁的树外 staging 模块）"
+            ;;
+        *r8723bs*)
+            row WARN "Wi-Fi 驱动" "${wlan_mod}（发行版 staging 模块：有永久卡死路径，只是回退方案）"
+            ;;
+        *)
+            row WARN "Wi-Fi 驱动" "${wlan_mod}（不是本项目预期的模块名）"
+            ;;
+    esac
+    # 树内 staging 与树外模块都认同一个 SDIO id，必须确认实际绑定的是哪一个
+    if [ -e /sys/bus/sdio/drivers/rtl8723bs ] && [ -n "${wlan_mod##*:}" ]; then
+        case "$wlan_mod" in
+            *r8723bs*) ;;
+            *) row WARN "Wi-Fi 绑定" "树内 staging r8723bs 也注册在 SDIO 总线上，确认 wlan0 绑的是出货模块" ;;
+        esac
+    fi
+elif mod_loaded rtw88_qm1 || mod_loaded r8723bs_qm1 || mod_loaded r8723bs; then
+    row WARN "Wi-Fi 驱动" "模块已加载但没有无线接口（udev/modprobe 时序问题，看 dmesg）"
 else
     row WARN "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载"
 fi
 if [ -d /sys/class/bluetooth/hci0 ]; then
     row PASS "蓝牙" "hci0 已出现"
 else
-    row WARN "蓝牙" "没有 hci0（厂商固件下发可能没成功）"
+    bt_owner=""
+    for _dev in /sys/bus/acpi/devices/*; do
+        [ -e "$_dev" ] || continue
+        _hid="$(cat "$_dev/hid" 2>/dev/null || true)"
+        case "$_hid" in
+            OBDA8723|OBDA0623)
+                bt_owner="$(basename "$(readlink -f "$_dev/driver" 2>/dev/null || echo none)")"
+                ;;
+        esac
+    done
+    if [ -n "$bt_owner" ]; then
+        row WARN "蓝牙" "没有 hci0（蓝牙 ACPI 节点被 '$bt_owner' 占用；若是 8250 需 blacklist 8250_generic/8250_serial）"
+    else
+        row WARN "蓝牙" "没有 hci0（固件未下发成功或 DSDT 未把 OBDA8723 暴露成 serdev 口）"
+    fi
 fi
 
 # 时钟同步

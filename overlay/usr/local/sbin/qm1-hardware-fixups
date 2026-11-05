@@ -7,6 +7,12 @@
 # or brings back a capability that the stock configuration leaves off.
 #
 # Override with /etc/default/qm1-hardware (see the file for the knobs).
+#
+# NOTE about timing: this unit runs at multi-user, which is *late* for the
+# eMMC (the root filesystem has already been read from it by then).  The
+# runtime-suspend switch therefore also lives in a udev rule
+# (/etc/udev/rules.d/60-qm1-emmc-power.rules) which is applied as soon as the
+# host is enumerated, i.e. already during the initramfs stage.
 
 set -eu
 
@@ -25,6 +31,9 @@ Qm1_MAX_FREQ_PERC="${Qm1_MAX_FREQ_PERC:-}"
 Qm1_EMMC_RUNTIME_PM="${Qm1_EMMC_RUNTIME_PM:-off}"
 
 log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" 2>/dev/null >>"$LOG" || true; }
+# Also to the journal, so a failure is visible without tailing a file.
+jlog() { logger -t qm1-hardware-fixups -- "$*" 2>/dev/null || true; }
+logboth() { log "$*"; jlog "$*"; }
 
 # ---------------------------------------------------------------------------
 # 1. eMMC: keep the SD host awake
@@ -35,28 +44,93 @@ log() { printf '%s %s\n' "$(date -u +%FT%TZ)" "$*" 2>/dev/null >>"$LOG" || true;
 # the card then reports a timeout or a failed reset.  The kernel exposes the
 # switch per device, so we turn it off at the device level instead of
 # blacklisting a module.
+#
+# The host is *discovered*, not hardcoded: on this machine the eMMC sits on
+# ACPI 80860F14:00 and the microSD slot on 80860F14:01, but a hardcoded path
+# that silently stops matching would look like "nothing to do".  Instead we
+# walk the MMC block devices, keep the one whose device type is MMC (the
+# eMMC -- SD cards report SD and the Wi-Fi card reports SDIO), and follow it
+# up to the platform device that owns the host.
 # ---------------------------------------------------------------------------
-emmc_fixup() {
-    acpi_host="/sys/devices/platform/80860F14:00"
-    [ -d "$acpi_host" ] || { log "eMMC host $acpi_host not present"; return 0; }
-    [ -d "$acpi_host/mmc_host" ] || { log "$acpi_host is not an SD host"; return 0; }
 
-    if [ "$Qm1_EMMC_RUNTIME_PM" = "off" ]; then
-        if [ -w "$acpi_host/power/control" ]; then
-            before=$(cat "$acpi_host/power/control")
-            echo on >"$acpi_host/power/control" 2>/dev/null || true
-            after=$(cat "$acpi_host/power/control")
+# Print the platform device that hosts the eMMC, if any.
+emmc_host_platform() {
+    for blk in /sys/class/block/mmcblk*; do
+        [ -e "$blk" ] || continue
+        card="$(readlink -f "$blk/device" 2>/dev/null || true)"
+        [ -n "$card" ] || continue
+        type="$(cat "$card/type" 2>/dev/null || true)"
+        [ "$type" = "MMC" ] || continue
+        # .../platform/80860F14:00/mmc_host/mmc1/mmc1:0001  ->  the bus and
+        # the device below it are the platform device that owns the host.
+        rel="${card#/sys/devices/}"
+        case "$rel" in
+            */*) : ;;
+            *) continue ;;
+        esac
+        bus="${rel%%/*}"
+        rest="${rel#*/}"
+        case "$rest" in
+            */*) dev="${rest%%/*}" ;;
+            *) continue ;;
+        esac
+        printf '/sys/devices/%s/%s' "$bus" "$dev"
+        return 0
+    done
+    return 1
+}
+
+emmc_fixup() {
+    host="$(emmc_host_platform || true)"
+    if [ -z "$host" ]; then
+        logboth "eMMC: no MMC-type block device found -- the eMMC host is NOT protected against runtime suspend"
+        logboth "eMMC: check 'ls /sys/class/block' and 'cat /sys/class/block/mmcblk*/device/type'"
+        return 0
+    fi
+    log "eMMC: host platform device = $host"
+
+    if [ "$Qm1_EMMC_RUNTIME_PM" != "off" ]; then
+        log "eMMC: runtime PM left as configured ($Qm1_EMMC_RUNTIME_PM)"
+        return 0
+    fi
+
+    rc=0
+    if [ -w "$host/power/control" ]; then
+        before="$(cat "$host/power/control" 2>/dev/null || echo unknown)"
+        if echo on >"$host/power/control" 2>/dev/null; then
+            after="$(cat "$host/power/control" 2>/dev/null || echo unknown)"
             if [ "$before" != "$after" ]; then
-                log "eMMC runtime PM: $before -> $after"
+                logboth "eMMC runtime PM: control $before -> $after"
             else
                 log "eMMC runtime PM: already $after"
             fi
+        else
+            logboth "eMMC runtime PM: could not write $host/power/control (still $before)"
+            rc=1
         fi
-        # autosuspend_delay_ms = -1 means "never suspend automatically"
-        if [ -w "$acpi_host/power/autosuspend_delay_ms" ]; then
-            echo -1 >"$acpi_host/power/autosuspend_delay_ms" 2>/dev/null || true
-        fi
+    else
+        logboth "eMMC runtime PM: $host/power/control is not writable"
+        rc=1
     fi
+
+    # autosuspend_delay_ms = -1 means "never suspend automatically"
+    if [ -w "$host/power/autosuspend_delay_ms" ]; then
+        if echo -1 >"$host/power/autosuspend_delay_ms" 2>/dev/null; then
+            got="$(cat "$host/power/autosuspend_delay_ms" 2>/dev/null || echo unknown)"
+            if [ "$got" = "-1" ]; then
+                log "eMMC runtime PM: autosuspend_delay_ms = -1"
+            else
+                logboth "eMMC runtime PM: autosuspend_delay_ms = $got (expected -1)"
+                rc=1
+            fi
+        else
+            logboth "eMMC runtime PM: could not write $host/power/autosuspend_delay_ms"
+            rc=1
+        fi
+    else
+        log "eMMC runtime PM: $host/power/autosuspend_delay_ms not writable (nothing to disable)"
+    fi
+    return "$rc"
 }
 
 # ---------------------------------------------------------------------------
@@ -107,14 +181,16 @@ audio_fixup() {
 # ---------------------------------------------------------------------------
 # 4. Bluetooth: make sure the UART controller is bound to hci_uart
 #
-# The ACPI device (OBDA8723) already has a matching alias in hci_uart, so the
-# controller shows up as soon as the module is loaded.  The firmware itself
-# comes from the distribution package (rtl_bt/rtl8723bs_fw.bin) and is pushed
-# by the kernel btrtl driver -- qm1-bluetooth.service only waits for hci0.
+# The ACPI device (OBDA8723 / OBDA0623) already has a matching alias in
+# hci_uart, so the controller shows up as soon as the module is loaded.  The
+# firmware itself comes from the distribution package (rtl_bt/rtl8723bs_fw.bin)
+# and is pushed by the kernel btrtl driver -- qm1-bluetooth.service only waits
+# for hci0.
 #
 # The failure mode to watch for: if 8250_generic claimed the same ACPI node
 # first, hci_uart never gets the port and the Bluetooth function is simply
-# missing (no error, just no hci0).  Detect that and say so.
+# missing (no error, just no hci0).  Detect that and say so: the ACPI device
+# directory carries the HID and a driver symlink, so we can tell who won.
 # ---------------------------------------------------------------------------
 bluetooth_fixup() {
     modprobe hci_uart 2>/dev/null || true
@@ -123,22 +199,39 @@ bluetooth_fixup() {
         return 0
     fi
 
-    # No hci device.  Check whether a plain 8250 UART grabbed the Bluetooth
-    # ACPI node (its platform path carries the HID, e.g. OBDA8723:00).
-    stolen=""
-    for tty in /sys/class/tty/ttyS*; do
-        [ -e "$tty" ] || continue
-        dev="$(readlink -f "$tty/device" 2>/dev/null || true)"
-        case "$dev" in
-            *OBDA8723*|*obda8723*) stolen="$tty ($dev)" ;;
+    # No hci device.  Find the Bluetooth ACPI node and see who owns it.
+    bt_acpi=""
+    bt_driver=""
+    for dev in /sys/bus/acpi/devices/*; do
+        [ -e "$dev" ] || continue
+        hid="$(cat "$dev/hid" 2>/dev/null || true)"
+        case "$hid" in
+            OBDA8723|OBDA0623) bt_acpi="$dev"; bt_driver="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")" ;;
         esac
     done
-    if [ -n "$stolen" ]; then
-        log "bluetooth: NO hci device, and the Bluetooth UART is held by a 8250 serial port: $stolen"
-        log "bluetooth: remedy = blacklist 8250_generic (and 8250_serial) in /etc/modprobe.d/qm1-hardware.conf, then reload hci_uart"
+
+    if [ -n "$bt_acpi" ]; then
+        logboth "bluetooth: NO hci device; ACPI node $bt_acpi is bound to driver '$bt_driver'"
+        case "$bt_driver" in
+            8250*|serial*)
+                logboth "bluetooth: remedy = blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf, then reload hci_uart"
+                ;;
+            hci_uart*)
+                logboth "bluetooth: hci_uart owns the node but no hci device appeared -- check 'dmesg | grep -i hci_uart' and the firmware blob"
+                ;;
+            none)
+                logboth "bluetooth: the ACPI node has no driver at all -- the port is probably not exposed as a serdev port (a DSDT override is needed)"
+                ;;
+            *)
+                logboth "bluetooth: unexpected owner '$bt_driver' on the Bluetooth ACPI node"
+                ;;
+        esac
     else
-        log "bluetooth: no hci device yet (the ACPI node may not be exposed as a serdev port)"
-        log "bluetooth: check 'dmesg | grep -i serdev' -- if the port is missing entirely a DSDT override is needed"
+        logboth "bluetooth: no hci device and no OBDA8723/OBDA0623 ACPI node -- the DSDT does not expose the Bluetooth UART"
+    fi
+
+    if [ -d /sys/bus/serio/drivers/hci_uart_h5 ]; then
+        log "bluetooth: the hci_uart_h5 serdev driver is registered"
     fi
 }
 
@@ -168,8 +261,8 @@ dmi_report() {
             log "dmi: upstream sdhci-acpi card-detect pull-up quirk applies to this board"
             ;;
         *)
-            log "dmi: the sdhci-acpi card-detect quirk matches 'ASUSTeK COMPUTER INC.'+T100TA only"
-            log "dmi: on this board it does NOT apply, so the microSD slot may stay undetected"
+            logboth "dmi: the sdhci-acpi card-detect quirk matches 'ASUSTeK COMPUTER INC.'+T100TA only"
+            logboth "dmi: on this board it does NOT apply, so the microSD slot may stay undetected"
             ;;
     esac
 
@@ -183,7 +276,7 @@ dmi_report() {
     return 0
 }
 
-emmc_fixup
+emmc_fixup || logboth "eMMC fixup reported a problem (see above)"
 cpufreq_fixup
 audio_fixup
 bluetooth_fixup

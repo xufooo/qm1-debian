@@ -498,6 +498,37 @@ jobs:
           done
           echo "OK   硬件修正脚本、systemd 单元与自启链接全部就位"
 
+      - name: Assert the eMMC runtime suspend switch is applied early (udev rule)
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          RULE="$ROOT/etc/udev/rules.d/60-qm1-emmc-power.rules"
+          # 开机第一次读根盘发生在 initramfs 阶段，任何 service 都来不及。
+          # 关掉 eMMC 主机的 runtime suspend 必须靠 udev 规则。
+          [ -f "$RULE" ] \
+            || { echo "::error::镜像里缺少 $RULE（eMMC 会在读写中掉卡）"; exit 1; }
+          grep -q 'ATTR{power/control}="on"' "$RULE" \
+            || { echo "::error::udev 规则没有把 power/control 设成 on"; exit 1; }
+          grep -q 'ATTR{power/autosuspend_delay_ms}="-1"' "$RULE" \
+            || { echo "::error::udev 规则没有把 autosuspend_delay_ms 设成 -1"; exit 1; }
+          grep -q '80860F14:00' "$RULE" \
+            || { echo "::error::udev 规则没有覆盖 eMMC 的 ACPI 主机 80860F14:00"; exit 1; }
+          echo "OK   eMMC runtime suspend 的 udev 规则就位"
+
+      - name: Assert the Bluetooth helper reports failures instead of hiding them
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          [ -x "$ROOT/usr/local/sbin/qm1-bluetooth-up" ] \
+            || { echo "::error::镜像里没有 /usr/local/sbin/qm1-bluetooth-up"; exit 1; }
+          grep -q '/run/qm1-bluetooth.failed' "$ROOT/usr/local/sbin/qm1-bluetooth-up" \
+            || { echo "::error::蓝牙辅助脚本没有写失败标记文件"; exit 1; }
+          grep -q 'OBDA8723' "$ROOT/usr/local/sbin/qm1-bluetooth-up" \
+            || { echo "::error::蓝牙辅助脚本没有探测 OBDA8723（8250 抢占检测）"; exit 1; }
+          grep -q 'qm1-bluetooth-up' "$ROOT/etc/systemd/system/qm1-bluetooth.service" \
+            || { echo "::error::qm1-bluetooth.service 没有调用 qm1-bluetooth-up"; exit 1; }
+          echo "OK   蓝牙等待与失败上报就位"
+
       - name: Assert the time sync and the bluetooth stack are enabled
         run: |
           set -euo pipefail

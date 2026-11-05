@@ -1,13 +1,13 @@
 # rtl8723bs (Debian 13 kernel 6.12) — TX stall fixes
 
-Five self-contained patches for the staging driver `r8723bs` (Realtek RTL8723BS,
+Six self-contained patches for the staging driver `r8723bs` (Realtek RTL8723BS,
 SDIO) as shipped in Debian 13, kernel source package `linux 6.12.113-1`
 (`drivers/staging/rtl8723bs/`).
 
 * Base tree: Debian `linux` source `6.12.113-1`, file `drivers/staging/rtl8723bs/`.
   All line numbers below refer to that unmodified base tree.
 * The patches are a series: apply them **in order** with GNU patch
-  (`patch --batch --forward -p1 < 0001-*.patch`, then 0002 … 0005).
+  (`patch --batch --forward -p1 < 0001-*.patch`, then 0002 … 0006).
   0002 and 0003 share the context added by 0001 in `hal/rtl8723bs_xmit.c`, so
   `git apply` in strict mode fails on 0002 (it refuses the shifted context);
   GNU patch applies the series cleanly.
@@ -15,6 +15,9 @@ SDIO) as shipped in Debian 13, kernel source package `linux 6.12.113-1`
   this machine is macOS and has no Linux build environment. The patches were
   verified by applying them to a pristine 6.12.113-1 copy of the driver and
   comparing the result with the patched tree byte for byte.
+  The series was re-verified against the exact Debian 6.12.113-1 files
+  (`patch --dry-run --batch --strip=1` on all six: zero fuzz, zero offsets,
+  zero rejects).
 
 ## 0001 — rtl8723bs: re-kick TX worker when a pending xmitbuf is put back
 
@@ -48,6 +51,10 @@ the TX path stalls permanently.
 * The wait for the kick becomes
   `wait_for_completion_interruptible_timeout(…, 100 ms)`, so a lost kick cannot
   stall the TX path forever.
+  The retry re-reads the free page count from the hardware
+  (`HalQueryTxBufferStatus8723BSdio()`), so a lost SDIO interrupt does not
+  leave the driver with a stale count: the retry converges within one timeout
+  window (100 ms) even when the kick never arrives.
 * The completion is re-armed with `reinit_completion()` after the wait.
   Since Linux v5.9 `complete()` is a counting semaphore: `complete()` increments
   the counter of the completion and the waiter decrements it. The driver never
@@ -98,6 +105,13 @@ never reset and a residue makes the wait return immediately instead of sleeping,
 which turns the `RTWHALXT` thread into a busy loop. The same holds for
 `xmit_comp`, which is re-armed by 0001.
 
+**Severity: a busy loop, not a stall.** This defect burns CPU (the `RTWHALXT`
+thread spins at 100 %), but it does not stop frames from being sent — the wait
+returning early only means the thread re-checks the pending state more often
+than necessary. It is a latent risk that has to be fixed (a spinning thread
+also starves the TX worker of the CPU it needs to make progress), but it is
+**not** one of the paths that permanently break the link.
+
 **Code path (6.12.113-1).**
 
 * `drivers/staging/rtl8723bs/hal/rtl8723bs_xmit.c:358` `rtl8723bs_xmit_handler()`,
@@ -139,23 +153,48 @@ more.
 `xmitpriv->stopped_xmit_queues` (`include/rtw_xmit.h`), set in
 `rtw_check_xmit_resource()`. `rtw_os_pkt_complete()` now restarts every tracked
 subqueue whose resource condition is relieved again, using
-`netif_wake_subqueue()` — it clears `__QUEUE_STATE_DRV_XOFF` *and* reschedules the
-queue, unlike `netif_start_subqueue()`, so the queued packets are sent right away.
+`netif_wake_subqueue()`, which clears `__QUEUE_STATE_DRV_XOFF` and schedules
+the queue for transmission.
+
+**Effect on this hardware: defensive, not a fix for a live symptom.** Two
+independent reasons:
+
+* The driver never sets `num_tx_queues`, so the netdev has a single TX queue
+  and `skb_get_queue_mapping()` is always 0 — the "stopped subqueue belongs to
+  another queue" scenario cannot occur here.
+* `rtw_os_pkt_complete()` already calls `netif_wake_subqueue()` for the queue of
+  the completed skb, which is that same single queue 0.
+
+So on the QM1 this patch changes nothing observable. It is kept because the
+defect is real in the code and the driver is one `num_tx_queues` away from
+exercising it.
 
 **Risk.** `netif_wake_subqueue()` and `netdev_get_tx_queue()` have no bounds
 check, so the helper skips queues `>= pnetdev->num_tx_queues` and
-`>= pxmitpriv->hwxmit_entry`. The driver never sets `num_tx_queues`, so the
-netdev has a single TX queue and only queue 0 can be tracked today; the fix is
-nevertheless correct for multi-queue setups. The bitmap is only set for queues
-that `rtw_check_xmit_resource()` stopped, so no unrelated queue is woken.
+`>= pxmitpriv->hwxmit_entry`. The bitmap is only set for queues that
+`rtw_check_xmit_resource()` stopped, so no unrelated queue is woken.
 
 ## 0005 — rtl8723bs: release the frame and account the drop when xmit coalescing fails
 
 **Root cause.** `rtw_xmitframe_coalesce()` can fail (e.g. the WLAN header cannot
-be built). The frame is then neither sent nor released: it is not counted in the
-tx statistics and it is not freed. The xmit frame and its skb leak, and the tx
-accounting of the netdev is broken — a leaked skb keeps its slot in the netdev
-queue occupied, so that queue stops sending.
+be built). The failure path of the caller then does neither of the two things it
+must do: the frame is not counted in the tx statistics, and — depending on the
+state of the aggregation — the frame is not freed either.
+
+The exact leak depends on `k`, the number of frames already merged into the
+xmitbuf before the failure:
+
+* `k == 0` (nothing merged yet): the upstream release
+  `if (k != 1) rtw_free_xmitframe(...)` *does* run, so the frame itself is
+  freed — but `pxmitbuf->priv_data`, which was set to that frame at `:287`,
+  keeps pointing at the freed frame. A dangling pointer, not a leak.
+* `k == 1` (one frame already merged): `k != 1` is false, so the release does
+  **not** run. The failed frame *and* its skb leak, and the tx accounting of
+  the netdev is broken — a leaked skb keeps its slot in the netdev queue
+  occupied, so that queue stops sending.
+
+So the leak that matters is the `k == 1` case; the `k == 0` case is a dangling
+pointer.
 
 **Code path (6.12.113-1).**
 
@@ -163,8 +202,7 @@ queue occupied, so that queue stops sending.
   `xmit_xmitframes()`, the failure branch `:295-299` (log plus
   `/*  Todo: error handler */`), the release at `:313-314`
   (`if (k != 1) rtw_free_xmitframe(...)`).
-* `pxmitbuf->priv_data` is set to the first frame of the aggregation at `:287`;
-  with `k == 0` the failed frame was freed while `priv_data` kept pointing at it.
+* `pxmitbuf->priv_data` is set to the first frame of the aggregation at `:287`.
 * `drivers/staging/rtl8723bs/core/rtw_xmit.c:1682` `rtw_free_xmitframe()` →
   `rtw_os_pkt_complete()` → `dev_kfree_skb_any()` and the subqueue wake, so
   releasing the frame restores the accounting.
@@ -181,6 +219,72 @@ the driver already does for other enqueue failures. The failure paths of
 `rtw_xmitframe_coalesce()` (`rtw_make_wlanhdr()`, `xmitframe_addmic()`) do not
 commit anything to the xmitbuf — `pxmitbuf->len`/`ptail` are only updated on
 success — so no partially merged data is sent.
+
+## 0006 — rtl8723bs: protect the TX free page accounting with the lock the driver already has
+
+**Root cause.** The driver keeps a software mirror of the firmware's free TX
+page counter in `hal_com_data.SdioTxFIFOFreePage[]`, together with a spinlock
+(`SdioTxFIFOFreePageLock`, `include/hal_data.h:373-374`) that the vendor wrote
+for exactly this purpose — and then commented the lock out
+(`hal/hal_sdio.c:42` and `:53`), leaving the counter unprotected.
+
+Two writers touch the counter:
+
+* `hal/hal_sdio.c:rtw_hal_sdio_update_tx_freepage()` subtracts the pages it is
+  about to hand to the firmware — a read-modify-write of one byte.
+* `hal/sdio_ops.c:HalQueryTxBufferStatus8723BSdio()` overwrites the whole four
+  byte array with the value read back from the hardware (`SDIO_REG_FREE_TXPG`).
+
+If the two interleave, the read-modify-write computes its result from a stale
+value and writes it back after the four byte overwrite. The driver then
+believes in TX pages the firmware has already given away — which lands right
+back in the "no free page" state this whole series is about.
+
+**Call sites and their context (checked in 6.12.113-1).** The two callers of
+`HalQueryTxBufferStatus8723BSdio()` are `hal/rtl8723bs_xmit.c:80` (the TX
+worker) and `hal/sdio_halinit.c:778` (driver init); the callers of the two
+accounting helpers are in `hal/rtl8723bs_xmit.c:77` and `:103` (the TX worker).
+All of them run in process context, so `spin_lock_bh()` is the right primitive
+and no lock is taken recursively. The narrow window is a driver reset/re-init
+while the TX worker is running.
+
+**What the fix changes.** The lock is restored around the counter update and
+extended to the reader, and the four byte overwrite in
+`HalQueryTxBufferStatus8723BSdio()` is protected as well. The SDIO command
+itself stays **outside** the lock: `sdio_local_cmd53_read4byte()` may sleep and
+a spinlock must not be held across a sleeping call.
+
+**Risk.** Low. The counter is only ever written under the lock now, so the
+readers see either the old or the new value, never a mix. The lock is
+initialised in `hal/rtl8723bs_xmit.c:553` (`spin_lock_init()`) before the TX
+worker exists.
+
+## Known defects this series does NOT cover
+
+The six patches above close the paths that permanently break the link, but two
+defects are deliberately left alone — the series is not a complete rewrite of
+the driver, and pretending otherwise would be misleading:
+
+1. **`rtw_xmit_entry()` always reports success.** When the driver refuses a
+   frame, the error path still returns `NETDEV_TX_OK`
+   (`core/rtw_xmit.c`), so the drop is invisible to the network stack: the
+   kernel believes the frame was sent. This does not stall the link, it makes
+   the loss invisible — no `tx_drop` counter, no error in `dmesg`, and the
+   upper layers cannot retry. Fixing it properly means auditing every error
+   return of the xmit entry points, which is a much larger change than a
+   stall fix and needs hardware testing.
+2. **Everything the driver does not measure.** The driver has no runtime knob
+   for the retry limits (`long_retry_lmt`/`short_retry_lmt` are dead registers
+   in the firmware) and no way to request a rate: the rate is taken from the
+   static table in `core/rtw_wlan_util.c` when the link is associated. A weak
+   signal therefore degrades into a low rate that the host cannot ask the
+   firmware to change. No patch can fix that; only a different driver (the
+   rtw88 backport that this project ships as the primary path) can.
+
+The patches also do not touch the power-saving behaviour: Leisure PS, smart PS
+and idle PS are controlled by module parameters, and the parameters are copied
+once at load time, so they have to be set on the module command line — see
+`/etc/modprobe.d/qm1-rtl8723bs-in-tree.conf` in the image.
 
 ## Field observations on the real QM1 (2026-11-04/05)
 

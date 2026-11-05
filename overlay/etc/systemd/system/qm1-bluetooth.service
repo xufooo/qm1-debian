@@ -29,7 +29,7 @@ RemainAfterExit=yes
 # 等不到**不算失败**：内核没绑定通常是 DSDT 把 OBDA8723 暴露成了普通
 # 16550 串口设备（8250 抢先绑定），那时 bluez 只会报"没有适配器"，
 # 不该把整机启动拖住 —— 详细的排查路径见 drv-selfcheck.sh 的蓝牙段。
-ExecStart=/bin/sh -c 'modprobe hci_uart 2>/dev/null || true; modprobe btrtl 2>/dev/null || true; for i in $(seq 1 30); do [ -d /sys/class/bluetooth/hci0 ] && exit 0; sleep 1; done; echo "qm1-bluetooth: 30 秒内没有出现 hci0（查 dmesg 里 OBDA8723 / hci_uart）" >&2; exit 0'
+ExecStart=/usr/local/sbin/qm1-bluetooth-up
 TimeoutStartSec=45
 
 [Install]
