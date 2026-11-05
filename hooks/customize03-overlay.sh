@@ -33,6 +33,15 @@ if [ -d "$TARGET/etc/systemd/system" ]; then
     chroot "$TARGET" systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
+# Wi-Fi 是这台机器唯一的主联网链路（没有 RJ45）→ 开机自启。
+# 单元是模板（qm1-wifi@.service），实例名就是无线接口名（wlan0）。
+if [ -f "$TARGET/etc/systemd/system/qm1-wifi@.service" ]; then
+    chroot "$TARGET" systemctl enable qm1-wifi@wlan0 >/dev/null 2>&1 \
+        || ln -sf /lib/systemd/system/qm1-wifi@.service \
+               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service"
+    echo "[hook03] 已启用 qm1-wifi@wlan0（内置 Wi-Fi 主链路）"
+fi
+
 # 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
 # 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
 if [ -f "$TARGET/etc/systemd/system/qm1-install.service" ]; then

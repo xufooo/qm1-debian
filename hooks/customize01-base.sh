@@ -40,6 +40,10 @@ EOF
 # systemd 的 enable/disable 是离线操作（只写符号链接），chroot 里可用。
 chroot "$TARGET" systemctl enable ssh >/dev/null 2>&1 || true
 chroot "$TARGET" systemctl enable systemd-oomd >/dev/null 2>&1 || true
+# 这台机器没有板载 RJ45，内置 Wi-Fi 是唯一的主联网链路 → 必须有 DHCP 客户端。
+# 用 systemd-networkd：它顺带负责写 /etc/resolv.conf，所以 systemd-resolved
+# 可以继续关着（2GB 内存，少一个常驻服务）。
+chroot "$TARGET" systemctl enable systemd-networkd >/dev/null 2>&1 || true
 for svc in systemd-resolved avahi-daemon bluetooth systemd-timesyncd; do
     chroot "$TARGET" systemctl disable "$svc" >/dev/null 2>&1 || true
 done

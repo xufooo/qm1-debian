@@ -1,6 +1,10 @@
+# 内置 Wi-Fi 是这台机器的主联网链路（整机没有 RJ45）。
+# Priority 越小越优先 → 给它更低的 metric，让默认路由走 Wi-Fi。
 [Match]
 Name=wlan*
 
 [Network]
 DHCP=yes
 IPv6AcceptRA=yes
+Priority=10
+RequiredForOnline=yes

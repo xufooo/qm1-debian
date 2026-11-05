@@ -1,6 +1,10 @@
+# USB 以太网适配器：只作应急备份（这台机器没有板载 RJ45）。
+# Priority 比 Wi-Fi 大 → 默认路由优先走内置 Wi-Fi。
 [Match]
 Name=en* eth*
 
 [Network]
 DHCP=yes
 IPv6AcceptRA=yes
+Priority=100
+RequiredForOnline=no

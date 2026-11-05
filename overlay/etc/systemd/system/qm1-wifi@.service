@@ -1,0 +1,17 @@
+[Unit]
+Description=QM1 internal Wi-Fi (%i) managed by wpa_supplicant
+After=systemd-modules-load.service network.target
+Wants=systemd-modules-load.service
+ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant.conf
+
+[Service]
+Type=simple
+# SDIO 卡的无线接口可能比 network.target 晚几秒才出现，先等它出现
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip link show %i >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
+# 前台运行（不加 -B）：这样 systemd 能看着它，掉了会按 Restart= 拉起来
+ExecStart=/usr/sbin/wpa_supplicant -i %i -c /etc/wpa_supplicant/wpa_supplicant.conf
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
