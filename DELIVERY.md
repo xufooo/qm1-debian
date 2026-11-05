@@ -297,7 +297,7 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 | 内核套数 | `/lib/modules` 下只允许有一套内核（签名版和 `-unsigned` 互 Conflicts，多一套就会让模块 vermagic 对不上） |
 | Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c*v024CdB723*`（注意 vendor 是 `024C`、device 是 `B723`，中间那个 `d` 是**小写**），且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
 | 出货模块 | `modinfo` 的 alias 必须认领 `v024CdB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
-| Wi-Fi 信道宽度 | `iw dev wlan0 link` 的 width 必须是 **20 MHz** —— 出货模块带的是"把芯片能力收窄到 20 MHz"那条策略补丁（`patches/rtw88-upstream/0006`），40 MHz 在这个芯片变体上不支持，且是社区里"随机断连"的来源 |
+| Wi-Fi 信道宽度 | `iw dev <接口> link` 的 width 必须是 **20 MHz**（接口名以 `ip -br link` / `/sys/class/net/*/wireless` 看到的为准，不一定是 `wlan0`） —— 出货模块带的是"把芯片能力收窄到 20 MHz"那条策略补丁（`patches/rtw88-upstream/0006`），40 MHz 在这个芯片变体上不支持，且是社区里"随机断连"的来源 |
 | 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` ⇒ 8250 抢占了那条串口（要 DSDT 覆盖）；没有 HID ⇒ 镜像**故意**没加载 `hci_uart`（`/run/qm1-bluetooth.failed` 里写着原因） |
 
 > 为什么"网络没连上"不许拖住开机：发行版的 `systemd-networkd-wait-online`
@@ -350,7 +350,7 @@ systemctl --user restart hermes-gateway
 
 | 现象 | 先看 |
 |---|---|
-| 开机后连不上网 | `qm1-selftest`、`journalctl -u qm1-wifi@wlan0`、`iw dev wlan0 link` |
+| 开机后连不上网 | `qm1-selftest`、`journalctl -u qm1-wifi@wlan0`、`iw dev <接口> link`（接口名以 `ip -br link` 为准） |
 | Wi-Fi 一直连不上 | `dmesg | grep -i rtw`；确认绑定的是 `rtw88_qm1` 而不是发行版 `r8723bs`（后者有永久卡死路径） |
 | 时间是 1970 | `resolvectl status` + `timedatectl`（DNS 没通） |
 | 蓝牙没有 hci0 | `journalctl -u qm1-bluetooth`；`/run/qm1-bluetooth.failed` 里有 ACPI 归属线索 |
@@ -371,6 +371,14 @@ systemctl --user restart hermes-gateway
 5. **GRUB 里的卷标写死** → 改了卷标就起不来，而 CI 全绿。
 6. **user 单元只写文件不 enable** → 验收命令永远 not found。
 7. **构建期把 resolv.conf 换成 stub** → 构建阶段的 apt 全挂。
+8. **补丁先在未打补丁的树上 dry-run 一遍** → 补丁依赖前一补丁的上下文，
+   dry-run 必失败，构建只 warn 就**静默退回 staging 驱动**（那棵树有
+   永久卡死路径），构建不红、镜像守卫才红，离真因隔了三层。
+9. **权限交给构建机的 umask 决定** → git 只记有没有执行位，checkout 按
+   umask 重算，镜像里同一个脚本在不同构建机上是 0755 或 0775，断言精确
+   权限位组合就成了一颗随机炸弹。
 
 共同的教训：**做完的事要有一个"从外部看得见"的判据**（能回读、能断言、
-能让 CI 验），否则"写了"和"生效了"之间永远隔着一层。
+能让 CI 验），否则"写了"和"生效了"之间永远隔着一层。两条补充：
+**判据要问对问题**（问"任何构建机上是不是都一样"，别问"某个位组合"），
+**实现只能有一份**（构建与自测共用同一份逻辑，别让自测绿着而出货红着）。
