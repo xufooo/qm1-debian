@@ -90,11 +90,11 @@ jobs:
             echo "::error::仓库中出现 SSH host key 指纹"
             exit 1
           fi
-          # 设备主机名（mDNS 短名 / 主机名这类）。
-          # 规则本身用字符类拼出来，免得把真实主机名再抄一遍进仓库。
-          if grep -rInE '\b(pk[t]\.lan|[withheld])\b' \
+          # 设备主机名。用「任意 .lan 结尾的 mDNS 名」这种通用写法，
+          # 规则本身就不指向某一台具体的机器。
+          if grep -rInE '\b[a-z0-9-]+\.lan\b' \
                --exclude-dir=.git --exclude=lint.yml . ; then
-            echo "::error::仓库中出现设备主机名"
+            echo "::error::仓库中出现 mDNS 主机名"
             exit 1
           fi
           echo "privacy scan clean"
