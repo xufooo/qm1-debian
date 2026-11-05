@@ -130,6 +130,17 @@ jobs:
           sudo apt-get install -y -qq util-linux
           sudo bash scripts/test-install-lib.sh
 
+      - name: Installer end-to-end (loop devices)
+        run: |
+          set -euo pipefail
+          # 库级单测只覆盖"哪些字节写到哪里"。这里把整条主机侧安装流程
+          # 真跑一遍：造两块环设备（假装是 eMMC 与整机镜像），跑真正的
+          # install-qm1.sh，然后断言备份确实是安装前的内容、写入与镜像一致、
+          # 镜像比盘大时它会拒绝而且一字节都不写。
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq util-linux dosfstools
+          sudo bash scripts/test-installer-e2e.sh
+
       - name: Provisioning injection chain (synthetic disk images)
         run: |
           set -euo pipefail
