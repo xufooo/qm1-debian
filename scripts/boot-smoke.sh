@@ -100,20 +100,66 @@ OVMF_CODE=""
 OVMF_VARS=""
 
 if [ -n "$DISK" ]; then
-    # OVMF：优先 32 位变体（这台机器的固件就是 32 位 IA32 ⇒ 只有 IA32 固件
-    # 加载不了 PE32+ 的 BOOTX64.EFI；但 x64 的 OVMF 反而能加载 IA32 应用 ⇒
-    # 用 IA32 固件更贴近真机，x64 固件作为退路）。
-    for d in /usr/share/OVMF /usr/share/ovmf /usr/share/qemu; do
+    # OVMF 固件（Debian trixie 的 ovmf 包）。
+    #
+    # ★ 文件名必须按 **Debian 实际提供的名字** 写。Debian trixie 的 ovmf 包
+    #   已经全面改成 4M 布局，文件名跟老版本不一样了：
+    #     x86_64：/usr/share/OVMF/OVMF_CODE_4M.fd  + OVMF_VARS_4M.fd
+    #     IA32  ：/usr/share/OVMF/OVMF32_CODE_4M.fd + OVMF32_VARS_4M.fd
+    #             （IA32 那套在**另一个包** ovmf-ia32 里）
+    #     合并镜像（只有 x86_64）：/usr/share/ovmf/OVMF.fd（CODE+VARS，4 MiB，
+    #             官方说明就是给 -bios 用的）
+    #   老的 OVMF_CODE.fd / OVMF_CODE_IA32.fd 在 trixie 上**根本不存在** ⇒
+    #   以前这里永远找不到，整盘镜像的 UEFI 启动测试**每一次都被静默跳过**
+    #   （CI 只报一条 warning，看不出测试压根没跑）。
+    #   ⇒ 探测改成按实际存在的文件名找；找不到时把目录内容打出来，
+    #      下次排查不用再猜。
+    OVMF_DIRS="/usr/share/OVMF /usr/share/ovmf /usr/share/qemu"
+    # ★ 顺序：先 x86_64 固件，再 IA32。
+    #   这台机器的固件确实是 32 位 IA32（加载不了 PE32+ 的 BOOTX64.EFI），
+    #   但 **CI 这一条链上构建的是 amd64 镜像**，它的 ESP 里只有 64 位槽
+    #   （vmlinuz / initrd.img）；32 位槽（vmlinuz32 / initrd32.img）只有
+    #   i386 变体才有（scripts/build-image.sh:149 只在 KERNEL32 非空时才传）。
+    #   用 IA32 固件去起这个 amd64 镜像，一定会失败在"GRUB(ia32) 找不到
+    #   vmlinuz32"上 —— 那个失败不是我们要找的问题，是测错了对象。
+    #   ⇒ 用 x64 固件（它会走 \EFI\BOOT\BOOTX64.EFI → vmlinuz，正是这个
+    #   镜像里唯一完整的槽）。IA32 固件留作退路，以后给 i386 变体用。
+    OVMF_PAIRS="OVMF_CODE_4M.fd:OVMF_VARS_4M.fd
+OVMF32_CODE_4M.fd:OVMF32_VARS_4M.fd
+OVMF_CODE_IA32.fd:OVMF_VARS_IA32.fd
+OVMF_CODE.fd:OVMF_VARS.fd"
+    for _pair in $OVMF_PAIRS; do
+        _c="${_pair%%:*}"
+        _v="${_pair##*:}"
+        for _d in $OVMF_DIRS; do
+            if [ -f "$_d/$_c" ] && [ -f "$_d/$_v" ]; then
+                OVMF_CODE="$_d/$_c"
+                OVMF_VARS="$_d/$_v"
+                break
+            fi
+        done
         [ -n "$OVMF_CODE" ] && break
-        [ -f "$d/OVMF_CODE_IA32.fd" ] && { OVMF_CODE="$d/OVMF_CODE_IA32.fd"; OVMF_VARS="$d/OVMF_VARS_IA32.fd"; }
-        [ -z "$OVMF_CODE" ] && [ -f "$d/OVMF_CODE.fd" ] && { OVMF_CODE="$d/OVMF_CODE.fd"; OVMF_VARS="$d/OVMF_VARS.fd"; }
     done
-    if [ -z "$OVMF_CODE" ] || [ ! -f "$OVMF_CODE" ]; then
-        echo "BOOT-SMOKE: SKIP（找不到 OVMF 固件，装 ovmf 包才有）" >&2
+    # 允许用环境变量指定（本地调试 / 特殊布局时用）
+    if [ -n "${QM1_OVMF_CODE:-}" ] && [ -n "${QM1_OVMF_VARS:-}" ]; then
+        OVMF_CODE="$QM1_OVMF_CODE"
+        OVMF_VARS="$QM1_OVMF_VARS"
+    fi
+    if [ -z "$OVMF_CODE" ] || [ ! -f "$OVMF_CODE" ] || [ ! -f "$OVMF_VARS" ]; then
+        echo "BOOT-SMOKE: SKIP（找不到可用的 OVMF 固件）" >&2
+        echo "BOOT-SMOKE: 找过的地方和它们实际有的文件：" >&2
+        for _d in $OVMF_DIRS; do
+            if [ -d "$_d" ]; then
+                echo "BOOT-SMOKE:   $_d:" >&2
+                ls -1 "$_d" 2>&1 | sed 's/^/BOOT-SMOKE:     /' >&2 || true
+            else
+                echo "BOOT-SMOKE:   $_d （不存在）" >&2
+            fi
+        done
+        echo "BOOT-SMOKE: Debian 上装 ovmf（x86_64）和 ovmf-ia32（32 位）就有。" >&2
         exit 77
     fi
-    [ -f "$OVMF_VARS" ] || { echo "BOOT-SMOKE: SKIP（找不到配套的 OVMF_VARS：${OVMF_VARS}）" >&2; exit 77; }
-    log "OVMF 固件：$OVMF_CODE"
+    log "OVMF 固件：$OVMF_CODE（变量存储：$OVMF_VARS）"
 
     DISK_COPY="$WORK/qm1-disk-boot.img"
     # 整盘镜像是稀疏的（30 GiB 盘只写了几百 MB）⇒ 拷贝时保持稀疏，

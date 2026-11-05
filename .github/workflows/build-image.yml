@@ -1068,14 +1068,27 @@ jobs:
           # "sudo: command not found"，exit 127，整个步骤挂掉）。
           # 同一作业里其它安装步骤都是直接 apt-get，就是这个原因。
           apt-get update -qq
-          apt-get install -y --no-install-recommends ovmf
+          # ★ ovmf-ia32 也要装：这台机器的固件是 32 位 IA32（加载不了 PE32+
+          #   的 BOOTX64.EFI），而 32 位那套 OVMF 在**另一个包**里。
+          #   只装 ovmf 的话脚本只能退到 x64 固件，等于没测到真机那一侧。
+          apt-get install -y --no-install-recommends ovmf ovmf-ia32
           rc=0
           bash scripts/boot-smoke.sh \
             --disk build/out/qm1-disk.img \
             --timeout 420 \
             --log build/out/boot-disk-smoke.log || rc=$?
           if [ "$rc" = "77" ]; then
-            echo "::warning::OVMF 不可用，跳过整盘镜像的启动测试"
+            # ★ 跳过**不算通过**。这一条是出货形态唯一的自动验证：
+            #   "刷完这个盘能不能开机"全靠它。以前这里是一条 warning，
+            #   于是这个测试从头到尾一次都没真跑过（脚本按老文件名找 OVMF，
+            #   Debian trixie 早就换成 4M 布局的文件名了 ⇒ 永远找不到）。
+            #   只有显式说"我知道我在跳过"（QM1_ALLOW_BOOT_SKIP=1）才放行。
+            if [ "${QM1_ALLOW_BOOT_SKIP:-0}" = "1" ]; then
+              echo "::warning::整盘镜像的 UEFI 启动测试被显式跳过（QM1_ALLOW_BOOT_SKIP=1）"
+            else
+              echo "::error::整盘镜像的 UEFI 启动测试被跳过（找不到 OVMF 固件）—— 这是出货形态唯一的自动验证，不许静默跳过"
+              exit 1
+            fi
           elif [ "$rc" != "0" ]; then
             tail -40 build/out/boot-disk-smoke.log || true
             exit "$rc"
