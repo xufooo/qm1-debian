@@ -195,7 +195,7 @@ staging 版已确认的**永久卡死路径**（丢失 SDIO 中断后不会自�
 | 子队列停掉后不再 restart | `os_dep/xmit_linux.c` 停的是新 skb 的队列号，恢复时唤醒的是已释放 skb 的队列号，且全树没有 `netif_start_subqueue` | 队列资源紧张时 |
 | TX 线程忙等（completion 计数残留） | v5.9 起 `complete()` 是计数型信号量，驱动从不 `reinit_completion`，计数不配平时 wait 立即返回 | 潜在风险；2026-11-05 实机测线程 CPU 仅 0.2 %，未复现 |
 
-这四条用 `patches/rtl8723bs/` 下的补丁修掉（外部模块方式，见 `scripts/rtl8723bs-module.README.md`）。参数层面的止血是关掉省电与 40MHz；结构性解（mac80211 化、有逐包反馈、支持 WPA3）只能等 rtw88 的 `CONFIG_RTW88_8723BS`（内核 ≥ 7.4，Debian 目前无此内核包）。
+这四条用 `patches/rtl8723bs/` 下的补丁修掉（外部模块方式，见 `scripts/rtl8723bs-module.README.md`）。参数层面的止血是关掉省电与 40MHz；结构性解（mac80211 化、有逐包反馈）是 rtw88 路线 —— 本仓库用 vendor rtw88 树外模块实现（见下），纯上游版本需内核 ≥ 7.4（Debian 目前无此内核包）。
 
 #### 打了补丁的外部模块 `r8723bs_qm1`
 
@@ -240,7 +240,7 @@ CI 里 `build-image` 已经把这两步串起来了（先装 `6.12.113+deb13-amd
 → 编译模块 → 带着 `--kernel-version` 与 `--wifi-module-deb` 构建 rootfs），
 所以 CI 产出的镜像自带打了补丁的 Wi-Fi 驱动。
 
-#### 上游 rtw88 回移模块（根治路线，推荐）
+#### rtw88 树外模块（根治路线，推荐）
 
 staging 驱动那四条永久卡死路径的根因是 Realtek 私有协议栈没有逐包发送反馈。上游的解法是把这颗芯片
 **并入 rtw88**（mac80211 化，有逐包反馈），并把 staging 驱动删掉：
@@ -252,15 +252,23 @@ staging 驱动那四条永久卡死路径的根因是 Realtek 私有协议栈没
 | `b2d251aa7f16` | `rtw88: 8723bs: enable building…`（Kconfig + Makefile） |
 | `c520f3af7df4` | `staging: rtl8723bs: remove the obsolete driver` |
 
-这组提交**没有改动 rtw88 核心的既有文件**，只新增芯片驱动，所以按目标内核回移的成本很低。
 但**还没有发行版内核带着它**：Debian sid 的内核是 7.2.15（< 7.4），trixie 是 6.12；
 Debian 13 的 `firmware-realtek` 里也没有 `rtw88/rtw8723b_fw.bin`（sid 才有）。
 
-因此本仓库把上游芯片驱动**回移成树外模块**，按镜像内核编译：
+> **实测更正**：只把上游那几个芯片文件回移到 6.12 **编不过**。上游 7.4 的 `rtw8723b.c` 用到
+> `mac_postinit` / `query_phy_status` / `set_ampdu_factor` / `led_set` / `hw_feature_report` /
+> `c2h_ra_report_size` / `old_datarate_fb_limit` / `RTW_CHIP_TYPE_8723B` / `rtw_phy_cck_pd_set`
+> 这些 **7.4 时期的 rtw88 核心 API**，6.12 的 rtw88 核心里没有 —— 要用上游方案，得把 rtw88
+> **核心**也一起回移（数天工作量）。
+>
+> 所以本仓库实际走的是**维护中的 vendor rtw88 树**（`MocLG/rtw88-rtl8723bs`）：它本身就是
+> 「rtw88 全树 + RTL8723B/8723BS 支持」，已针对 6.12 适配，并额外修了 SDIO 变体的长期 bus
+> timeout、扫描失败（重实现 vendor association/join 序列、修正上电时序、WiFi/BT 共存天线），
+> 在 6.12.113+deb13-amd64 上**编译通过**。等有 ≥ 7.4 的内核包时，可直接换成纯上游。
 
 | 文件 | 作用 |
 |------|------|
-| `scripts/build-rtw88-8723bs-module.sh` | ① 上游回移：用 v6.12 的 rtw88 头文件 + 上游的芯片文件，编成 `rtw88_8723b.ko` / `rtw88_8723bs.ko`；② 上游编不过时回退到维护中的 vendor rtw88 树（`rtw_core.ko` / `rtw_sdio.ko` / `rtw_8723b.ko` / `rtw_8723bs.ko`）。校验 vermagic 必须与目标内核一致、模块 alias 必须认领 `0x024c:0xb723`，最后打成 `.deb` |
+| `scripts/build-rtw88-8723bs-module.sh` | 默认走 **vendor rtw88 树**（`--source vendor`）：编出 `rtw_core.ko` / `rtw_sdio.ko` / `rtw_8723b.ko` / `rtw_8723bs.ko`。`--source upstream` 可切到「上游芯片文件 + 6.12 头文件」的实验路线（在 6.12 上编不过，见上）。校验 vermagic 必须与目标内核一致、模块 alias 必须认领 `0x024c:0xb723`，最后打成 `.deb` |
 | `scripts/fetch-rtw8723b-firmware.sh` | 从 Debian sid 的 `firmware-realtek` 里只取 `rtw88/rtw8723b_fw.bin`（用 sid 包索引里的 SHA256 校验 .deb 本身） |
 
 打好的 deb 里包含：模块（`/lib/modules/<abi>/extra/rtw88/`）、固件（`/lib/firmware/rtw88/`）、
