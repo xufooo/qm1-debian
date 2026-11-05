@@ -22,17 +22,18 @@ JSON=0
 PASS=0; WARN=0; FAIL=0
 declare -a ROWS=()
 
-GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[1;31m'; RESET=$'\033[0m'
+GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[1;31m'; CYAN=$'\033[1;36m'; RESET=$'\033[0m'
 
-row() {  # $1=状态(PASS/WARN/FAIL) $2=检查项 $3=实测值
+row() {  # $1=状态(PASS/WARN/FAIL/INFO) $2=检查项 $3=实测值
     local st="$1" item="$2" val="${3:-}"
     case "$st" in
         PASS) PASS=$((PASS+1)) ;;
         WARN) WARN=$((WARN+1)) ;;
         FAIL) FAIL=$((FAIL+1)) ;;
+        INFO) ;;   # 只做记录，不计入统计
     esac
     ROWS+=("$st|$item|$val")
-    local color="$GREEN"; [ "$st" = WARN ] && color="$YELLOW"; [ "$st" = FAIL ] && color="$RED"
+    local color="$GREEN"; [ "$st" = WARN ] && color="$YELLOW"; [ "$st" = FAIL ] && color="$RED"; [ "$st" = INFO ] && color="$CYAN"
     printf '  %s%-4s%s %-34s %s\n' "$color" "$st" "$RESET" "$item" "$val"
 }
 
@@ -386,6 +387,42 @@ if systemctl is-enabled --quiet ssh 2>/dev/null; then
     row PASS "SSH" "已启用"
 else
     row WARN "SSH" "未启用（远程登录不了）"
+fi
+
+# ---------------- 6. 健康采样（稳定性取证）----------------
+section "健康采样"
+
+HEALTH_DIR="${QM1_HEALTH_DIR:-/var/log/qm1-health}"
+if [ -x /usr/local/sbin/qm1-health-collect ]; then
+    row PASS "采集器" "/usr/local/sbin/qm1-health-collect 可执行"
+else
+    row WARN "采集器" "没有 /usr/local/sbin/qm1-health-collect（拿不到稳定性判据）"
+fi
+
+if systemctl is-enabled --quiet qm1-health-collect.timer 2>/dev/null; then
+    last="$(systemctl show -p LastTriggerUSec --value qm1-health-collect.timer 2>/dev/null || true)"
+    row PASS "采集定时器" "已启用（上次触发 ${last:-未知}）"
+else
+    row WARN "采集定时器" "qm1-health-collect.timer 未启用"
+fi
+
+if [ -r "$HEALTH_DIR/latest.txt" ]; then
+    row PASS "最新快照" "$HEALTH_DIR/latest.txt（$(stat -c %y "$HEALTH_DIR/latest.txt" 2>/dev/null | cut -d. -f1)）"
+    mmc_err="$(grep -m1 '^mmc_error_lines=' "$HEALTH_DIR/latest.txt" 2>/dev/null | cut -d= -f2)"
+    hang="$(grep -m1 '^hung_task=' "$HEALTH_DIR/latest.txt" 2>/dev/null | cut -d= -f2)"
+    row INFO "eMMC 错误行" "${mmc_err:-未知}（累计，S2 判据）"
+    row INFO "挂死类抱怨" "${hang:-未知}（累计，S1 判据）"
+    rxd="$(awk '/^-- wlan0 --$/{f=1;next} f&&/^-- /{f=0} f' "$HEALTH_DIR/latest.txt" 2>/dev/null \
+        | tr ' ' '\n' | grep -m1 '^rx_dropped=' | cut -d= -f2)"
+    row INFO "wlan0 丢包" "${rxd:-未知}（累计，S3 判据）"
+else
+    row WARN "最新快照" "还没有健康快照 —— 采集器可能没跑起来，或 /var/log/qm1-health 不可写"
+fi
+
+if [ -x /usr/local/bin/qm1-stress ]; then
+    row PASS "压测脚本" "/usr/local/bin/qm1-stress（--idle-io / --fio / --wifi）"
+else
+    row WARN "压测脚本" "没有 /usr/local/bin/qm1-stress"
 fi
 
 # ---------------- 汇总 ----------------

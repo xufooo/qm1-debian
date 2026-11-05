@@ -1,0 +1,148 @@
+#!/bin/sh
+# ============================================================================
+# qm1-health-collect — 稳定性取证采集器（周期快照）
+#
+# 目的：为「整机卡死 / eMMC 掉卡 / Wi-Fi 断流」这三类不稳定项提供**判据**。
+#       没有计数器就无法判断某个改动到底有没有用，所以这是第一优先的组件。
+#
+# 采集内容（每 5 分钟一次）：
+#   1. dmesg 里 mmc/reset/I-O error/timeout 的累计行数      → S2 eMMC 掉卡判据
+#   2. dmesg 里 hung task/rcu stall/freeze 的累计行数        → S1 整机卡死判据
+#   3. ip -s link 的收发与丢包计数（优先 wlan0）             → S3 Wi-Fi 断流判据
+#   4. iw dev wlan0 link（信号/速率/重试）                   → S3/S8 弱信号
+#   5. cpuidle 各状态的 usage 与 disable 状态                → S1 的 max_cstate=1 是否生效
+#   6. thermal_zone 温度                                     → 背景（85℃ 降频）
+#   7. MemAvailable 与 zram 使用率                            → 内存吃穿
+#   8. 根分区/日志分区写入是否成功                            → 存储健康
+#
+# 落盘：/var/log/qm1-health/snapshot-<ts>.txt（轮转保留 200 份）+ latest.txt
+#       若 /srv/cache（microSD）存在则额外写一份，避免 eMMC 写放大。
+# 用法：qm1-health-collect [--once]   （--once 只采一份并打印，不轮转）
+# ============================================================================
+set -u
+
+BASE="${QM1_HEALTH_DIR:-/var/log/qm1-health}"
+KEEP="${QM1_HEALTH_KEEP:-200}"
+ALT="/srv/cache/qm1-health"
+STAMP="$(date +%Y%m%d-%H%M%S)"
+OUT="$BASE/snapshot-$STAMP.txt"
+
+mkdir -p "$BASE" 2>/dev/null || { echo "qm1-health-collect: 无法创建 $BASE" >&2; exit 1; }
+
+grab() {   # grab <标题> <命令...>
+    _title="$1"; shift
+    printf '\n== %s ==\n' "$_title"
+    if command -v "$1" >/dev/null 2>&1; then
+        "$@" 2>&1 | head -40
+    else
+        printf '(缺少 %s)\n' "$1"
+    fi
+}
+
+{
+    printf '# qm1 health snapshot %s\n' "$STAMP"
+    printf 'host=%s kernel=%s uptime=%s\n' "$(hostname 2>/dev/null)" \
+        "$(uname -r 2>/dev/null)" "$(cut -d' ' -f1 /proc/uptime 2>/dev/null)"
+
+    # ---- 1. eMMC / SD 错误计数（S2 判据）----
+    printf '\n== mmc 错误计数（S2）==\n'
+    if [ -r /proc/kmsg ]; then :; fi
+    if dmesg 2>/dev/null | grep -Ei 'mmc[0-9]+: .*(reset|timeout|error|I/O)|Reset 0x|never completed|I/O error' >/dev/null 2>&1; then
+        dmesg 2>/dev/null | grep -Eic 'mmc[0-9]+: .*(reset|timeout|error|I/O)|Reset 0x|never completed|I/O error' \
+            | sed 's/^/mmc_error_lines=/'
+        dmesg 2>/dev/null | grep -Ei 'mmc[0-9]+: .*(reset|timeout|error|I/O)|Reset 0x|never completed|I/O error' | tail -10
+    else
+        echo 'mmc_error_lines=0'
+    fi
+
+    # ---- 2. 卡死类内核抱怨（S1 判据）----
+    printf '\n== 卡死类抱怨（S1）==\n'
+    for pat in 'hung task' 'rcu.*stall' 'soft lockup' 'hard LOCKUP' 'BUG:' 'Oops'; do
+        n=$(dmesg 2>/dev/null | grep -Eic "$pat" || true)
+        printf '%s=%s\n' "$(printf '%s' "$pat" | tr -c 'A-Za-z0-9' '_')" "${n:-0}"
+    done
+
+    # ---- 3. 网络计数（S3 判据）----
+    printf '\n== 网络计数（S3）==\n'
+    for devpath in /sys/class/net/*; do
+        [ -e "$devpath" ] || continue
+        dev="$(basename "$devpath")"
+        [ "$dev" = "lo" ] && continue
+        printf -- '-- %s --\n' "$dev"
+        for key in rx_bytes rx_packets rx_dropped rx_errors tx_bytes tx_packets tx_dropped tx_errors; do
+            printf '%s=%s ' "$key" "$(cat "$devpath/statistics/$key" 2>/dev/null || echo 0)"
+        done
+        printf '\n'
+    done
+    grab "接口列表" ip -br link 2>/dev/null || true
+
+    # ---- 4. 无线链路详情（S3/S8）----
+    printf '\n== 无线链路（S3/S8）==\n'
+    WIRELESS=""
+    for devpath in /sys/class/net/*; do
+        [ -d "$devpath/wireless" ] || continue
+        WIRELESS="$(basename "$devpath")"
+        break
+    done
+    [ -n "$WIRELESS" ] || WIRELESS="wlan0"   # 没有无线接口时按约定名问一次，日志里留下"接口缺失"的事实
+    printf 'wireless_if=%s\n' "$WIRELESS"
+    if command -v iw >/dev/null 2>&1; then
+        iw dev "$WIRELESS" link 2>&1 | head -20
+        iw dev "$WIRELESS" station dump 2>&1 | head -20
+    else
+        echo '(缺少 iw)'
+    fi
+
+    # ---- 5. C-state（S1 生效验证）----
+    printf '\n== C-state（S1）==\n'
+    for s in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+        [ -e "$s" ] || continue
+        printf '%s disable=%s usage=%s latency=%s\n' \
+            "$(basename "$s")" \
+            "$(cat "$s/disable" 2>/dev/null || echo '?')" \
+            "$(cat "$s/usage" 2>/dev/null || echo '?')" \
+            "$(cat "$s/residency" 2>/dev/null || echo '?')"
+    done
+    printf 'cmdline_idle_param=%s\n' \
+        "$(cat /proc/cmdline 2>/dev/null | tr ' ' '\n' | grep -E '^intel_idle\.' | tr '\n' ' ')"
+
+    # ---- 6. 温度 ----
+    printf '\n== 温度 ==\n'
+    for z in /sys/class/thermal/thermal_zone*; do
+        [ -e "$z" ] || continue
+        printf '%s type=%s temp=%s\n' "$(basename "$z")" \
+            "$(cat "$z/type" 2>/dev/null || echo '?')" \
+            "$(cat "$z/temp" 2>/dev/null || echo '?')"
+    done
+
+    # ---- 7. 内存 ----
+    printf '\n== 内存 ==\n'
+    grep -E '^(MemTotal|MemAvailable|SwapTotal|SwapFree):' /proc/meminfo 2>/dev/null
+
+    # ---- 8. 存储健康：能不能写 ----
+    printf '\n== 存储写入检查 ==\n'
+    if touch "$BASE/.write-probe" 2>/dev/null; then
+        echo "health_dir_write=ok"
+        rm -f "$BASE/.write-probe"
+    else
+        echo "health_dir_write=FAILED"
+    fi
+    df -h "$BASE" / /srv/cache 2>/dev/null | head -6
+} >"$OUT" 2>&1
+
+cp -f "$OUT" "$BASE/latest.txt" 2>/dev/null || true
+
+# 轮转：只留最近 KEEP 份
+ls -1 "$BASE"/snapshot-*.txt 2>/dev/null | sort | head -n -"$KEEP" 2>/dev/null | while read -r old; do
+    rm -f "$old"
+done
+
+# microSD 上再存一份（eMMC 只放系统，写放大要省）
+if [ -d /srv/cache ] && [ -w /srv/cache ]; then
+    mkdir -p "$ALT" 2>/dev/null && cp -f "$OUT" "$ALT/" 2>/dev/null || true
+fi
+
+if [ "${1:-}" = "--once" ]; then
+    cat "$OUT"
+fi
+exit 0

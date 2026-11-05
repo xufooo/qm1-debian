@@ -1,0 +1,14 @@
+[Unit]
+Description=Collect QM1 stability evidence every 5 minutes
+Documentation=file:/usr/local/sbin/qm1-health-collect
+
+[Timer]
+# 开机 2 分钟后开始，之后每 5 分钟一次 —— 覆盖"整机卡死"这类需要事后查日志的场景：
+# 快照必须持续落盘，否则挂死重启后什么证据都没有。
+OnBootSec=2min
+OnUnitActiveSec=5min
+AccuracySec=30s
+Persistent=true
+
+[Install]
+WantedBy=timers.target

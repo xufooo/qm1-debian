@@ -1,0 +1,11 @@
+[Unit]
+Description=QM1 stability evidence collector (periodic snapshot)
+Documentation=file:/usr/local/share/qm1/driver-manifest.txt
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/qm1-health-collect
+# 采集要轻量，别跟业务抢 CPU：这台机器只有 4 个 Silvermont 核。
+Nice=10
+IOSchedulingClass=idle
