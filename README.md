@@ -163,10 +163,11 @@ Debian 13 的 6.12 内核对本机全部外设驱动都已是模块，因此无�
 
 | 类别 | 内容 | 来源 |
 |------|------|------|
-| **内核模块（`=m`）** | eMMC/SD（`sdhci-pci` / `sdhci-acpi` / `mmc_block`）、USB（`ehci-pci`/`xhci-hcd`/`usb-storage`）、显卡 `i915`、Intel HDA（`snd-hda-intel` + `snd-hda-codec-realtek`）、蓝牙 `btusb`、无线 `r8723bs`（内置 RTL8723BS）/ `brcmfmac`/`iwlwifi`/`rtw88` | Debian `linux-image-amd64` |
+| **内核模块（`=m`）** | eMMC/SD（`sdhci-pci` / `sdhci-acpi` / `mmc_block`）、USB（`ehci-pci`/`xhci-hcd`/`usb-storage`）、显卡 `i915`、Intel HDA（`snd-hda-intel` + `snd-hda-codec-realtek`）、蓝牙 `btusb`（USB 蓝牙棒）、无线 `r8723bs`（内置 RTL8723BS）/ `brcmfmac`/`iwlwifi`/`rtw88` | Debian `linux-image-amd64` |
 | **内置（`=y`）** | ACPI、EFI stub（含 handover）、串口控制台、RTC（`CONFIG_RTC_DRV_CMOS`）、thermal、intel_idle | 同上（无法改成模块，属发行版正常形态） |
 | **需 firmware** | Broadcom brcmfmac、Realtek 8723*/8812*、MediaTek mt76、Atheros、Intel 无线、Intel 微码、SOF 音频固件 | `firmware-brcm80211` / `firmware-realtek` / `firmware-mediatek` / `firmware-atheros` / `firmware-iwlwifi` / `firmware-sof-signed` / `intel-microcode`（**位于 non-free-firmware 组件**，mmdebstrap 必须带 `--components=main,non-free-firmware`） |
 | **需 out-of-tree（DKMS）** | Realtek RTL8723AU / 8812AU / 8812BU 等 **USB** 消费级无线芯片（主线内核无驱动） | 通过 `QM1_DKMS_DEB_DIR` 注入预编译 .deb，或改用 USB 以太网适配器 |
+| **需厂商用户态工具** | 内置蓝牙（ACPI UART）初始化：主线没有 Realtek UART HCI 驱动，要靠 `rtk_hciattach` 下发厂商固件 | `scripts/build-bt-hciattach.sh` 产出的 `qm1-rtl8723bs-bt`（见下节） |
 
 启动关键路径（eMMC 控制器 + 根文件系统）会被写进 initramfs：`MODULES=most` + `COMPRESS=zstd`，并显式声明 `sdhci_pci sdhci_acpi mmc_block vfat ext4 usb_storage xhci_hcd ehci_pci`。
 `modules-load.d` 只放 `i915`（HDMI 首屏）、`snd_hda_intel`、`btusb`；其余靠 udev 自动加载。
@@ -292,6 +293,52 @@ hook 会核对 vermagic 与镜像内核一致、固件在位，并把 `/etc/modu
 里的 `r8723bs` 换成回移后的模块名；`drv-selfcheck.sh` 看到 rtw88 模块时直接报 PASS。
 CI 里 `build-image` 已经把这条链路串起来了；rtw88 模块构建失败时流水线会回退到打了补丁的
 staging 模块，不阻断镜像产出。
+
+#### 蓝牙：RTL8723BS 的 BT 部分（ACPI UART + 厂商固件下发）
+
+内置蓝牙和 Wi-Fi 是同一颗 combo 芯片，但**不是 USB 设备**——它是 ACPI 枚举的 UART。
+ASUS 官方 Win8 驱动的 `rtkuart.inf` 写得很明确：
+
+```
+ACPI\VEN_OBDA&DEV_8723
+ACPI\VEN_OBDA&DEV_0623
+```
+
+对应驱动 `RtkUart.sys`（用户态服务）。**Linux 主线没有 Realtek UART HCI 驱动**
+（linux-firmware 的提交说明里直接写明：这些固件名来自 Realtek 驱动，内核侧无对应驱动），
+所以内核只需要 `CONFIG_BT_HCIUART`（Debian 已内置 `btuart`），缺的是「把厂商固件刷进芯片
+并初始化」这一步 —— 那由用户态 `rtk_hciattach` 完成，之后内核 `btuart` 接手同一个串口。
+
+| 环节 | 本仓库的做法 |
+|------|--------------|
+| 用户态工具 | 上游 [lwfinger/rtl8723bs_bt](https://github.com/lwfinger/rtl8723bs_bt)（钉死提交 `09eb91f5`）的 `rtk_hciattach`：BlueZ hciattach 的 Realtek 衍生版，负责下发固件并做厂商初始化 |
+| 固件 | 上游自带的 `rtlbt_fw` / `rtlbt_config` / `rtlbt_fw_new`（**不是** Windows 那份未打补丁的 blob，见下） |
+| 串口探测 | `/etc/default/qm1-bluetooth` 里的 `BT_TTY` 优先；否则按 ACPI HID（`OBDA8723` / `OBDA0623`）在 sysfs 里反查 tty；再否则退回 dmesg 里的第一个 MMIO 串口 |
+| 开机自启 | `qm1-bluetooth.service` → `qm1-bt-attach.sh` → `rtk_hciattach -n -s 115200 <tty> rtk_h5`（`-n` = 不摘 ldisc，让内核接管；`rtk_h5` = 3 线 UART，需内核 ≥ 3.12） |
+
+**固件谱系（取证结论，别混用）**：ASUS Win8.1 蓝牙包里的
+`rtl8723b_mp_bt40_fw_asic_rom`（50504 B）与 Debian `firmware-realtek` 的
+`rtl_bt/rtl8723bs_fw.bin`（52116 B）**首字节就不同** —— 后者是 Linux 侧**打过补丁**的版本
+（把 UART 波特率改成 1500000 bps）。配置也一样：ASUS 的
+`rtl8723b_config_internal.bin`（64 B）与 Debian 的 `rtl8723bs_config.bin`（64 B）
+只有 0x20–0x25 一段不同，**蓝牙地址字节 `[withheld]` 完全一致** ⇒ Debian 的那份
+就是 ASUS/Realtek 配置改过波特率后的产物。Windows 那份不能直接塞进 Linux。
+
+**装进镜像**：
+
+```bash
+bash scripts/build-bt-hciattach.sh --out-dir build/bt-hciattach
+bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
+     --kernel-version 6.12.113 \
+     --rtw88-module-deb build/rtw88-module/qm1-rtw88-8723bs_*.deb \
+     --bt-hciattach-deb build/bt-hciattach/qm1-rtl8723bs-bt_*.deb
+```
+
+hook 会核对 `rtk_hciattach` 可执行、固件在位、内核 `CONFIG_BT_HCIUART=y`，并建立开机自启链接；
+CI 里有一条硬断言（`Assert the Bluetooth vendor package is inside the image`），少了任何一项就红。
+
+**兜底**：如果某个内核上 `rtk_hciattach` 起不来（串口探测不到、或 H5 协议不通），
+USB 蓝牙棒（`btusb`，内核自带）仍然是可用的备选 —— 镜像里已经带了 `bluez`。
 
 ## 设备端自检
 
