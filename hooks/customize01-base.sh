@@ -49,7 +49,7 @@ enable_unit() {
         mkdir -p "$TARGET/etc/systemd/system/$_dir"
         ln -sf "/lib/systemd/system/$_unit" \
                "$TARGET/etc/systemd/system/$_dir/$_unit"
-        echo "[hook01] 已启用 $_unit（$_dir）"
+        echo "[hook01] 已启用 $_unit（$_dir）: $(ls -l "$TARGET/etc/systemd/system/$_dir/$_unit" 2>&1)"
     fi
 }
 

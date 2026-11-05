@@ -417,6 +417,11 @@ jobs:
             if [ ! -L "$ROOT/etc/systemd/system/timers.target.wants/$unit" ] \
                && [ ! -L "$ROOT/etc/systemd/system/multi-user.target.wants/$unit" ]; then
               echo "::error::$unit 未在镜像里启用"
+              echo "--- 诊断：rootfs=$ROOT"
+              ls -la "$ROOT/etc/systemd/system/" 2>&1 | head -20
+              ls -la "$ROOT/etc/systemd/system/timers.target.wants/" 2>&1 | head -10
+              ls -la "$ROOT/etc/systemd/system/multi-user.target.wants/" 2>&1 | head -20
+              find "$ROOT/etc/systemd/system" -maxdepth 2 -name '*timesyncd*' 2>&1 | head
               exit 1
             fi
           done
