@@ -273,6 +273,15 @@ jobs:
           KVER="${{ steps.kernel.outputs.kver }}"
           DEB="$(ls build/rtw88-module/*.deb | head -1)"
           [ -n "$DEB" ]
+          # ★ 回退树的包名必须带 -fallback 后缀。
+          #   这个作业构建的是 vendor 树（回退用的那版），出货那一版是
+          #   upstream 整树（单模块 rtw88_qm1）。以前两个作业都产出
+          #   同名同版本但内容完全不同的包 —— dpkg 会拒绝同版本覆盖，
+          #   运维也容易拿错。包名钉在这里，改脚本忘了改就会红。
+          case "$(basename "$DEB")" in
+            *-fallback_*) : ;;
+            *) echo "::error::回退包的包名必须带 -fallback 后缀，实际是 $(basename "$DEB")"; exit 1 ;;
+          esac
           dpkg-deb -I "$DEB"
           dpkg-deb -c "$DEB" | tee build/rtw88-module/contents.txt
           grep -q "lib/modules/$KVER/extra/rtw88/" build/rtw88-module/contents.txt

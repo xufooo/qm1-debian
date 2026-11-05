@@ -43,7 +43,6 @@ OUT_DIR="out"
 SOURCE="vendor"
 JOBS="$(nproc --ignore=1 2>/dev/null || echo 2)"
 KERNEL_REPO="https://github.com/torvalds/linux.git"
-KERNEL_REF="v6.12"
 # The upstream rtw88 tree is pinned to one commit.  A floating "master" makes
 # the build irreproducible: if upstream puts the 500 ms TX report purge
 # timeout back, the image silently falls back to the "the link comes up but
@@ -101,7 +100,6 @@ while [ $# -gt 0 ]; do
         --source)        SOURCE="$2"; shift 2 ;;
         --jobs)          JOBS="$2"; shift 2 ;;
         --kernel-repo)   KERNEL_REPO="$2"; shift 2 ;;
-        --kernel-ref)    KERNEL_REF="$2"; shift 2 ;;
         --upstream-ref)  UPSTREAM_REF="$2"; shift 2 ;;
         --vendor-repo)   VENDOR_REPO="$2"; shift 2 ;;
         --vendor-ref)    VENDOR_REF="$2"; shift 2 ;;
@@ -115,7 +113,19 @@ while [ $# -gt 0 ]; do
 done
 
 [ -n "$KVER" ] || { usage; die "--kver is required"; }
-case "$SOURCE" in auto|upstream|upstream-full|vendor) ;; *) die "invalid --source: $SOURCE" ;; esac
+case "$SOURCE" in
+    auto|upstream-full|vendor) ;;
+    upstream)
+        # ★ 这个模式在本项目里是死路，明确说出来，别让人在它上面浪费时间。
+        #   它做的是"把上游的 8723B 芯片驱动单独回移"，产出的模块名
+        #   （rtw88_8723b / rtw88_8723bs）与**树内** rtw88 完全同名，
+        #   而且依赖树内 rtw88_core ⇒ 树内模块和树外模块不可能同时加载。
+        #   出货请用 upstream-full（整棵上游 rtw88 编成一个模块 rtw88_qm1），
+        #   回退请用 vendor（staging 树）。
+        die "--source upstream is not supported here: the chip-backport modules share the names of the in-tree rtw88 modules and depend on the in-tree rtw88_core. Use --source upstream-full (shipping) or --source vendor (fallback)."
+        ;;
+    *) die "invalid --source: $SOURCE" ;;
+esac
 
 # The patch directories always get a default, no matter whether --patch-dir was
 # given: with --source upstream-full the upstream patch directory is used even
@@ -162,7 +172,6 @@ OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK="$OUT_DIR/rtw88-build"
 rm -rf "$WORK"
 mkdir -p "$WORK"
-RTW88_DIR="$WORK/rtw88-src"
 
 # ---------------------------------------------------------------------------
 # fetch helpers
@@ -183,107 +192,6 @@ fetch_to() {   # fetch_to <url> <target>
 # upstream backport: chip driver from upstream + rtw88 headers of the target
 # kernel series, built as external modules against the in-tree rtw88 core.
 # ---------------------------------------------------------------------------
-build_upstream() {
-    log "building the upstream rtw88 8723b backport"
-
-    # 目标内核自带的 rtw88 头文件最理想：与内核版本严格一致，也省掉一次大仓库 clone。
-    local sysrtw="$KSRC/drivers/net/wireless/realtek/rtw88"
-    if [ -f "$sysrtw/main.h" ]; then
-        log "using the rtw88 headers shipped with $KVER"
-        RTW88_DIR="$WORK/rtw88-headers"
-        rm -rf "$RTW88_DIR"
-        mkdir -p "$RTW88_DIR"
-        cp "$sysrtw"/*.h "$RTW88_DIR/" 2>/dev/null || true
-    else
-        log "fetching the rtw88 headers of $KERNEL_REF"
-        rm -rf "$WORK/linux"
-        git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$KERNEL_REF" \
-            "$KERNEL_REPO" "$WORK/linux" \
-            || { warn "kernel tree clone failed"; return 1; }
-        git -C "$WORK/linux" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
-            || { warn "sparse checkout failed"; return 1; }
-        RTW88_DIR="$WORK/linux/drivers/net/wireless/realtek/rtw88"
-    fi
-    [ -f "$RTW88_DIR/main.h" ] || { warn "rtw88 headers are incomplete"; return 1; }
-
-    local base="https://raw.githubusercontent.com/torvalds/linux/${UPSTREAM_REF}/drivers/net/wireless/realtek/rtw88"
-    local f
-    for f in rtw8723b.c rtw8723b.h rtw8723b_table.c rtw8723b_table.h rtw8723bs.c; do
-        fetch_to "${base}/${f}" "$RTW88_DIR/$f" || { warn "cannot fetch ${f}"; return 1; }
-    done
-
-    local mod="$WORK/module-upstream"
-    rm -rf "$mod"
-    mkdir -p "$mod/rtw88"
-    cp "$RTW88_DIR"/*.h "$mod/rtw88/" 2>/dev/null || true
-    cp "$RTW88_DIR/rtw8723b.c" "$RTW88_DIR/rtw8723b_table.c" "$RTW88_DIR/rtw8723bs.c" "$mod/"
-    cat > "$mod/Makefile" <<'EOF'
-# Out-of-tree build of the upstream rtw88 RTL8723B / RTL8723BS support.
-obj-m += rtw88_8723b.o
-rtw88_8723b-objs := rtw8723b.o rtw8723b_table.o
-obj-m += rtw88_8723bs.o
-rtw88_8723bs-objs := rtw8723bs.o
-ccflags-y += -I$(src)/rtw88
-EOF
-
-    log "compiling against $KSRC"
-    make -C "$KSRC" M="$mod" -j"$JOBS" modules \
-        || { warn "the upstream backport does not compile against $KVER"; return 1; }
-    [ -f "$mod/rtw88_8723b.ko" ] && [ -f "$mod/rtw88_8723bs.ko" ] \
-        || { warn "upstream build produced no modules"; return 1; }
-    MOD_DIR="$mod"
-    MOD_NAMES="rtw88_8723b.ko rtw88_8723bs.ko"
-    return 0
-}
-
-# ---------------------------------------------------------------------------
-# Hard assertion: the rtw88 tree that gets compiled must carry the fixed TX
-# report purge timeout.
-#
-# The whole point of the backport is the TX report purge timeout: upstream
-# 4d688f22ebbf gives the 8723BS 2500 ms instead of 500 ms.  If the upstream
-# tree ever carries the old 500 ms value again, the image silently falls back
-# to "the link comes up but the throughput collapses" — and no other check in
-# this script would notice.  So the value is read out of the tree and checked.
-# ---------------------------------------------------------------------------
-assert_tx_probe_timeout() {   # assert_tx_probe_timeout <rtw88/tx.h>
-    local tx_h="$1" hit
-    [ -f "$tx_h" ] || die "no rtw88/tx.h in the upstream tree ($tx_h)"
-    # the *same* line has to carry the symbol name and the 2500 ms value
-    hit="$(grep -n 'RTW_TX_PROBE_TIMEOUT_LONG' "$tx_h" | grep '2500' || true)"
-    if [ -z "$hit" ]; then
-        printf '[rtw88][fail] the upstream tree has no 2500 ms TX report purge timeout (RTW_TX_PROBE_TIMEOUT_LONG) in %s\n' "$tx_h" >&2
-        printf '[rtw88][fail] the image would fall back to the old "link up, throughput collapsed" symptom\n' >&2
-        printf -- '--- %s (first 40 lines) ---\n' "$tx_h" >&2
-        head -n 40 "$tx_h" >&2
-        printf -- '--- the timeout defines in %s ---\n' "$tx_h" >&2
-        grep -n -B2 -A2 'RTW_TX_PROBE_TIMEOUT' "$tx_h" >&2 || true
-        printf -- '--- end of the excerpt ---\n' >&2
-        die "上游树没有 2500 ms 的 TX report purge 超时，镜像会退回吞吐塌陷的老症状 (the upstream tree does not carry the 2500 ms TX report purge timeout)"
-    fi
-    log "TX report purge timeout: $(printf '%s' "$hit" | tr '\n' ' ')"
-}
-
-# ---------------------------------------------------------------------------
-# Does the in-tree kernel export this symbol from one of its rtw88 modules?
-#
-# The out-of-tree module replaces the in-tree rtw88 modules (they are
-# blacklisted in the image), so symbols that *only* the in-tree rtw88 modules
-# export stay unresolved on purpose.  Every other unresolved symbol is a real
-# defect and has to fail the build.
-# ---------------------------------------------------------------------------
-tree_exports_symbol() {   # tree_exports_symbol <symbol>
-    local sym="$1" sv="$KSRC/Module.symvers"
-    [ -f "$sv" ] || return 1
-    # 不要写成 `awk ... | grep -q '^rtw88'`：grep -q 命中即退出，
-    # 而 awk 还在继续扫 Module.symvers（同一个符号可能由多个模块导出），
-    # 后续写入会拿到 EPIPE/SIGPIPE(141)；在 set -o pipefail 下整条管道
-    # 的退出码就变成 141 —— 「符号存在」会被误判成「不存在」。
-    # 先把 awk 的输出收进 shell 变量，管道里就只剩一次很短的写入。
-    local exporters
-    exporters="$(awk -v s="$sym" '$2 == s { print $3 }' "$sv")" || return 1
-    printf '%s\n' "$exporters" | grep -q '^rtw88'
-}
 
 # ---------------------------------------------------------------------------
 # upstream-full: the complete upstream rtw88 tree of --upstream-ref, built as
@@ -299,6 +207,7 @@ tree_exports_symbol() {   # tree_exports_symbol <symbol>
 # coexist in one module tree.
 # ---------------------------------------------------------------------------
 build_upstream_full() {
+    BUILT_FROM="upstream-full"
     log "building the whole upstream rtw88 tree ($UPSTREAM_REF) against $KVER"
 
     # An existing checkout can be used as it is; this skips the git clone.
@@ -548,6 +457,7 @@ REQUIRED_VENDOR_PATCHES="0001-rtw88-8723bs-extend-the-tx-report-purge-timeout.pa
 # vendor tree: self contained rtw88 copy with the RTL8723BS support
 # ---------------------------------------------------------------------------
 build_vendor() {
+    BUILT_FROM="vendor"
     log "building the vendor rtw88 tree $VENDOR_REPO@${VENDOR_REF:0:12}"
     local tarball="$WORK/vendor.tar.gz"
     fetch_to "https://codeload.github.com/${VENDOR_REPO}/tar.gz/${VENDOR_REF}" "$tarball" \
@@ -643,7 +553,6 @@ clone_ref() {   # clone_ref <url> <dir> <ref>
 MOD_DIR=""
 MOD_NAMES=""
 case "$SOURCE" in
-    upstream)        build_upstream || die "the upstream backport failed" ;;
     upstream-full)  build_upstream_full || die "the full upstream rtw88 build failed" ;;
     vendor)   build_vendor   || die "the vendor build failed" ;;
     auto)
@@ -652,7 +561,10 @@ case "$SOURCE" in
         # 在 6.12 上编不过；能编过的是维护中的 vendor rtw88 树，所以默认先试它。
         # build_vendor 内部的失败（包括补丁打不上）都以非零状态返回，所以这个
         # 回退分支是真的能走到的。
-        build_vendor || { warn "falling back to the upstream backport"; build_upstream || die "both builds failed"; }
+        # 回退到**出货那一棵树**（upstream-full），不是那个芯片回移的
+        # upstream 模式 —— 后者是死路（模块名与树内 rtw88 相同且依赖树内
+        # rtw88_core），回退到它等于回退到一个装不上的东西。
+        build_vendor || { warn "falling back to the full upstream rtw88 tree"; build_upstream_full || die "both builds failed"; }
         ;;
 esac
 
@@ -865,6 +777,20 @@ EOF
 # '+' and '-'), so it is reduced to dots.
 KVER_SLUG="$(printf '%s' "$KVER" | sed 's/[^A-Za-z0-9.]/./g')"
 PKG_VERSION="1.0.0+${KVER_SLUG}-1"
+
+# ★ 包名必须区分"出货那棵树"与"回退那棵树"。
+#   两个 CI 作业以前都产出同名同版本（qm1-rtw88-8723bs 1.0.0+<kver>-1）
+#   但内容完全不同（upstream 整树 = 单模块 rtw88_qm1；vendor = 四个模块
+#   rtw_core/rtw_sdio/rtw_8723b/rtw_8723bs）。同名同版本 ⇒
+#     * dpkg 会拒绝"用另一个内容覆盖同版本"的安装；
+#     * 运维很容易拿错产物，还以为装的是出货那一版。
+#   所以回退树的包名加 -fallback 后缀。
+case "${BUILT_FROM:-upstream-full}" in
+    vendor)         DEB_NAME="qm1-rtw88-8723bs-fallback" ;;
+    upstream)       DEB_NAME="qm1-rtw88-8723bs-upstream" ;;
+    upstream-full)  DEB_NAME="qm1-rtw88-8723bs" ;;
+    *)              die "unknown build source: ${BUILT_FROM:-}" ;;
+esac
 
 cat > "$PKG/DEBIAN/control" <<EOF
 Package: $DEB_NAME
