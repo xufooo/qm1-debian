@@ -467,6 +467,18 @@ jobs:
           if grep -qE '^After=.*multi-user\.target' "$ROOT/etc/systemd/system/qm1-provision.service"; then
             echo "::error::qm1-provision.service 还 After=multi-user.target —— 会和 target 的隐式 After= 撞排序环"; exit 1
           fi
+          # ★ 失败必须真的会重试。
+          #   原来靠 timer 的 OnUnitInactiveSec=10min —— 那是不成立的：
+          #   失败的 oneshot 落到的是 failed，不是 inactive ⇒ 定时器永远
+          #   不会因为失败而再次触发 ⇒ 铺运行时失败一次就再也不试。
+          #   重试必须由服务自己的 Restart=on-failure 承担。
+          grep -q '^Restart=on-failure' "$ROOT/etc/systemd/system/qm1-provision.service" \
+            || { echo "::error::qm1-provision.service 没有 Restart=on-failure —— 铺运行时失败一次就再也不试了"; exit 1; }
+          grep -q '^RestartSec=' "$ROOT/etc/systemd/system/qm1-provision.service" \
+            || { echo "::error::qm1-provision.service 没有写明重试间隔（RestartSec=）"; exit 1; }
+          if grep -q '^OnUnitInactiveSec=' "$ROOT/etc/systemd/system/qm1-provision.timer"; then
+            echo "::error::qm1-provision.timer 用 OnUnitInactiveSec 做重试 —— 失败态是 failed 不是 inactive，永远不会触发"; exit 1
+          fi
 
           # ★ 开机自检：也要由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
           #   不能算单元失败（否则整机变 degraded，真故障会被噪声淹没）。
