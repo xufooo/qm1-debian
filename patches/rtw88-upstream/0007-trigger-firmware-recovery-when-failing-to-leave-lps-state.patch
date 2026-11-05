@@ -1,0 +1,46 @@
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Sat, 7 Nov 2026 12:00:00 +0800
+Subject: [PATCH] wifi: rtw88: ps: Trigger firmware recovery when failing to leave LPS state
+
+Carried from the upstream rtw-next commit
+
+  dc16902cad9c6b08df9395a510c7be44fbab545d
+  "wifi: rtw88: ps: Trigger firmware recovery when failing to leave LPS state"
+  (Kalpesh Solanki, 2026-11-03)
+
+which is *not* part of the upstream snapshot this module is built from
+(05441d697f7f9a927264f4058cbbc6a03dfcac9d, a torvalds/linux master
+snapshot of 2026-11-03): master only merged rtw-next up to the
+"rtw-next-2026-10-08" tag, so every 8723B fix from 2026-10-09 onwards
+is missing from the tree we ship.
+
+Why we carry it:
+
+When the firmware fails to leave the low power state, the driver only
+logged a warning and cleared REG_TCR.  The chip was then left in a state
+where later H2C commands fail and TX traffic hangs indefinitely -- the
+firmware never comes back on its own.  That is exactly the "the link
+dies and never returns" class of failure this machine keeps hitting, and
+this box has no wired network to fall back to.
+
+The upstream fix calls rtw_fw_recovery() on that path, so the driver
+resets the hardware and re-syncs by itself.
+
+Note on why this was previously listed as "not needed": the shipping
+module configures rtw88 with disable_lps_deep only.  The parameter set
+rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode belongs to the in-tree
+staging driver (r8723bs), rtw88 does not have them, and
+disable_lps_deep only turns off the *deep* low power mode.  The ordinary
+LPS leave path is still reachable, so the path this fix protects is
+reachable in the configuration we ship.
+diff --git a/ps.c b/ps.c
+--- a/ps.c
++++ b/ps.c
+@@ -166,6 +166,7 @@
+ 		rtw_write32_clr(rtwdev, REG_TCR, BIT_PWRMGT_HWDATA_EN);
+ 		rtw_warn(rtwdev, "firmware failed to leave lps state\n");
+ 		rtw_fw_dump_dbg_info(rtwdev);
++		rtw_fw_recovery(rtwdev);
+ 	}
+ }
+ 

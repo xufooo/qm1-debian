@@ -117,12 +117,94 @@ four weeks of upstream work on exactly this chip.
 * If the QM1 ever proves that 40 MHz is fine on this module, revert this
   patch or backport the upstream efuse series properly.
 
+## 0007 — ps: trigger firmware recovery when failing to leave LPS state
+
+Carried from upstream rtw-next commit `dc16902cad9c` (Kalpesh Solanki,
+2026-11-03).
+
+When the firmware fails to leave the low power state, the driver used to
+log a warning, clear `REG_TCR` and carry on.  The chip was then left in a
+state where later H2C commands fail and TX traffic hangs indefinitely —
+the firmware never comes back on its own.
+
+On the QM1 this is the worst possible failure mode: the Wi-Fi is the
+only network, so a chip that does not come back means the machine has no
+network at all and no way to fix it remotely.  Upstream's fix calls
+`rtw_fw_recovery()`, so the driver resets the hardware and re-syncs by
+itself.
+
+> Earlier revisions of this file claimed this fix was unnecessary because
+> the image disables power saving.  **That was wrong.**  The parameters
+> `rtw_power_mgnt` / `rtw_smart_ps` / `rtw_ips_mode` belong to the
+> in-tree *staging* driver (`r8723bs`); rtw88 does not have them — the
+> shipping module only sets `disable_lps_deep`, which turns off the
+> *deep* low power mode.  The ordinary LPS leave path is still reachable,
+> so the path this fix protects is reachable in the configuration we ship.
+
+## 0008 — 8723b: avoid converting RX SNR twice
+
+Carried from upstream rtw-next commit `1d72d0db9111` (Hungyu Lin,
+2026-10-10).
+
+`rtw8723b_query_phy_status_ofdm()` divided the reported SNR by two when
+filling `pkt_stat->rx_snr` and shifted it again when updating
+`dm_info->rx_snr`, so every SNR the driver reported — and the averages
+derived from it — was half of what the chip measured.  The fix stores the
+raw report and converts once, the way the other chip drivers do.
+
+We care because the on-device self-check reads these statistics to judge
+link quality.
+
+## 0009 — allow key removal when the CAM table is full
+
+Carried from upstream rtw-next commit `b60ee9891e40` (Hungyu Lin,
+2026-10-19).
+
+`rtw_ops_set_key()` looked for a free CAM entry *before* it looked at the
+command.  Once every pairwise entry was in use, `DISABLE_KEY` returned
+`-ENOSPC` without clearing the entry that was already there, so the old
+key could never be removed from the hardware — for example when the AP
+rekeys, or when we reconnect after the link dropped.  Upstream moves the
+allocation into `SET_KEY` only; `DISABLE_KEY` reuses the existing
+`key->hw_key_idx`.
+
 ## Deliberately not carried
 
 | Upstream commit | Why not |
 | --- | --- |
 | `51abe866522f`, `10d1312f2f19`, `ec2baa4c9317` (efuse package type / chip variant) | They change the `read_efuse` chip operation for every chip in the tree; too wide a backport for one bit.  Their effect on the bandwidth is approximated by 0006. |
-| `dc16902cad9c` (firmware recovery when leaving LPS fails) | The image turns the power save off (`rtw_power_mgnt=0` / `rtw_smart_ps=0` / `rtw_ips_mode=0`), so the path it protects is not taken. |
+
+## Known gaps — upstream fixes that are not in this tree
+
+The pinned snapshot is a static commit, so it will never pick up later
+upstream work by itself.  This is the list of the rtw-next commits that
+touch `drivers/net/wireless/realtek/rtw88` between the merge point of
+our snapshot (`1f8e4308755e`, "rtw-next-2026-10-08") and 2026-11-03,
+and what we did about each one:
+
+| Upstream commit | Date | Subject | Status |
+| --- | --- | --- | --- |
+| `dc16902cad9c` | 2026-11-03 | ps: trigger firmware recovery when failing to leave LPS state | **carried** (0007) |
+| `1d72d0db9111` | 2026-10-10 | 8723b: avoid converting RX SNR twice | **carried** (0008) |
+| `b60ee9891e40` | 2026-10-19 | allow key removal when the CAM table is full | **carried** (0009) |
+| `1cca8775c2e5` | 2026-10-09 | 8723b: don't set `channel_invalid` in `query_phy_status()` | **carried** (0004) |
+| `83ca360e8528` | 2026-10-09 | sdio: reject oversized RX packets | **carried** (0002) |
+| `c76f73c36343` | 2026-10-09 | sdio: copy RX status after updating the frequency | **carried** (0003) |
+| `b490cf696ff7` | 2026-10-20 | 8723b: always report a single spatial stream | **carried** (0005) |
+| `51abe866522f`, `10d1312f2f19`, `ec2baa4c9317` | 2026-10-20 | efuse: read the package type / chip variant | not carried (see above) |
+| `04c998418722` | 2026-11-03 | pci: add DMI quirk for HP Laptop 15s-fr5xxx | not applicable (PCI) |
+| `62e69ef45567` | 2026-11-02 | usb: don't report the aggregation buffer as a frame | not applicable (USB) |
+| `6ac7db1cea43` | 2026-10-23 | pci: wake the TX queues after restart_hw and interface up | not applicable (PCI) |
+| `72fa55807619` | 2026-10-19 | usb: drop RX frames received before the device is started | not applicable (USB) |
+| `a0756232e960` | 2026-10-13 | usb: download the reserved page synchronously | not applicable (USB) |
+| `f65d7df159a2` | 2026-10-09 | pci: preserve the RX ring DMA address on cleanup | not applicable (PCI) |
+| `b0435910e47d` | 2026-10-11 | 8822b: relax the ETSI EDCCA threshold on 2.4 GHz | not applicable (other chip) |
+| `c3ae9e68e138` | 2026-10-10 | 8703b: avoid converting RX SNR twice | not applicable (other chip) |
+| `49a8e00e0db8` | 2026-10-13 | mac80211: replace `ieee80211_iter_keys_rcu()` | not applicable (newer mac80211 API than 6.12) |
+
+Anything merged upstream *after* 2026-11-03 is unknown to us by
+construction — re-run the comparison before trusting this table.
+
 
 ## The vendor fallback tree does not have these
 
@@ -138,11 +220,13 @@ not the shipping path.  The shipping module is the upstream one.
 
 1. rejects any patch whose diff header carries the kernel-tree prefix,
 2. fetches the pinned upstream files (`mac80211.c`, `rtw8723bs.c`, `tx.c`,
-   `sdio.c`, `rtw8723b.c`) at the pinned SHA,
+   `sdio.c`, `rtw8723b.c`, `ps.c`) at the pinned SHA,
 3. applies the whole series **in order** with GNU patch (`-p1`), and
 4. checks the result for the expected content: the oversized-RX guard,
    the RX status copy *after* the frequency update, no `channel_invalid`,
-   `nss = 1`, `ant_num = 1` and `bw = BIT(RTW_CHANNEL_WIDTH_20)` only.
+   `nss = 1`, `ant_num = 1` and `bw = BIT(RTW_CHANNEL_WIDTH_20)` only,
+   the firmware recovery call on the LPS-leave failure path, the raw RX
+   SNR, and the CAM allocation sitting inside `case SET_KEY:`.
 
 This check exists because the alternative failure mode is quiet: when a
 patch does not apply, `scripts/build-rtw88-8723bs-module.sh` falls back to

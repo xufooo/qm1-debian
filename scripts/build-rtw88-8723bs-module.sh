@@ -535,7 +535,10 @@ REQUIRED_UPSTREAM_PATCHES="0001-rtw88-adapt-the-mac80211-api-to-linux-6.12.patch
 0003-rtw88-sdio-copy-rx-status-after-updating-the-frequency.patch
 0004-rtw88-8723b-do-not-set-channel-invalid-in-query-phy-status.patch
 0005-rtw88-8723b-always-report-a-single-spatial-stream.patch
-0006-rtw88-8723b-stay-at-20mhz-until-the-chip-variant-can-be-read.patch"
+0006-rtw88-8723b-stay-at-20mhz-until-the-chip-variant-can-be-read.patch
+0007-trigger-firmware-recovery-when-failing-to-leave-lps-state.patch
+0008-avoid-converting-rx-snr-twice.patch
+0009-allow-key-removal-when-the-cam-table-is-full.patch"
 
 REQUIRED_VENDOR_PATCHES="0001-rtw88-8723bs-extend-the-tx-report-purge-timeout.patch"
 
@@ -779,12 +782,10 @@ fi
     echo "# The staging driver r8723bs is superseded by the rtw88 backport."
     echo "# The staging parameters (rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode /"
     echo "# rtw_bw_mode) belong to r8723bs only; the rtw88 driver exposes the ones below."
-    echo "blacklist r8723bs"
-    echo "install r8723bs /bin/false"
-    # The patched out-of-tree staging module carries the same SDIO device id,
-    # so it has to be blocked as well — it is the old driver under a new name.
-    echo "blacklist r8723bs_qm1"
-    echo "install r8723bs_qm1 /bin/false"
+    echo "#"
+    echo "# NOTE: the staging drivers themselves are blocked in a separate file"
+    echo "# (qm1-rtl8723bs-fallback.conf) so that the fallback can be re-enabled"
+    echo "# on a machine without a wired network by deleting that one file."
     if [ "$_block_tree_rtw88" = "1" ]; then
         for m in $INTREE_RTW88; do
             # 绝不挡我们自己编出来的模块。
@@ -801,6 +802,44 @@ fi
     echo "options ${CORE_MODULE} support_bf=y"
     echo "options ${CORE_MODULE} debug_mask=0"
 } > "$PKG/etc/modprobe.d/qm1-rtw88-8723bs.conf"
+
+# ---------------------------------------------------------------------------
+# 隔离分成两个文件，为的是**现场没有网口时还能有退路**。
+#
+# 出货驱动装不上（符号不匹配 / modversions CRC 对不上 / 固件缺失）时，
+# 如果树内 staging 驱动也被同一个文件挡死，这台机器就彻底没网了 ——
+# 而它没有 RJ45，唯一的网络就是这块 Wi-Fi。
+#
+# 所以：挡住 staging 驱动的行单独放在这个文件里。要回退到打了补丁的
+# staging 模块，现场只要删掉这一个文件：
+#
+#   rm /etc/modprobe.d/qm1-rtl8723bs-fallback.conf
+#   modprobe r8723bs_qm1     # 打过 P1–P6 补丁的树外 staging 模块
+#
+# 剩下的树内 rtw88 隔离留在 qm1-rtw88-8723bs.conf 里 —— 那道必须一直在，
+# 因为出货模块导出的符号与树内 rtw88_core 同名，两个同时加载会
+# "exported symbol already defined"。
+# ---------------------------------------------------------------------------
+{
+    echo "# QM1 的 Wi-Fi 回退开关 —— 出货驱动（rtw88 整树回移）装不上时用它。"
+    echo "#"
+    echo "# 这台机没有 RJ45，Wi-Fi 是唯一的网络。如果机器连不上网："
+    echo "#   1) 先看 journalctl -u qm1-rtw88-8723bs.service 里的失败原因"
+    echo "#   2) 删掉本文件，重新让树外 staging 模块接手："
+    echo "#        rm /etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
+    echo "#        modprobe r8723bs_qm1"
+    echo "#      （r8723bs_qm1 是打了 P1–P6 补丁的树外 staging 模块，"
+    echo "#        永久卡死路径已修，但速率与弱信号表现不如 rtw88）"
+    echo "#"
+    echo "# 平时这两个文件都在 ⇒ staging 驱动不会按 SDIO modalias 抢先绑定。"
+    echo "blacklist r8723bs"
+    echo "install r8723bs /bin/false"
+    # 打了补丁的树外 staging 模块带的是**同一个** SDIO device id
+    # （0x024c:0xb723），udev 照样会按 modalias 抢先加载它 ——
+    # 那就等于换了个名字的老驱动，永久卡死路径一条没少。
+    echo "blacklist r8723bs_qm1"
+    echo "install r8723bs_qm1 /bin/false"
+} > "$PKG/etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
 
 cat > "$PKG/lib/systemd/system/qm1-rtw88-8723bs.service" <<EOF
 [Unit]

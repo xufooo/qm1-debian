@@ -62,7 +62,7 @@ done
 # ---------- 2. 取钉死那棵树里补丁要碰的文件 ----------
 #
 # 只取补丁真正涉及的文件：构建脚本只需要那几个文件就能判断补丁能不能打上。
-FILES="mac80211.c rtw8723bs.c tx.c sdio.c rtw8723b.c"
+FILES="mac80211.c rtw8723bs.c tx.c sdio.c rtw8723b.c ps.c"
 BASE_URL="https://raw.githubusercontent.com/torvalds/linux/$SHA/drivers/net/wireless/realtek/rtw88"
 
 if [ -z "$WORK" ]; then
@@ -116,6 +116,32 @@ if grep -q 'channel_invalid' "$WORK/rtw8723b.c"; then
     fail "8723B 仍然在 query_phy_status 里设 channel_invalid —— 接收频率会被写成中心信道，40 MHz 下会被 mac80211 拒收"
 fi
 check "SDIO 的超长 RX 包守卫不在" "$WORK/sdio.c" 'oversized RX packet'
+
+# 固件离开低功耗失败时要能自己恢复 —— 这台机没有网口，芯片不自己爬起来
+# 就等于彻底没网。
+check "LPS 离开失败时没有触发固件恢复" "$WORK/ps.c" 'rtw_fw_recovery\(rtwdev\);'
+_lps_line="$(grep -n 'rtw_fw_recovery(rtwdev);' "$WORK/ps.c" | head -1 | cut -d: -f1 || true)"
+_warn_line="$(grep -n 'firmware failed to leave lps state' "$WORK/ps.c" | head -1 | cut -d: -f1 || true)"
+[ -n "$_lps_line" ] || fail "ps.c 里找不到 rtw_fw_recovery() 调用"
+[ -n "$_warn_line" ] || fail "ps.c 里找不到 'firmware failed to leave lps state' 的告警"
+if [ "$_lps_line" -le "$_warn_line" ]; then
+    fail "固件恢复（第 $_lps_line 行）不在告警（第 $_warn_line 行）之后 —— 走不到那条路径"
+fi
+
+# RX SNR 不能被除两遍：否则自检读到的信噪比全是错的。
+if grep -qE 'pkt_stat->rx_snr\[RF_PATH_A\] = \(s8\)\(phy_status->path_rxsnr\[RF_PATH_A\] / 2\)' "$WORK/rtw8723b.c"; then
+    fail "8723B 的 RX SNR 仍然被除两遍 —— 链路质量统计会全是错的"
+fi
+check "8723B 的 RX SNR 没有保留原始值" "$WORK/rtw8723b.c" 'pkt_stat->rx_snr\[RF_PATH_A\] = phy_status->path_rxsnr\[RF_PATH_A\];'
+
+# CAM 表满了也要能删掉旧密钥：AP 换密钥或重连时用得上。
+_setkey_line="$(grep -n 'case SET_KEY:' "$WORK/mac80211.c" | head -1 | cut -d: -f1 || true)"
+_cam_line="$(grep -n 'rtw_sec_get_free_cam(sec)' "$WORK/mac80211.c" | head -1 | cut -d: -f1 || true)"
+[ -n "$_setkey_line" ] || fail "mac80211.c 里找不到 case SET_KEY:"
+[ -n "$_cam_line" ] || fail "mac80211.c 里找不到 CAM 槽位分配"
+if [ "$_cam_line" -lt "$_setkey_line" ]; then
+    fail "CAM 槽位分配（第 $_cam_line 行）还在 case SET_KEY（第 $_setkey_line 行）之前 —— CAM 表满时删不掉旧密钥"
+fi
 
 # RX 状态必须在频率更新之后才拷给 mac80211，否则前面修的频率对不上。
 _rx_line="$(grep -n 'IEEE80211_SKB_RXCB(skb) = \*rx_status' "$WORK/sdio.c" | head -1 | cut -d: -f1 || true)"
