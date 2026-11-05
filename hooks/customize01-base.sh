@@ -42,13 +42,39 @@ EOF
 # 所以每个单元都要有确定的手工兜底：单元文件在镜像里就自己建链接。
 # $2 是被依赖的目标（如 multi-user.target / timers.target），
 # 链接要放在 <target>.wants/ 里。
+# --- 软链判定：链接在不在，链接指的东西在不在 -------------------------------
+#
+# ★ 绝对不能直接用 [ -e "<链接>" ] 去判"链接在不在"。
+#   systemd 的 wants 链接指的是**绝对路径** /lib/systemd/system/<unit>，
+#   而 [ -e ] 会**跟随**软链 —— 内核于是把那个绝对路径解析到**宿主的根**，
+#   不是镜像的根。构建机上（CI runner）当然没有 /lib/systemd/system/ssh.service
+#   ⇒ -e 恒为假 ⇒ 我们自己刚建好的链接被判成"不存在" ⇒ hook 直接 exit 1。
+#   这个坑在这个仓库里已经栽过五次（hook03 的 wants 校验、CI 的 link_ok、
+#   CI 的 resolv.conf、verify-image、现在 hook01 自己）。
+#
+# 正确做法分两步：
+#   1) [ -L ] 看**链接本身**在不在（不跟随）；
+#   2) readlink 取目标字符串，再把它**拼回目标根**去判真实文件在不在。
+#      绝对路径 → "$TARGET<目标>"；相对路径 → dirname(链接) + 目标。
+link_target_ok() {  # $1 = 链接路径；返回 0 = 链接存在且指向镜像里的真实文件
+    _lto_path="$1"
+    [ -L "$_lto_path" ] || return 1
+    _lto_dest="$(readlink "$_lto_path" 2>/dev/null)" || return 1
+    [ -n "$_lto_dest" ] || return 1
+    case "$_lto_dest" in
+        /*) _lto_abs="$TARGET$_lto_dest" ;;
+        *)  _lto_abs="$(dirname "$_lto_path")/$_lto_dest" ;;
+    esac
+    [ -f "$_lto_abs" ]
+}
+
 enable_unit() {
     _unit="$1"
     _target="$2"
     _dir="${_target}.wants"
     chroot "$TARGET" systemctl enable "$_unit" >/dev/null 2>&1 || true
     if [ -f "$TARGET/lib/systemd/system/$_unit" ] \
-       && [ ! -e "$TARGET/etc/systemd/system/$_dir/$_unit" ]; then
+       && ! link_target_ok "$TARGET/etc/systemd/system/$_dir/$_unit"; then
         mkdir -p "$TARGET/etc/systemd/system/$_dir"
         ln -sf "/lib/systemd/system/$_unit" \
                "$TARGET/etc/systemd/system/$_dir/$_unit"
@@ -64,8 +90,8 @@ enable_unit() {
         echo "[hook01][fail] 镜像里没有 $_unit 的单元文件（/lib/systemd/system/$_unit）" >&2
         exit 1
     fi
-    if [ ! -e "$TARGET/etc/systemd/system/$_dir/$_unit" ]; then
-        echo "[hook01][fail] $_unit 没有被启用（$TARGET/etc/systemd/system/$_dir/$_unit 不存在）" >&2
+    if ! link_target_ok "$TARGET/etc/systemd/system/$_dir/$_unit"; then
+        echo "[hook01][fail] $_unit 没有被启用（$TARGET/etc/systemd/system/$_dir/$_unit 不存在或指向不存在的单元）" >&2
         exit 1
     fi
 }
@@ -119,10 +145,14 @@ chroot "$TARGET" systemctl disable avahi-daemon >/dev/null 2>&1 || true
 chroot "$TARGET" systemctl disable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
 # systemctl disable 在构建 chroot 里不一定生效（没有运行中的 systemd），
 # 所以自己把链接摘掉，并当场断言确实摘干净了。
-if [ -e "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service" ]; then
-    rm -f "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service"
-fi
-if [ -e "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service" ]; then
+#
+# ★ 这里的判据是"链接在不在"，不是"链接指的东西在不在" ⇒ 用 -L（不跟随）。
+#   原来这里用的是 [ -e ]，它会跟随绝对软链去解析宿主根 ⇒ 恒为假 ⇒
+#   这段摘除和断言全是死代码：即便 wait-online 被发行版带进镜像，
+#   我们也会静默放过（而它会让网络不通时整机多等 120 秒）。
+_WAITONLINE_LINK="$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service"
+rm -f "$_WAITONLINE_LINK"
+if [ -L "$_WAITONLINE_LINK" ] || [ -e "$_WAITONLINE_LINK" ]; then
     echo "[hook01][fail] systemd-networkd-wait-online.service 仍在 multi-user.target.wants 里 —— 网络不通时整机会多等 120 秒" >&2
     exit 1
 fi
