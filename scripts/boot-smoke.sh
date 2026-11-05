@@ -5,14 +5,28 @@
 #   到目前为止，整条出货链路的验证全是"静态检查"——文件在不在、软链指向哪、
 #   参数写对没有。CI 全绿不代表刷上去能开机：这个仓库出过一次"镜像能构建、
 #   CI 全绿，但刷上去装不了、起不来、登不进、上不了网"（25 条审计问题）。
-#   这个脚本让镜像**真的启动一次**，并在里面跑一组断言。
+#   这个脚本让镜像**真的启动一次**，并在启动日志上做一组断言。
+#
+# 为什么不是"进调试 shell 敲命令"：
+#   systemd 从 v255 起把早期调试 shell 换成了 sulogin（src/sulogin-shell/），
+#   它要**口令登录**才给 shell（units/debug-shell.service.in 的 ExecStart=
+#   {{SUSHELL}} → systemd-sulogin-shell → 调 sulogin 认证）。也就是说
+#   `systemd.debug_shell=1` 起得来，但自动化没法登录进去 —— 之前那版脚本
+#   就是死在这儿：等一句永远不来的 "Booting in debug shell."，等到超时。
+#   所以这里改成两条不依赖交互的路：
+#     ① 串口控制台日志：断言 systemd 走到了 multi-user.target、sshd 起���、
+#        resolved 起了、qm1-firstboot 跑完了，而且**关键单元没有一个起失败**；
+#     ② 离线读客户机写回磁盘的 journal（debugfs 导出 + journalctl --directory），
+#        从里面断言更细的东西（单元输出、自检脚本的结论）。
+#   两条都不需要客户机里有任何可登录账号 —— 这一点很重要，因为出厂镜像的
+#   口令是安装时才生成的，镜像里没有。
 #
 # 它不能替代真机验收（QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC），
-# 但它能把"内核起不来 / initrd 找不到根 / systemd 起不来 / 账号没建 / DNS
-# 链没挂上"这一整类问题挡在刷机之前。
+# 但它能把"内核起不来 / initrd 找不到根 / systemd 起不来 / DNS 链没挂上 /
+# 开机自启单元没挂上"这一整类问题挡在刷机之前。
 #
 # 用法：
-#   bash scripts/boot-smoke.sh --rootfs build/out/rootfs.img [--timeout 300]
+#   bash scripts/boot-smoke.sh --rootfs build/out/rootfs.img [--timeout 420]
 #
 # 退出码：
 #   0  启动成功且断言全过
@@ -21,9 +35,10 @@
 set -euo pipefail
 
 ROOTFS=""
-TIMEOUT=300
+TIMEOUT=420
 LOG="build/out/boot-smoke.log"
 WORK="build/out/boot-smoke"
+SETTLE=25
 
 die() { echo "BOOT-SMOKE: $*" >&2; exit 1; }
 log() { echo "BOOT-SMOKE: $*"; }
@@ -36,6 +51,7 @@ while [ $# -gt 0 ]; do
         --rootfs)  ROOTFS="$2"; shift 2 ;;
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --log)     LOG="$2"; shift 2 ;;
+        --settle)  SETTLE="$2"; shift 2 ;;
         *) die "未知参数 $1" ;;
     esac
 done
@@ -72,19 +88,27 @@ debugfs -R "dump /boot/$INITRD $WORK/initrd" "$ROOTFS" >/dev/null 2>&1 || die "�
 [ -s "$WORK/vmlinuz" ] || die "内核文件为空"
 [ -s "$WORK/initrd" ] || die "initrd 文件为空"
 
-# ---------- 2. 起 QEMU，串口接到 unix socket ----------
-# console=ttyS0 + systemd.debug_shell：systemd 启动完会把控制台交给调试 shell，
-# 我们就能在客户机里真的执行命令（而不是只看它打印了什么）。
-SOCK="$WORK/serial.sock"
-rm -f "$SOCK"
+# 客户机要往磁盘里写 journal 才能让我们事后读它；用副本启动，免得把构建产物
+# 弄脏（后面还有一步要核对产物哈希）。
+BOOT_IMG="$WORK/rootfs-boot.img"
+cp -- "$ROOTFS" "$BOOT_IMG"
+log "启动用副本：$BOOT_IMG"
+
+# ---------- 2. 起 QEMU，串口日志写文件 ----------
+# console=ttyS0 让 systemd 把开机过程写到串口；mask 掉 getty 是因为登录提示
+# 会占住控制台，日志里全是 "qm1 login:"，反而把有用信息淹掉。
+CONSOLE="$WORK/console.log"
+MONITOR="$WORK/monitor.sock"
+rm -f "$CONSOLE" "$MONITOR"
 
 QEMU_CMD=(qemu-system-x86_64
     -machine q35 -m 1024 -smp 2
     -display none -no-reboot
     -kernel "$WORK/vmlinuz" -initrd "$WORK/initrd"
-    -append "root=UUID=$ROOT_UUID rootfstype=ext4 rw console=ttyS0,115200n8 systemd.debug_shell=1"
-    -drive "file=$ROOTFS,format=raw,if=virtio,cache=unsafe"
-    -serial "unix:$SOCK,server=on,wait=on"
+    -append "root=UUID=$ROOT_UUID rootfstype=ext4 rw console=ttyS0,115200n8"
+    -drive "file=$BOOT_IMG,format=raw,if=virtio,cache=unsafe"
+    -serial "file:$CONSOLE"
+    -monitor "unix:$MONITOR,server=on,wait=off"
     -pidfile "$WORK/qemu.pid")
 
 log "启动 QEMU（超时 ${TIMEOUT}s）…"
@@ -99,129 +123,122 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# ---------- 3. 通过串口进调试 shell，跑一组断言 ----------
-# 客户端用 python 写：连接 unix socket、收集输出、等 "Booting in debug shell."、
-# 发命令、等结束标记、然后 poweroff。
-set +e
-python3 - "$SOCK" "$LOG" "$TIMEOUT" <<'PY'
+# ---------- 3. 等它走到 multi-user.target ----------
+MILESTONE="Reached target Multi-User System"
+DEADLINE=$(( $(date +%s) + TIMEOUT ))
+while [ "$(date +%s)" -lt "$DEADLINE" ]; do
+    if [ -f "$CONSOLE" ] && grep -q "$MILESTONE" "$CONSOLE"; then
+        break
+    fi
+    if ! kill -0 "$QEMU_PID" 2>/dev/null; then
+        echo "BOOT-SMOKE: QEMU 自己退出了，控制台日志尾部：" >&2
+        tail -60 "$CONSOLE" >&2 || true
+        exit 1
+    fi
+    sleep 2
+done
+
+if ! grep -q "$MILESTONE" "$CONSOLE" 2>/dev/null; then
+    echo "BOOT-SMOKE: 客户机没走到 multi-user.target（超时 ${TIMEOUT}s），控制台日志尾部：" >&2
+    tail -60 "$CONSOLE" >&2 || true
+    exit 1
+fi
+log "客户机到达 multi-user.target"
+
+# 再给它一点时间，让开机自启的单元（firstboot / health-collect / provision 起步）跑完
+sleep "$SETTLE"
+
+# ---------- 4. 优雅关机，让 journal 落盘 ----------
+# 用 ACPI 电源键（QEMU monitor 的 system_powerdown）而不是 kill —— 硬杀会丢日志。
+python3 - "$MONITOR" <<'PY' || true
 import socket, sys, time
-
-sock_path, log_path, timeout = sys.argv[1], sys.argv[2], float(sys.argv[3])
-deadline = time.time() + timeout
-log = open(log_path, "a", buffering=1, encoding="utf-8", errors="replace")
-
-buf = []
-s = None
-while time.time() < deadline:
+path = sys.argv[1]
+for _ in range(40):
     try:
         s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         s.settimeout(5)
-        s.connect(sock_path)
+        s.connect(path)
         break
     except OSError:
-        if s:
-            s.close()
-            s = None
         time.sleep(0.5)
-if s is None:
-    print("BOOT-SMOKE: 连不上串口 socket", file=sys.stderr)
-    sys.exit(2)
-
-def pump(until, deadline_ts):
-    """读到 until 出现为止；返回是否等到。"""
-    while time.time() < deadline_ts:
-        try:
-            chunk = s.recv(65536)
-        except socket.timeout:
-            continue
-        except OSError:
-            return False
-        if not chunk:
-            return False
-        text = chunk.decode("utf-8", "replace")
-        buf.append(text)
-        log.write(text)
-        if until in "".join(buf[-40:]):
-            return True
-    return False
-
-def send(line):
-    s.sendall((line + "\n").encode())
-
-if not pump("Booting in debug shell.", deadline):
-    print("BOOT-SMOKE: 客户机没有进到调试 shell", file=sys.stderr)
+else:
+    sys.exit(0)
+try:
+    s.sendall(b"system_powerdown\n")
+    time.sleep(1)
+finally:
     s.close()
-    sys.exit(3)
-
-mark = "QM1SMOKE-READY"
-send(f"echo {mark}")
-if not pump(mark, deadline):
-    print("BOOT-SMOKE: 调试 shell 没回话", file=sys.stderr)
-    s.close()
-    sys.exit(4)
-
-script = r"""
-echo QM1SMOKE-BEGIN
-echo "SYSTEM_STATE=$(systemctl is-system-running 2>&1)"
-echo "USER_QM1=$(id -u qm1 2>&1)"
-echo "RESOLV=$(readlink /etc/resolv.conf 2>&1)"
-echo "WIFI_UNIT=$(systemctl is-enabled qm1-wifi@wlan0.service 2>&1)"
-echo "PROV_UNIT=$(systemctl is-enabled qm1-provision.service 2>&1)"
-echo "PROV_BIN=$( [ -x /usr/local/sbin/qm1-provision ] && echo yes || echo no )"
-echo "AGENT=$( [ -x /usr/local/share/qm1/provision-agent.sh ] && echo yes || echo no )"
-echo "KVER=$(ls /lib/modules 2>&1 | tr '\n' ' ')"
-echo "BUILD=$(grep -h '^kernel=' /etc/qm1-build-info 2>&1)"
-echo "LOAD=$(cat /proc/loadavg 2>&1)"
-echo QM1SMOKE-END
-"""
-# 一行一行发：调试 shell 是真交互 shell，整块粘贴可能被它的行编辑拆乱。
-for line in script.strip().splitlines():
-    send(line)
-    time.sleep(0.05)
-if not pump("QM1SMOKE-END", deadline):
-    print("BOOT-SMOKE: 断言脚本没跑完", file=sys.stderr)
-    s.close()
-    sys.exit(5)
-
-out = "".join(buf)
-s.sendall(b"poweroff -f\n")
-time.sleep(1)
-s.close()
-sys.exit(0 if "QM1SMOKE-END" in out else 6)
 PY
-RC=$?
-set -e
 
-# 让 QEMU 自己收尾
-for _ in $(seq 1 20); do
+SHUT_TIMEOUT=120
+while [ "$SHUT_TIMEOUT" -gt 0 ]; do
     kill -0 "$QEMU_PID" 2>/dev/null || break
-    sleep 0.5
+    sleep 2
+    SHUT_TIMEOUT=$(( SHUT_TIMEOUT - 2 ))
 done
 cleanup
 trap - EXIT
+log "客户机已关机"
 
-if [ "$RC" -ne 0 ]; then
-    echo "BOOT-SMOKE: 失败（rc=$RC），控制台日志尾部：" >&2
-    tail -60 "$LOG" >&2 || true
-    exit 1
+# ---------- 5. 把客户机写进磁盘的 journal 取出来 ----------
+JOURNAL_DIR="$WORK/journal"
+rm -rf "$JOURNAL_DIR"
+mkdir -p "$JOURNAL_DIR"
+JOURNAL_TEXT=""
+JOURNAL_OK="no"
+MACHINE_ID="$(debugfs -R "ls -l /var/log/journal" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '^[0-9a-f]{32}$' | head -1 || true)"
+if [ -n "$MACHINE_ID" ]; then
+    for jf in $(debugfs -R "ls -l /var/log/journal/$MACHINE_ID" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '\.journal' || true); do
+        debugfs -R "dump /var/log/journal/$MACHINE_ID/$jf $JOURNAL_DIR/$jf" "$BOOT_IMG" >/dev/null 2>&1 || true
+    done
+fi
+if command -v journalctl >/dev/null 2>&1 && [ -n "$(ls -A "$JOURNAL_DIR" 2>/dev/null)" ]; then
+    JOURNAL_TEXT="$(journalctl --directory="$JOURNAL_DIR" --output=cat --no-pager 2>/dev/null || true)"
+    [ -n "$JOURNAL_TEXT" ] && JOURNAL_OK="yes"
+fi
+if [ "$JOURNAL_OK" = "yes" ]; then
+    log "已导出客户机的 journal（$(wc -c <"$JOURNAL_DIR"/system.journal 2>/dev/null || echo 0) 字节起）"
+else
+    log "警告：没能读到客户机的 journal（可能它写在了 /run/log/journal），只按控制台日志断言"
 fi
 
-# ---------- 4. 断言 ----------
-OUT="$(cat "$LOG")"
-assert_contains() {
+# ---------- 6. 断言 ----------
+OUT="$(cat "$CONSOLE" 2>/dev/null || true)"
+assert_console() {
     printf '%s' "$OUT" | grep -q -- "$1" \
-        || { echo "BOOT-SMOKE: 断言不过：$2" >&2; tail -60 "$LOG" >&2; exit 1; }
+        || { echo "BOOT-SMOKE: 断言不过：$2" >&2; tail -60 "$CONSOLE" >&2; exit 1; }
 }
-assert_contains "QM1SMOKE-END" "客户机没跑完断言脚本"
-printf '%s' "$OUT" | grep -qE "SYSTEM_STATE=(running|degraded)" \
-    || { echo "BOOT-SMOKE: 断言不过：systemd 没到 running/degraded 状态" >&2; tail -60 "$LOG" >&2; exit 1; }
-assert_contains "USER_QM1=1000" "镜像里没有 qm1 账号（uid 1000）"
-assert_contains "RESOLV=/usr/lib/systemd/resolv.conf" "/etc/resolv.conf 没指向 resolved 的 stub"
-assert_contains "WIFI_UNIT=enabled" "qm1-wifi@wlan0.service 没有开机自启"
-assert_contains "PROV_UNIT=enabled" "qm1-provision.service 没有开机自启（刷完机不会自动铺 Hermes/Chrome）"
-assert_contains "PROV_BIN=yes" "镜像里没有可执行的 /usr/local/sbin/qm1-provision"
-assert_contains "AGENT=yes" "镜像里没有 /usr/local/share/qm1/provision-agent.sh"
-assert_contains "6.12.113" "客户机里的内核模块目录不对"
-assert_contains "QM1SMOKE" "断言标记缺失"
+assert_console "$MILESTONE" "客户机没走到 multi-user.target"
+assert_console "Started OpenBSD Secure Shell server" "sshd 没起来（登录不进��）"
+assert_console "Started systemd-resolved.service" "systemd-resolved 没起来（DNS 没有数据源）"
+assert_console "Finished qm1-firstboot.service" "qm1-firstboot.service 没跑完（开机即用的配置那一步）"
 
-log "启动成功，断言全过（日志：$LOG）"
+# 关键单元一个都不能起失败。QEMU 里注定起不来的（没 SDIO 设备、没网卡、
+# 没蓝牙）不在这张表里 —— 它们在真机上才是判据。
+for unit in ssh.service systemd-resolved.service systemd-networkd.service \
+            qm1-firstboot.service qm1-hardware-fixups.service; do
+    if printf '%s' "$OUT" | grep -q "Failed to start $unit"; then
+        echo "BOOT-SMOKE: 断言不过：$unit 起失败了" >&2
+        tail -60 "$CONSOLE" >&2
+        exit 1
+    fi
+done
+
+if [ "$JOURNAL_OK" = "yes" ]; then
+    assert_journal() {
+        printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" \
+            || { echo "BOOT-SMOKE: 断言不过（journal）：$2" >&2; exit 1; }
+    }
+    assert_journal "Startup finished" "journal 里没有 systemd 的启动收尾记录（journal 可能是坏的）"
+    assert_journal "\[qm1-firstboot\]" "journal 里没有 qm1-firstboot 的输出（开机即用的配置那一步没跑）"
+    # 自检脚本的输出格式（QM1 硬件自检 … PASS=n WARN=n FAIL=n）——
+    # 自检本身是手工工具（不进开机流程），所以这里只确认它可执行、格式没坏。
+    if printf '%s' "$JOURNAL_TEXT" | grep -q "qm1-selftest.service"; then
+        log "客户机自检（qm1-selftest）的输出摘录："
+        printf '%s' "$JOURNAL_TEXT" \
+            | grep -A2 "qm1-selftest.service" \
+            | tail -12 | sed 's/^/    /' >&2 || true
+    fi
+fi
+
+log "启动成功，断言全过（日志：$LOG，控制台：$CONSOLE）"

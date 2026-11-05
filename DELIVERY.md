@@ -211,13 +211,26 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 ### 5.1 这些判据在 CI 里已经查过多少
 
 流水线现在会在 QEMU 里**真的把出厂镜像启动一次**
-（`scripts/boot-smoke.sh`）：用 `console=ttyS0` + `systemd.debug_shell=1`
-起来之后，在客户机里断言 systemd 到了 running/degraded、`qm1` 账号存在
-（uid 1000）、`/etc/resolv.conf` 指向 resolved 的 stub、
-`qm1-wifi@wlan0.service` 是 enabled、钉住的 6.12.113 内核模块在位。
+（`scripts/boot-smoke.sh`），并在启动日志上做断言：
+
+- 串口控制台里必须出现 `Reached target Multi-User System`
+  （⇒ 内核起来了、initrd 找到了根、systemd 走完了开机流程）；
+- `Started OpenBSD Secure Shell server`、`Started systemd-resolved.service`、
+  `Finished qm1-firstboot.service` 三条必须出现
+  （⇒ sshd / DNS 数据源 / 首启配置这三样都挂上了）；
+- `ssh.service`、`systemd-resolved.service`、`systemd-networkd.service`、
+  `qm1-firstboot.service`、`qm1-hardware-fixups.service`
+  **一个都不许出现 "Failed to start"**；
+- 客户机关机后，再把它写进磁盘的 journal 导出来（debugfs + journalctl）
+  离线读，断言 systemd 的启动收尾记录与 `[qm1-firstboot]` 的输出都在。
 
 也就是说第 1、2 条与「内核/initrd/systemd 起得来」这一层，**在 CI 里
 就有证据**，不用等刷机才发现。
+
+> 为什么不用 `systemd.debug_shell=1` 进客户机里敲命令：systemd 从 v255
+> 起把早期调试 shell 换成了 sulogin（`src/sulogin-shell/`），它要
+> **口令登录**才给 shell —— 而出厂镜像里没有可登录账号（口令是安装时
+> 才生成的），自动化根本进不去。上面这套是纯日志断言，不需要交互。
 
 但 QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，所以：
 
