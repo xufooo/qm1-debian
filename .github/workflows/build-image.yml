@@ -313,6 +313,39 @@ jobs:
           fi
           [ -f "$ROOT/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
             || { echo "::error::镜像里没有 rtw88 固件 rtw88/rtw8723b_fw.bin"; exit 1; }
+          # ── 出货模块自身的三条硬事实 ─────────────────────────────────────
+          # 这一段查的是**镜像里那份 .ko**，不是构建目录里的那份 ——
+          # 之前所有关于"模块"的断言都是"文件在不在"，而真正的失败模式是
+          # "文件在，但装上以后不干活"。下面三条各自对应一种静默失败：
+          MOD_KO="$KO_DIR/$MOD.ko"
+          [ -f "$MOD_KO" ] || { echo "::error::镜像里缺少模块文件 $MOD_KO"; exit 1; }
+          # ① 认不认领这台机器的 SDIO 卡？
+          #    内核靠 modalias 匹配设备；SDIO 的 modalias 形如
+          #    "sdio:c*v024CB723*"（vendor 0x024c / product 0xb723，十六进制大写）。
+          #    没有这条 alias ⇒ 模块加载成功、也不绑定那张卡 ⇒ 现象是
+          #    "驱动在、wlan0 不出来"，而构建与校验全程绿灯。
+          modinfo -F alias "$MOD_KO" | grep -qiE '^sdio:c\*v024cb723' \
+            || { echo "::error::出货模块 $MOD 没有声明 0x024c:0xb723 的 SDIO alias"; \
+                 modinfo -F alias "$MOD_KO" | sed 's/^/    alias: /'; exit 1; }
+          # ② 装得进去吗？vermagic 与镜像里的内核 ABI 必须一致，
+          #    否则 insmod 直接拒绝（"version magic ... should be ..."）。
+          modinfo -F vermagic "$MOD_KO" | grep -q "^${KABI}" \
+            || { echo "::error::出货模块 $MOD 的 vermagic 与镜像内核 $KABI 不一致"; exit 1; }
+          # ③ 它要用的固件，镜像里真有吗？
+          #    上游 rtw8723b.c 用 MODULE_FIRMWARE("rtw88/rtw8723b_fw.bin")
+          #    声明固件；固件名一旦被上游改名，而我们还只发旧名字的 blob，
+          #    现象是"驱动加载成功、wlan0 出来了、wpa 却连不上" ——
+          #    这是最难查的一类，所以在这里把它钉死。
+          _fw_list="$(modinfo -F firmware "$MOD_KO" 2>/dev/null || true)"
+          if [ -n "$_fw_list" ]; then
+            for _fw in $_fw_list; do
+              [ -f "$ROOT/lib/firmware/$_fw" ] \
+                || { echo "::error::出货模块 $MOD 要用固件 $_fw，镜像里却没有 /lib/firmware/$_fw"; exit 1; }
+            done
+          elif [ "$MOD" = "rtw88_qm1" ]; then
+            echo "::error::出货模块 $MOD 没有声明任何固件（MODULE_FIRMWARE 为空）"
+            exit 1
+          fi
           grep -qx "$MOD" "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
             || { echo "::error::modules-load.d 里没有 $MOD"; exit 1; }
           if grep -qxE 'r8723bs(_qm1)?' "$ROOT/etc/modules-load.d/qm1-hardware.conf"; then

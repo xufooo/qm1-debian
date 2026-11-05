@@ -759,6 +759,35 @@ elif mod_loaded rtw88_qm1 || mod_loaded r8723bs_qm1 || mod_loaded r8723bs; then
 else
     row WARN "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载"
 fi
+# ★ 真机上再钉一次：QM1 那张 SDIO 卡（0x024c:0xb723）在不在、被谁认领。
+#   前面几条查的是"哪个模块绑着 wlan0"；这条查的是**卡本身**：
+#   卡压根没被枚举出来（内核没认出这块 SDIO 设备），还是枚举出来了却没人认领
+#   （模块装上了却绑不上设备）—— 两者的现场现象一样（没有 wlan0），
+#   但修法完全不同，必须分开报。
+#   modalias 从 uevent 里取（设备核心一定写 MODALIAS=），modalias 文件作为兜底。
+_sdio_our=""
+for _sd in /sys/bus/sdio/devices/*; do
+    [ -e "$_sd" ] || continue
+    _ma="$(sed -n 's/^MODALIAS=//p' "$_sd/uevent" 2>/dev/null || true)"
+    [ -n "$_ma" ] || _ma="$(cat "$_sd/modalias" 2>/dev/null || true)"
+    case "$_ma" in
+        *024CB723*|*024cb723*)
+            _sd_drv="$(basename "$(readlink -f "$_sd/driver" 2>/dev/null)" 2>/dev/null || true)"
+            [ -n "$_sd_drv" ] || _sd_drv="未认领"
+            if [ "$_sd_drv" = "未认领" ]; then
+                row FAIL "SDIO 卡 0x024c:0xb723" \
+                    "卡枚举出来了，但没有任何驱动认领它 —— 模块装上了却绑不上设备（查 dmesg 里 rtw88/rtw8723bs 的报错）"
+            else
+                row PASS "SDIO 卡 0x024c:0xb723" "已枚举并被 ${_sd_drv} 认领"
+            fi
+            _sdio_our="seen"
+            ;;
+    esac
+done
+if [ -z "$_sdio_our" ]; then
+    row FAIL "SDIO 卡 0x024c:0xb723" \
+        "没有枚举到这张卡（内核没认出这块 SDIO 设备，或驱动没注册 SDIO 总线）"
+fi
 if [ -d /sys/class/bluetooth/hci0 ]; then
     row PASS "蓝牙" "hci0 已出现"
 else
