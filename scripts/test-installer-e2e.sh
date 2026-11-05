@@ -162,9 +162,20 @@ file_content() {  # $1=分区设备 $2=相对路径
 whole_sha() { sha256sum "$1" | awk '{print $1}'; }
 
 # 某个字节区间是不是全 0
+#
+# 这里**不能**写成 "… | grep -q '[^0]'"：grep -q 命中即退出，
+# 上游的 od/tr 会收到 SIGPIPE（141）；本脚本是 set -euo pipefail，
+# 管道里任何一环非零 ⇒ 整条管道判失败 ⇒ 本来"全零"的区域
+# 反而被报成"不是零"。先把输出收进变量里，再判断里面有没有非零字节。
 range_is_zero() {  # $1=文件 $2=偏移 $3=长度
-    dd if="$1" bs=1M iflag=skip_bytes,count_bytes skip="$2" count="$3" status=none \
-        | od -An -tx1 | tr -d ' \n' | grep -qv '[^0]'
+    _riz_hex=""
+    _riz_hex="$(dd if="$1" bs=1M iflag=skip_bytes,count_bytes skip="$2" count="$3" status=none \
+        | od -An -tx1 | tr -d ' \n')" || return 1
+    [ -n "$_riz_hex" ] || return 1
+    case "$_riz_hex" in
+        *[!0]*) return 1 ;;
+    esac
+    return 0
 }
 
 # 逐分区比对：备份 vs 安装前的原盘（用与安装器同一份实现）
@@ -281,6 +292,9 @@ IMG_B="$WORK/disk-b.img"
 make_disk "$IMG_B" 512 64 446 || skip "造镜像失败"
 LOOP_IMG_B="$MD_DEV"
 format_parts "$LOOP_IMG_B"
+# 在镜像的根分区里放一个标记文件 —— 后面用它比"内容"，
+# 而不是逐字节比整个根分区（扩容之后元数据一定会变）。
+put_file "${LOOP_IMG_B}p2" "QM1-MARKER-FILE" "IMAGE-B-CONTENT-MARKER" || warn "放标记文件失败"
 IMAGE_SIZE_B="$(stat -c%s "$IMG_B")"
 
 TGT_B="$WORK/target-b.img"
@@ -324,16 +338,31 @@ else
     bad "用例 B：镜像旧备份 GPT 所在区域还有残留（两个 GPT 并存）"
 fi
 
-# 内容必须仍然来自镜像
-if cmp -i 1048576:0 -n $(( 64 * 1048576 )) "$IMG_B" "$LOOP_TGT_B" 2>/dev/null; then
+# ESP 的内容必须仍然来自镜像。
+#
+# 注意偏移：**两边都要跳 1 MiB**。镜像文件自己的第 0 字节是它的 GPT 头，
+# ESP 是从 1 MiB 开始的；目标盘上 ESP 也在 1 MiB 处。
+# 之前这里写成 "cmp -i 1048576:0"，拿镜像的 GPT 头去比目标的 ESP ——
+# 必然在第 1 个字节就报"不一致"。
+if cmp -i 1048576:1048576 -n $(( 64 * 1048576 )) "$IMG_B" "$LOOP_TGT_B" 2>/dev/null; then
     ok "用例 B：ESP 内容与镜像一致"
 else
     bad "用例 B：ESP 内容与镜像不一致"
 fi
-if cmp -i $(( 65 * 1048576 )):$(( 65 * 1048576 )) -n $(( 446 * 1048576 )) "$IMG_B" "$LOOP_TGT_B" 2>/dev/null; then
-    ok "用例 B：根分区内容与镜像一致"
+
+# 根分区**不能**逐字节比：安装器在撑大文件系统**之前**会做自己的逐字节核对
+# （install-qm1.sh 第 7 步），核对通过之后它才 e2fsck + resize2fs ——
+# 扩容必然改超级块与块组描述符，元数据全变，逐字节比必然报"不一致"，
+# 而那个"不一致"恰恰是设计要的。该比的是**内容**。
+if has_file "${LOOP_TGT_B}p2" "QM1-MARKER-FILE"; then
+    ok "用例 B：目标根分区里有镜像里的文件内容"
 else
-    bad "用例 B：根分区内容与镜像不一致"
+    bad "用例 B：目标根分区里没有镜像里的文件（根分区没复制过来？）"
+fi
+if e2fsck -fn "${LOOP_TGT_B}p2" >/dev/null 2>&1; then
+    ok "用例 B：目标根文件系统 e2fsck -fn 干净（撑大之后没停在半路）"
+else
+    bad "用例 B：目标根文件系统 e2fsck -fn 不干净"
 fi
 
 # ---------- 3. 用例 C：EFI 启动项登记必须"要么成功、要么明确失败" ----------
