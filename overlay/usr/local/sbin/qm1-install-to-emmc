@@ -1,34 +1,82 @@
 #!/bin/bash
-# qm1-install-to-emmc — 把当前从 U 盘启动的系统装进 eMMC
+# qm1-install-to-emmc — 分步引导式安装：把当前系统装进目标存储
 #
-# 触发方式：GRUB 菜单第 ① 项（内核参数 qm1.install=1）→ systemd 单元
+# 触发方式：安装介质 GRUB 菜单第 ① 项（内核参数 qm1.install=1）→ systemd 单元
 #           qm1-install.service → 本脚本。
 #
-# 原理：安装介质本身就是「ESP + 根文件系统」两个分区，
-#       所以"安装"= 把这两个分区原样搬到 eMMC，再把根分区撑到整盘容量，
-#       最后把 ESP 里的 grub.cfg 换回正常菜单（装好之后拔 U 盘即可自启动）。
+# 设计目标（来自实际使用场景）：
+#   1) **非破坏性优先**：默认装到可移动介质（microSD / U 盘），eMMC 一个字节都不动。
+#      原系统因此原样保留，随时拔卡就能回退 —— 这是"还能装回原版系统"的前提。
+#      只有明确选择 eMMC 才会动 eMMC，而那条路强制先做**整盘备份**。
+#   2) **一次性配好 Wi-Fi 与 SSH**：装机时就把 SSID/密码写进系统，并把 SSH 开好，
+#      装完拔盘重启就能联网、能远程登录，不用再接显示器键盘手动敲配置。
+#      provisioning 文件（照 Raspberry Pi 的做法放在启动分区）也能直接生效。
+#   3) **一步一步**：每个步骤都打印当前做什么、做完是什么结果，可随时 Ctrl-C。
 #
-# 安全设计：
-#   * 目标设备默认 /dev/mmcblk0，可用 QM1_INSTALL_TARGET 覆盖；
-#   * 当前系统如果就是从 eMMC 启动的 → 直接拒绝（说明已经装好了）；
-#   * 写盘前一定先做备份：
-#       - QM1_BACKUP_DIR 指定了目录 → 整盘备份（空间不够就中止，不硬来）；
-#       - 安装介质剩余空间够整盘 → 自动整盘备份；
-#       - 都不够 → 只备份分区表与前 16 MiB（GPT + OEM 分区头），
-#         并明确警告"原系统内容没有完整备份"。
-#   * 写完逐分区比对 sha256。
+# 步骤：
+#   [1/6] 选择安装目标（默认可移动介质；eMMC 需要显式确认）
+#   [2/6] 检查目标（是否已有分区、是不是源盘）
+#   [3/6] 网络与 SSH 配置（读 provisioning 或交互输入）
+#   [4/6] 备份（写 eMMC 时强制整盘备份，空间不够就中止）
+#   [5/6] 写入系统（GPT + dd + 逐分区校验 + 撑满整盘）
+#   [6/6] 收尾（写回 provisioning、安装记录、下一步提示）
 set -euo pipefail
 
 log()  { printf '[qm1-install] %s\n' "$*"; }
 warn() { printf '[qm1-install][warn] %s\n' "$*" >&2; }
 die()  { printf '[qm1-install][fail] %s\n' "$*" >&2; exit 1; }
+step() { printf '\n[qm1-install] ===== %s =====\n' "$*"; }
+
+ask() {
+    # ask <提示> <默认值> → 结果写到 REPLY
+    local prompt="$1" default="${2:-}"
+    if [ ! -t 0 ]; then
+        REPLY="$default"
+        return 0
+    fi
+    if [ -n "$default" ]; then
+        printf '%s [%s]: ' "$prompt" "$default"
+    else
+        printf '%s: ' "$prompt"
+    fi
+    read -r REPLY || REPLY=""
+    [ -n "$REPLY" ] || REPLY="$default"
+}
 
 [ "$(id -u)" -eq 0 ] || die "需要 root 权限"
 
-TARGET="${QM1_INSTALL_TARGET:-/dev/mmcblk0}"
-[ -b "$TARGET" ] || die "找不到 eMMC 设备 $TARGET（QM1 的 eMMC 应该是 /dev/mmcblk0）"
+TARGET="${QM1_INSTALL_TARGET:-}"
+MODE="${QM1_INSTALL_MODE:-auto}"          # auto | media | emmc
+ASSUME_YES="${QM1_ASSUME_YES:-0}"
+BACKUP_DIR="${QM1_BACKUP_DIR:-}"
+PROVISION_DIR="${QM1_PROVISION_DIR:-}"
+SSID="${QM1_SSID:-}"
+PSK="${QM1_PSK:-}"
+ENABLE_SSH="${QM1_ENABLE_SSH:-auto}"      # auto | yes | no
+SSH_USER="${QM1_SSH_USER:-}"
+SSH_PUBKEY="${QM1_SSH_PUBKEY:-}"
+HOSTNAME_CFG="${QM1_HOSTNAME:-}"
 
-for c in findmnt lsblk sfdisk dd sha256sum e2fsck resize2fs mount; do
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --target) TARGET="$2"; shift 2 ;;
+        --mode) MODE="$2"; shift 2 ;;
+        --provision-dir) PROVISION_DIR="$2"; shift 2 ;;
+        --ssid) SSID="$2"; shift 2 ;;
+        --psk) PSK="$2"; shift 2 ;;
+        --enable-ssh) ENABLE_SSH=yes; shift ;;
+        --no-ssh) ENABLE_SSH=no; shift ;;
+        --ssh-user) SSH_USER="$2"; shift 2 ;;
+        --ssh-pubkey) SSH_PUBKEY="$2"; shift 2 ;;
+        --hostname) HOSTNAME_CFG="$2"; shift 2 ;;
+        --backup-dir) BACKUP_DIR="$2"; shift 2 ;;
+        --yes) ASSUME_YES=1; shift ;;
+        -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) die "未知参数：$1" ;;
+    esac
+done
+
+for c in findmnt lsblk sfdisk dd sha256sum e2fsck resize2fs mount blockdev; do
     command -v "$c" >/dev/null 2>&1 || die "缺少命令 $c（镜像里应装有 util-linux / fdisk / e2fsprogs）"
 done
 
@@ -41,12 +89,7 @@ SRC_PK="$(lsblk -no PKNAME "/dev/$SRC_PART" 2>/dev/null | head -1 || true)"
 SRC_DISK="/dev/$SRC_PK"
 
 log "当前系统根分区：$SRC_ROOT（磁盘 $SRC_DISK）"
-log "目标 eMMC：$TARGET"
 
-[ "$SRC_DISK" != "$TARGET" ] \
-    || die "当前系统就是从 $TARGET 启动的 —— 已经装好了，不要再装一遍"
-
-# 源盘上的 ESP（第 1 个分区）与根分区
 SRC_ESP=""
 for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
     [ "$p" = "$(basename "$SRC_PART")" ] && continue
@@ -56,48 +99,252 @@ for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
     fi
 done
 [ -n "$SRC_ESP" ] || die "在 $SRC_DISK 上找不到 FAT32 的 ESP 分区"
-
 log "源 ESP：$SRC_ESP   源根分区：$SRC_ROOT"
 
-# ---------- 备份 ----------
+# ---------- [1/6] 选择安装目标 ----------
+step "[1/6] 选择安装目标"
+
+device_kind() {
+    # 输出 removable / usb / emmc / other
+    local name="$1" d="/sys/block/$1"
+    case "$name" in
+        mmcblk*) echo "emmc"; return ;;
+    esac
+    if [ "$(cat "$d/removable" 2>/dev/null || echo 0)" = "1" ]; then echo "removable"; return; fi
+    if readlink -f "$d/device" 2>/dev/null | grep -q '/usb'; then echo "usb"; return; fi
+    echo "other"
+}
+
+list_candidates() {
+    local d name dev kind size
+    for d in /sys/block/*; do
+        name="$(basename "$d")"
+        case "$name" in loop*|ram*|sr*|dm-*|zram*|md*|nbd*) continue ;; esac
+        dev="/dev/$name"
+        [ -b "$dev" ] || continue
+        [ "$dev" = "$SRC_DISK" ] && continue
+        kind="$(device_kind "$name")"
+        size="$(lsblk -dno SIZE "$dev" 2>/dev/null | head -1 || true)"
+        printf '  %-16s %-10s %s\n' "$dev" "$kind" "$size"
+    done
+}
+
+CANDIDATES="$(list_candidates)"
+if [ -z "$CANDIDATES" ]; then
+    log "没有发现除当前系统盘之外的候选设备"
+    CANDIDATES=""
+else
+    log "候选设备（设备 / 类型 / 容量）："
+    printf '%s\n' "$CANDIDATES"
+fi
+
+if [ -z "$TARGET" ]; then
+    # 优先选可移动介质：这样 eMMC 完全不动，原系统保留（可回退）。
+    AUTO_TARGET=""
+    while read -r dev kind _rest; do
+        [ -n "$dev" ] || continue
+        case "$kind" in
+            removable|usb) AUTO_TARGET="$dev"; break ;;
+        esac
+    done <<< "$CANDIDATES"
+    if [ -n "$AUTO_TARGET" ]; then
+        TARGET="$AUTO_TARGET"
+        MODE="media"
+        log "默认选中可移动介质：$TARGET（eMMC 不会被触碰）"
+    else
+        TARGET="/dev/mmcblk0"
+        MODE="emmc"
+        warn "没有发现可移动介质 —— 默认目标改为 eMMC（$TARGET），这一步会覆盖 eMMC"
+    fi
+fi
+
+[ -b "$TARGET" ] || die "找不到目标设备 $TARGET"
+TARGET_KIND="$(device_kind "$(basename "$TARGET")")"
+case "$MODE" in
+    auto)
+        if [ "$TARGET_KIND" = "emmc" ]; then MODE="emmc"; else MODE="media"; fi
+        ;;
+    media|emmc) ;;
+    *) die "--mode 只能是 media 或 emmc" ;;
+esac
+
+if [ "$MODE" = "emmc" ] && [ "$TARGET_KIND" != "emmc" ]; then
+    die "模式是 emmc，但目标 $TARGET 不是 eMMC（$TARGET_KIND）"
+fi
+if [ "$MODE" = "media" ] && [ "$TARGET_KIND" = "emmc" ]; then
+    die "模式是 media（不动 eMMC），但目标是 eMMC $TARGET —— 请改用 --mode emmc"
+fi
+
+log "目标：$TARGET（类型 $TARGET_KIND，模式 $MODE）"
+if [ "$MODE" = "media" ]; then
+    log "非破坏性路径：只写 $TARGET，eMMC 保持原样 ⇒ 原系统保留，取下介质即可回退"
+else
+    warn "破坏性路径：会覆盖 $TARGET 的分区表与内容（原系统需要先备份）"
+fi
+
+# ---------- [2/6] 检查目标 ----------
+step "[2/6] 检查目标状态"
+
+[ "$SRC_DISK" != "$TARGET" ] \
+    || die "当前系统就是从 $TARGET 启动的 —— 已经装好了，不要再装一遍"
+
+EXISTING_PARTS="$(lsblk -ndo NAME,TYPE,SIZE "$TARGET" 2>/dev/null | awk '$2=="part"' || true)"
+if [ -n "$EXISTING_PARTS" ]; then
+    log "目标上已有分区（将被覆盖）："
+    printf '%s\n' "$EXISTING_PARTS" | sed 's/^/  /'
+    if [ "$ASSUME_YES" != 1 ]; then
+        ask "确认覆盖 $TARGET 上的这些分区？输入 yes 继续" "no"
+        [ "$REPLY" = "yes" ] || die "已取消（未做任何写入）"
+    fi
+else
+    log "目标上没有分区，是空白设备"
+fi
+
+for p in $(lsblk -ndo NAME "$TARGET" 2>/dev/null || true); do
+    if findmnt -rn "/dev/$p" >/dev/null 2>&1; then
+        die "目标分区 /dev/$p 还挂着，先卸载再安装"
+    fi
+done
+
+# ---------- [3/6] 网络与 SSH 配置 ----------
+step "[3/6] 网络与 SSH 配置"
+
+WORK_PROV="/run/qm1-provision"
+rm -rf "$WORK_PROV"
+mkdir -p "$WORK_PROV"
+
+# 3a. 先找介质上的 provisioning（ESP 的 /qm1/provision/）
+SRC_ESP_MNT="$(mktemp -d)"
+if mount -o ro "$SRC_ESP" "$SRC_ESP_MNT" 2>/dev/null; then
+    if [ -d "$SRC_ESP_MNT/qm1/provision" ]; then
+        cp -a "$SRC_ESP_MNT/qm1/provision/." "$WORK_PROV/" 2>/dev/null || true
+        log "已从安装介质读取 provisioning：$SRC_ESP_MNT/qm1/provision"
+    fi
+    umount "$SRC_ESP_MNT" 2>/dev/null || true
+fi
+rmdir "$SRC_ESP_MNT" 2>/dev/null || true
+
+# 3b. 命令行指定的 provisioning 目录优先
+if [ -n "$PROVISION_DIR" ]; then
+    [ -d "$PROVISION_DIR" ] || die "找不到 --provision-dir 指定的目录：$PROVISION_DIR"
+    cp -a "$PROVISION_DIR/." "$WORK_PROV/"
+    log "已使用指定的 provisioning 目录：$PROVISION_DIR"
+fi
+
+# 3c. 交互式补齐 Wi-Fi
+if [ -n "$SSID" ]; then
+    cat > "$WORK_PROV/wpa_supplicant.conf" <<EOF
+# 由安装程序生成
+country=CN
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+network={
+    ssid="$SSID"
+    psk="$PSK"
+    key_mgmt=WPA-PSK
+}
+EOF
+    chmod 0600 "$WORK_PROV/wpa_supplicant.conf"
+    log "已写入 Wi-Fi 配置：SSID=$SSID"
+elif [ -f "$WORK_PROV/wpa_supplicant.conf" ]; then
+    log "使用 provisioning 里已有的 Wi-Fi 配置"
+else
+    if [ -t 0 ]; then
+        ask "Wi-Fi SSID（留空则装完再手动配）" ""
+        if [ -n "$REPLY" ]; then
+            SSID="$REPLY"
+            ask "Wi-Fi 密码" ""
+            PSK="$REPLY"
+            cat > "$WORK_PROV/wpa_supplicant.conf" <<EOF
+# 由安装程序生成
+country=CN
+ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
+update_config=1
+network={
+    ssid="$SSID"
+    psk="$PSK"
+    key_mgmt=WPA-PSK
+}
+EOF
+            chmod 0600 "$WORK_PROV/wpa_supplicant.conf"
+            log "已写入 Wi-Fi 配置：SSID=$SSID"
+        fi
+    fi
+    [ -f "$WORK_PROV/wpa_supplicant.conf" ] \
+        || warn "没有 Wi-Fi 配置 —— 装好后需要手动联网（qm1-selftest 里有命令）"
+fi
+
+# 3d. SSH
+if [ "$ENABLE_SSH" = "yes" ]; then
+    : > "$WORK_PROV/ssh"
+elif [ "$ENABLE_SSH" = "auto" ]; then
+    if [ -t 0 ] && [ ! -f "$WORK_PROV/ssh" ]; then
+        ask "是否开机自动启用 SSH？（yes/no）" "yes"
+        [ "$REPLY" = "yes" ] && : > "$WORK_PROV/ssh"
+    elif [ ! -f "$WORK_PROV/ssh" ]; then
+        : > "$WORK_PROV/ssh"
+        log "未指定，默认开启 SSH（远程管理需要）"
+    fi
+fi
+[ -f "$WORK_PROV/ssh" ] && log "SSH：装完自动开启"
+
+# 3e. 公钥
+if [ -n "$SSH_PUBKEY" ]; then
+    [ -f "$SSH_PUBKEY" ] || die "找不到公钥文件：$SSH_PUBKEY"
+    cp "$SSH_PUBKEY" "$WORK_PROV/authorized_keys"
+    chmod 0600 "$WORK_PROV/authorized_keys"
+    : > "$WORK_PROV/ssh"
+    log "已带上 SSH 公钥"
+fi
+[ -n "$SSH_USER" ] && printf '%s\n' "$SSH_USER" > "$WORK_PROV/ssh_user"
+[ -n "$HOSTNAME_CFG" ] && printf '%s\n' "$HOSTNAME_CFG" > "$WORK_PROV/hostname"
+
+# ---------- [4/6] 备份 ----------
+step "[4/6] 备份"
+
 TARGET_BYTES="$(blockdev --getsize64 "$TARGET")"
 TARGET_MIB=$(( TARGET_BYTES / 1048576 ))
 STAMP="$(date +%Y%m%d-%H%M%S)"
-BACKUP_DIR="${QM1_BACKUP_DIR:-}"
 BACKUP_FILE=""
 
 avail_bytes() { df -PB1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
 
-if [ -n "$BACKUP_DIR" ]; then
+if [ "$MODE" = "emmc" ]; then
+    # 覆盖 eMMC 之前必须做完整备份：这是"还能装回原版系统"的唯一保障。
+    if [ -z "$BACKUP_DIR" ]; then
+        die "覆盖 eMMC 前必须指定备份目录：--backup-dir <大容量介质上的目录>"
+    fi
     mkdir -p "$BACKUP_DIR" || die "无法创建备份目录 $BACKUP_DIR"
     need="$(avail_bytes "$BACKUP_DIR")"
     [ "${need:-0}" -ge "$TARGET_BYTES" ] \
-        || die "备份目录空间不足：需要 ${TARGET_BYTES} 字节，只有 ${need:-0} 字节（请换更大的介质或改用整盘备份）"
+        || die "备份目录空间不足：需要 ${TARGET_BYTES} 字节，只有 ${need:-0} 字节"
     BACKUP_FILE="$BACKUP_DIR/qm1-emmc-preinstall-$STAMP.img"
     log "整盘备份 → $BACKUP_FILE（${TARGET_MIB} MiB，请耐心）"
     dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
     sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
     log "整盘备份完成：$(cat "$BACKUP_FILE.sha256")"
+    if [ "$ASSUME_YES" != 1 ]; then
+        ask "备份已完成，确认覆盖 $TARGET？" "no"
+        [ "$REPLY" = "yes" ] || die "已取消（未做任何写入）"
+    fi
 else
     AVAIL="$(avail_bytes /var/tmp || echo 0)"
     if [ "${AVAIL:-0}" -ge "$TARGET_BYTES" ]; then
-        BACKUP_FILE="/var/tmp/qm1-emmc-preinstall-$STAMP.img"
-        log "安装介质空间足够，做整盘备份 → $BACKUP_FILE"
+        BACKUP_FILE="/var/tmp/qm1-target-preinstall-$STAMP.img"
+        log "介质空间足够，顺手做一份整盘备份 → $BACKUP_FILE"
         dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
         sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
-        log "整盘备份完成：$(cat "$BACKUP_FILE.sha256")"
     else
-        warn "安装介质剩余空间（${AVAIL:-0} 字节）装不下 ${TARGET_BYTES} 字节的整盘备份"
-        warn "改为只备份分区表与前 16 MiB —— 原系统内容不会被完整保留"
-        warn "如需完整备份，请先在别处做（dd if=$TARGET of=backup.img），再回来安装"
-        BACKUP_FILE="/var/tmp/qm1-emmc-metadata-$STAMP.img"
+        BACKUP_FILE="/var/tmp/qm1-target-metadata-$STAMP.img"
+        log "介质空间不够整盘备份，只备份分区表与前 16 MiB → $BACKUP_FILE"
         dd if="$TARGET" of="$BACKUP_FILE" bs=1M count=16 conv=fsync status=none
         sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
-        log "分区表备份完成：$BACKUP_FILE（$(cat "$BACKUP_FILE.sha256")）"
     fi
 fi
 
-# ---------- 写分区表 ----------
+# ---------- [5/6] 写入系统 ----------
+step "[5/6] 写入系统"
+
 ESP_MIB="$(lsblk -bno SIZE "$SRC_ESP" 2>/dev/null | head -1)"
 ESP_MIB=$(( ESP_MIB / 1048576 ))
 [ "$ESP_MIB" -gt 0 ] || die "无法读取源 ESP 大小"
@@ -106,13 +353,6 @@ ROOT_MIB=$(( TARGET_MIB - ROOT_START_MIB - 1 ))
 [ "$ROOT_MIB" -gt 0 ] || die "目标盘太小：${TARGET_MIB} MiB"
 
 log "在 $TARGET 上写分区表：p1 ESP ${ESP_MIB} MiB（EFI System），p2 根分区 ${ROOT_MIB} MiB（Linux）"
-
-# 写之前先确认目标盘上没有已挂载的分区（否则复制会失败或写坏数据）
-for p in $(lsblk -ndo NAME,TYPE "$TARGET" 2>/dev/null | awk '$2=="part"{print $1}'); do
-    if findmnt -rn "/dev/$p" >/dev/null 2>&1; then
-        die "目标分区 /dev/$p 还挂着，先卸载再安装"
-    fi
-done
 
 SPEC="$(mktemp)"
 trap 'rm -f "$SPEC"' EXIT
@@ -123,7 +363,6 @@ trap 'rm -f "$SPEC"' EXIT
 } > "$SPEC"
 LC_ALL=C sfdisk "$TARGET" < "$SPEC" >/dev/null
 
-# 让内核重新读分区表，然后等分区节点出现（mmcblk 用 p1/p2，nvme 之类用 1/2，别写死）
 partprobe "$TARGET" 2>/dev/null || true
 udevadm settle 2>/dev/null || true
 PART1=""
@@ -141,8 +380,6 @@ done
 [ -b "$PART1" ] && [ -b "$PART2" ] || die "分区设备没出现：$PART1 / $PART2"
 log "目标分区：$PART1（ESP） / $PART2（根）"
 
-# ---------- 复制内容 ----------
-# 根分区当前是挂载状态：先改只读，避免复制过程中有写入导致内容不一致
 mount -o remount,ro / 2>/dev/null || warn "根文件系统改只读失败（继续，可能有轻微不一致）"
 
 log "复制 ESP：$SRC_ESP → $PART1"
@@ -150,14 +387,10 @@ dd if="$SRC_ESP" of="$PART1" bs=4M conv=fsync status=progress
 log "复制根文件系统：$SRC_ROOT → $PART2"
 dd if="$SRC_ROOT" of="$PART2" bs=4M conv=fsync status=progress
 
-# 复制完了，把源根分区改回可写（后面要写 /etc/qm1-installed-to-emmc 记录）
 mount -o remount,rw / 2>/dev/null || warn "根文件系统改回可写失败（继续）"
 
-# ---------- 校验（必须在"撑大分区"和"换菜单"之前做） ----------
-# 顺序有讲究：
-#   * resize2fs 之后目标根分区比源大，sha256 必然不同 → 比对会误报失败；
-#   * 换回正常菜单之后目标 ESP 的 grub.cfg 也必然不同 → 同样会误报。
-# 所以先对"刚写完、还没做任何有意改动"的状态做逐字节校验，再做那两步改动。
+# 逐分区校验必须放在"刚写完、还没做任何后续改动"的状态，
+# 否则 resize2fs / 换菜单之后 sha256 必然不同 → 误报失败。
 log "校验：逐分区比对 sha256（刚写入、未做后续改动的状态）"
 SRC_ESP_HASH="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
 DST_ESP_HASH="$(sha256sum "$PART1" | awk '{print $1}')"
@@ -178,25 +411,44 @@ else
     rc=1
 fi
 
-# ---------- 换回正常菜单 ----------
-# 安装介质 ESP 里的 grub.cfg 是"安装菜单"；装好之后要换成正常菜单，
-# 否则以后从 eMMC 启动还会看到"安装到 eMMC"这一项。
+# ---------- [6/6] 收尾 ----------
+step "[6/6] 收尾（菜单、provisioning、安装记录）"
+
+# 6a. 换回正常菜单（安装介质的 grub.cfg 是安装菜单）
 SRC_ESP_MNT="$(mktemp -d)"
 DST_ESP_MNT="$(mktemp -d)"
 if mount "$SRC_ESP" "$SRC_ESP_MNT" 2>/dev/null \
    && [ -f "$SRC_ESP_MNT/EFI/BOOT/grub-normal.cfg" ]; then
-    mount "$PART1" "$DST_ESP_MNT"
-    cp "$SRC_ESP_MNT/EFI/BOOT/grub-normal.cfg" "$DST_ESP_MNT/EFI/BOOT/grub.cfg"
-    sync
-    umount "$DST_ESP_MNT"
-    log "目标 ESP 的 grub.cfg 已换成正常菜单"
+    if mount "$PART1" "$DST_ESP_MNT" 2>/dev/null; then
+        cp "$SRC_ESP_MNT/EFI/BOOT/grub-normal.cfg" "$DST_ESP_MNT/EFI/BOOT/grub.cfg"
+        sync
+        umount "$DST_ESP_MNT"
+        log "目标 ESP 的 grub.cfg 已换成正常菜单"
+    else
+        warn "挂载目标 ESP 失败 —— 目标 ESP 保留安装菜单"
+    fi
 else
-    warn "源 ESP 里没有 grub-normal.cfg —— 目标 ESP 保留安装菜单（能启动，但会多出安装项）"
+    warn "源 ESP 里没有 grub-normal.cfg —— 目标 ESP 保留安装菜单"
 fi
 umount "$SRC_ESP_MNT" 2>/dev/null || true
 rmdir "$SRC_ESP_MNT" "$DST_ESP_MNT" 2>/dev/null || true
 
-# ---------- 把根分区撑满整盘 ----------
+# 6b. provisioning 写进目标（ESP 的 /qm1/provision/ 与根分区的 /etc/qm1/provision/）
+if [ -n "$(ls -A "$WORK_PROV" 2>/dev/null || true)" ]; then
+    DST_ESP_MNT="$(mktemp -d)"
+    if mount "$PART1" "$DST_ESP_MNT" 2>/dev/null; then
+        mkdir -p "$DST_ESP_MNT/qm1/provision"
+        cp -a "$WORK_PROV/." "$DST_ESP_MNT/qm1/provision/"
+        sync
+        umount "$DST_ESP_MNT"
+        log "provisioning 已写入目标 ESP 的 /qm1/provision/"
+    else
+        warn "挂载目标 ESP 失败 —— provisioning 只写根分区"
+    fi
+    rmdir "$DST_ESP_MNT" 2>/dev/null || true
+fi
+
+# 6c. 撑满整盘 + 检查
 log "把根分区撑满整个分区（${ROOT_MIB} MiB）"
 e2fsck -fp "$PART2" >/dev/null 2>&1 || e2fsck -f "$PART2" || true
 resize2fs "$PART2" >/dev/null
@@ -207,13 +459,18 @@ else
     rc=1
 fi
 
-# 安装记录要落在**目标 eMMC 的根文件系统**里（当前跑着的根是安装介质，
-# 直接写 /etc 只会留在 U 盘上）
+# 6d. provisioning + 安装记录写进目标根文件系统
 DST_ROOT_MNT="$(mktemp -d)"
 if mount "$PART2" "$DST_ROOT_MNT" 2>/dev/null; then
+    if [ -n "$(ls -A "$WORK_PROV" 2>/dev/null || true)" ]; then
+        mkdir -p "$DST_ROOT_MNT/etc/qm1/provision"
+        cp -a "$WORK_PROV/." "$DST_ROOT_MNT/etc/qm1/provision/"
+        log "provisioning 已写入目标根分区：/etc/qm1/provision/"
+    fi
     {
         echo "installed_at=$(date -Is)"
         echo "target=$TARGET"
+        echo "mode=$MODE"
         echo "source=$SRC_DISK"
         echo "esp_sha256_at_write=$DST_ESP_HASH"
         echo "rootfs_sha256_at_write=$DST_ROOT_HASH"
@@ -224,7 +481,7 @@ if mount "$PART2" "$DST_ROOT_MNT" 2>/dev/null; then
     umount "$DST_ROOT_MNT"
     log "安装记录已写入目标根分区：/etc/qm1-installed-to-emmc"
 else
-    warn "挂载目标根分区失败 —— 安装记录没能写进 eMMC"
+    warn "挂载目标根分区失败 —— 安装记录没能写进目标"
 fi
 rmdir "$DST_ROOT_MNT" 2>/dev/null || true
 
@@ -235,13 +492,25 @@ if [ "$rc" -eq 0 ]; then
 else
     echo " 安装结束，但校验有失败项 ⚠️（见上面的 sha256 对比）"
 fi
-echo " 目标设备 : $TARGET"
-echo " 根分区   : $PART2（$(lsblk -bno SIZE "$PART2" 2>/dev/null || echo '?') 字节）"
+echo " 目标设备 : $TARGET（模式 $MODE）"
+echo " 根分区   : $PART2"
 echo " 备份     : ${BACKUP_FILE:-none}"
+if [ "$MODE" = "media" ]; then
+    echo " eMMC     : 未触碰（原系统保留，可随时取下 $TARGET 回退）"
+fi
 echo
 echo " 接下来："
-echo "   1. 拔掉安装 U 盘"
-echo "   2. 重新开机，在 BIOS 里选 eMMC（内部存储）启动"
-echo "   3. 首次开机后跑：sudo /usr/local/bin/qm1-selftest"
+echo "   1. 拔掉安装介质"
+if [ "$MODE" = "media" ]; then
+    echo "   2. 重新开机，在 BIOS 里选 $TARGET 启动（不要选 eMMC）"
+else
+    echo "   2. 重新开机，在 BIOS 里选 eMMC（内部存储）启动"
+fi
+if [ -f "$WORK_PROV/wpa_supplicant.conf" ]; then
+    echo "   3. 首次开机会自动联网（Wi-Fi 配置已随系统装好）"
+else
+    echo "   3. 首次开机后需要手动联网（本次没有 Wi-Fi 配置）"
+fi
+echo "   4. 登录后跑：sudo /usr/local/bin/qm1-selftest"
 echo "================================================================"
 exit "$rc"

@@ -347,6 +347,20 @@ jobs:
             || { echo "::error::Wi-Fi 单元没有排在首启配置之后（会先于 provisioning 启动）"; exit 1; }
           echo "OK   首启自动配置（Wi-Fi/SSH）就位"
 
+      - name: Assert the installer supports the non-destructive path
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          INSTALLER="$ROOT/usr/local/sbin/qm1-install-to-emmc"
+          # 安装器要支持「非破坏性」路径：装到可移动介质、eMMC 不动
+          grep -q -- '--mode' "$INSTALLER" \
+            || { echo "::error::安装器缺少 --mode（无法选择非破坏性安装路径）"; exit 1; }
+          grep -q 'qm1/provision' "$INSTALLER" \
+            || { echo "::error::安装器没有把 provisioning 写进目标（装完不会自动联网）"; exit 1; }
+          grep -q 'BACKUP_DIR' "$INSTALLER" \
+            || { echo "::error::安装器没有备份流程（覆盖 eMMC 前必须能整盘备份）"; exit 1; }
+          echo "OK   安装器支持非破坏性路径 + 备份 + provisioning"
+
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
           set -eu
