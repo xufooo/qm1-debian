@@ -409,7 +409,7 @@ jobs:
       - name: Assert the time sync and the bluetooth stack are enabled
         run: |
           set -euo pipefail
-          ROOT="$RUNNER_TEMP/qm1-root"
+          ROOT=build/rootfs
           for unit in systemd-timesyncd.service bluetooth.service; do
             # systemd-timesyncd 由 timers.target 激活，bluetooth 由 multi-user.target。
             # 用 -L 判断：发行版单元的链接目标是 /lib/systemd/system/... 的绝对路径，
