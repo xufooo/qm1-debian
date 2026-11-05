@@ -425,6 +425,106 @@ else
     row WARN "压测脚本" "没有 /usr/local/bin/qm1-stress"
 fi
 
+# ---------------- 7. 功能完备性（每个功能都要真的能用）----------------
+section "功能完备性"
+
+# 显示输出
+if cat /sys/class/drm/card*/connector/*/status 2>/dev/null | grep -q connected; then
+    row PASS "显示输出" "有已连接的显示输出"
+else
+    row WARN "显示输出" "没有已连接的显示输出（HDMI 未接显示器或假显示器）"
+fi
+
+# 声卡与 HDMI 音频
+if have aplay; then
+    cards="$(aplay -l 2>/dev/null | grep -c '^card ' || true)"
+    if [ "${cards:-0}" -gt 0 ]; then
+        row PASS "声卡" "$cards 张"
+    else
+        row WARN "声卡" "aplay 没有列出任何声卡"
+    fi
+else
+    row WARN "声卡" "没有 aply（alsa-utils 未安装）"
+fi
+if mod_loaded snd-hda-codec-hdmi; then
+    row PASS "HDMI 音频" "snd-hda-codec-hdmi 已加载"
+else
+    row WARN "HDMI 音频" "snd-hda-codec-hdmi 未加载（HDMI 可能没有声音）"
+fi
+
+# CPU 调频
+gov="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor 2>/dev/null || true)"
+freqs="$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_available_frequencies 2>/dev/null | tr '\n' ' ')"
+if [ -n "$gov" ]; then
+    row PASS "CPU 调频" "governor=$gov 可用频率=${freqs:-未知}"
+else
+    row WARN "CPU 调频" "没有 cpufreq 策略（CPU 可能锁在 1.3GHz）"
+fi
+
+# eMMC runtime PM
+pc="$(cat /sys/devices/platform/80860F14:00/power/control 2>/dev/null || true)"
+if [ "$pc" = "on" ]; then
+    row PASS "eMMC runtime PM" "已关闭自动挂起（control=on）"
+elif [ -n "$pc" ]; then
+    row WARN "eMMC runtime PM" "control=$pc（自动挂起仍开）"
+else
+    row INFO "eMMC runtime PM" "读不到该 ACPI 主机（固件未开 runtime PM 则本就无风险）"
+fi
+
+# 存储设备清单与寿命
+mmc_list="$(for d in /sys/block/mmcblk*; do
+    [ -e "$d" ] || continue
+    n="$(basename "$d")"
+    t="$(cat "$d/device/type" 2>/dev/null || echo '?')"
+    printf '%s(%s) ' "$n" "$t"
+done)"
+if [ -n "$mmc_list" ]; then
+    row INFO "存储设备" "$mmc_list"
+else
+    row WARN "存储设备" "没有 mmcblk 设备"
+fi
+life="$(find /sys/class/mmc_host -name life_time -type f 2>/dev/null | head -1 | xargs -r cat 2>/dev/null || true)"
+[ -n "$life" ] && row INFO "eMMC 寿命计数" "$life（0x… 越大越接近寿命上限）"
+
+# RTC
+if [ -e /dev/rtc0 ]; then
+    row PASS "RTC" "/dev/rtc0 存在"
+else
+    row WARN "RTC" "没有 /dev/rtc0（Bay Trail-T 开 CONFIG_PINCTRL_BAYTRAIL 的已知副作用；系统时钟仍由 HPET/ACPI 提供）"
+fi
+
+# USB 控制器
+usb3="$(ls /sys/bus/pci/drivers/xhci-hcd 2>/dev/null | wc -l)"
+usb2=0
+for d in /sys/bus/pci/drivers/ehci-pci /sys/bus/pci/drivers/ohci-pci; do
+    [ -d "$d" ] || continue
+    for _ in "$d"/*; do
+        [ -e "$_" ] && usb2=$((usb2 + 1))
+    done
+done
+row INFO "USB 控制器" "xHCI=${usb3} EHCI/OHCI=${usb2}"
+
+# 无线与蓝牙
+if mod_loaded rtw_8723bs; then
+    row PASS "Wi-Fi 驱动" "rtw_8723bs（rtw88 树外模块）"
+elif mod_loaded r8723bs; then
+    row PASS "Wi-Fi 驱动" "r8723bs（发行版 staging 模块）"
+else
+    row WARN "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载"
+fi
+if [ -d /sys/class/bluetooth/hci0 ]; then
+    row PASS "蓝牙" "hci0 已出现"
+else
+    row WARN "蓝牙" "没有 hci0（厂商固件下发可能没成功）"
+fi
+
+# 硬件修正服务
+if systemctl is-enabled --quiet qm1-hardware-fixups.service 2>/dev/null; then
+    row PASS "硬件修正服务" "qm1-hardware-fixups.service 已启用"
+else
+    row WARN "硬件修正服务" "qm1-hardware-fixups.service 未启用"
+fi
+
 # ---------------- 汇总 ----------------
 printf '\n\033[1m== 汇总 ==\033[0m\n'
 printf '  PASS=%d  WARN=%d  FAIL=%d\n' "$PASS" "$WARN" "$FAIL"
