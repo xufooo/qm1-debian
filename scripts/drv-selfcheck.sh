@@ -135,6 +135,21 @@ if [ -n "$ifs" ]; then
     if [ "$wlan_found" = "1" ]; then
         row PASS "无线接口" "存在（绑定驱动：${wlan_drv:-未知}）"
         case "$wlan_drv" in
+            *rtw88_8723bs*|*rtw_8723bs*)
+                # rtw88 回移模块（上游 7.4 的 8723b/8723bs 支持，按镜像内核回移）：
+                # staging 驱动那 4 条永久卡死路径在上游已被重写，不再存在。
+                row PASS "无线驱动 rtw88" "rtw88 回移模块（上游 7.4 的 RTL8723BS 支持，staging 卡死路径已在上游修掉）"
+                fw8723=""
+                for p in /lib/firmware/rtw88/rtw8723b_fw.bin \
+                         /usr/lib/firmware/rtw88/rtw8723b_fw.bin; do
+                    [ -f "$p" ] && fw8723="$p"
+                done
+                if [ -n "$fw8723" ]; then
+                    row PASS "rtw8723b 固件" "$fw8723"
+                else
+                    row FAIL "rtw8723b 固件" "缺 rtw88/rtw8723b_fw.bin（Debian 13 的 firmware-realtek 不含该 blob）"
+                fi
+                ;;
             *r8723bs_qm1*)
                 # 打了补丁的外部模块（patches/rtl8723bs/），永久卡死路径已修
                 row PASS "无线驱动 r8723bs_qm1" "已打补丁的外部模块（永久卡死路径已修）"

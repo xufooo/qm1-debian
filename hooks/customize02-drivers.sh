@@ -263,6 +263,53 @@ else
     WIFI_MODULE_STATE="absent"
 fi
 
+# ---------- 4c. rtw88 RTL8723BS 回移模块（推荐路径，优先于 4b） ----------
+# QM1_RTW88_MODULE_DEB 指向 scripts/build-rtw88-8723bs-module.sh 产出的 .deb：
+# 把上游 rtw88 的 RTL8723B / RTL8723BS 支持（Linux 7.4 合并窗口，主线提交
+# d726c70ce082 / 269946cba92e / b2d251aa7f16）按镜像内核回移成树外模块，
+# 连同 rtw88/rtw8723b_fw.bin 固件一起装进镜像。
+# 这是对 staging r8723bs 永久卡死路径的根治 —— 上游干脆删掉了 staging 驱动。
+# 与 4b 的补丁模块二选一：rtw88 优先，装了 rtw88 就不装补丁 staging 模块。
+if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
+    _img_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
+    [ -n "$_img_kver" ] || die "镜像里没有 /lib/modules，无法核对 rtw88 模块的 vermagic"
+    _deb_name="$(basename "$QM1_RTW88_MODULE_DEB")"
+    log "安装 rtw88 回移模块：$_deb_name（镜像内核 $_img_kver）"
+    cp "$QM1_RTW88_MODULE_DEB" "$TARGET/tmp/$_deb_name"
+    if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_deb_name"; then
+        rm -f "$TARGET/tmp/$_deb_name"
+        die "rtw88 模块 deb 安装失败：$_deb_name"
+    fi
+    rm -f "$TARGET/tmp/$_deb_name"
+    # 模块名有两种：上游回移是 rtw88_8723bs，vendor 树是 rtw_8723bs
+    _sdio_mod=""
+    for _cand in rtw88_8723bs rtw_8723bs; do
+        if chroot "$TARGET" modinfo -k "$_img_kver" "$_cand" >/dev/null 2>&1; then
+            _sdio_mod="$_cand"
+            break
+        fi
+    done
+    [ -n "$_sdio_mod" ] || die "装完 deb 但镜像里没有 rtw88_8723bs / rtw_8723bs 模块"
+    _vm="$(chroot "$TARGET" modinfo -k "$_img_kver" -F vermagic "$_sdio_mod" 2>/dev/null | awk '{print $1}')"
+    case "$_vm" in
+        "$_img_kver"*) : ;;
+        *) die "rtw88 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
+    esac
+    [ -f "$TARGET/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
+        || die "rtw88 固件 rtw88/rtw8723b_fw.bin 缺失（Debian 13 的 firmware-realtek 不含该 blob）"
+    log "rtw88 模块：$_sdio_mod（vermagic $_vm，与镜像内核一致）"
+    # modules-load.d：换成回移模块，去掉 staging 驱动与补丁 staging 模块
+    sed -i -E '/^r8723bs(_qm1)?$/d' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
+    printf '%s\n' "$_sdio_mod" >> "$TARGET/etc/modules-load.d/qm1-hardware.conf"
+    RTW88_MODULE_STATE="installed:$_sdio_mod:$_deb_name"
+else
+    if [ -n "${QM1_RTW88_MODULE_DEB:-}" ]; then
+        die "QM1_RTW88_MODULE_DEB 指向的文件不存在：$QM1_RTW88_MODULE_DEB"
+    fi
+    warn "未提供 QM1_RTW88_MODULE_DEB：镜像里没有 rtw88 回移模块，Wi-Fi 仍靠有永久卡死路径的 staging 驱动"
+    RTW88_MODULE_STATE="absent"
+fi
+
 # ---------- 5. out-of-tree / DKMS 驱动（可选） ----------
 if [ -n "${QM1_DKMS_DEB_DIR:-}" ] && [ -d "$QM1_DKMS_DEB_DIR" ]; then
     log "安装外部驱动包：$QM1_DKMS_DEB_DIR"
@@ -381,6 +428,8 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
     echo "missing:${missing_fw:-none}"
     echo "--- Wi-Fi 模块 ---"
     echo "${WIFI_MODULE_STATE:-absent}"
+    echo "--- rtw88 回移模块 ---"
+    echo "${RTW88_MODULE_STATE:-absent}"
 } > "$MANIFEST"
 
 # 关键驱动判定：module 或 builtin 都算有，只有 absent 才致命

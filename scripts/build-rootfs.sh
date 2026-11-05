@@ -30,6 +30,7 @@ COMPONENTS="main,non-free-firmware"
 HOOKS_DIR="$REPO_ROOT/hooks"
 KERNEL_VERSION=""   # 空 = 用发行版元包；非空 = 固定某个 point release
 WIFI_MODULE_DEB=""  # 空 = 不装外部 Wi-Fi 模块；非空 = 装这个打了补丁的 .deb
+RTW88_MODULE_DEB="" # 空 = 不装 rtw88 回移模块；非空 = 装这个 .deb（推荐路径）
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -42,6 +43,7 @@ while [ $# -gt 0 ]; do
         --hooks) HOOKS_DIR="$2"; shift 2 ;;
         --kernel-version) KERNEL_VERSION="$2"; shift 2 ;;
         --wifi-module-deb) WIFI_MODULE_DEB="$2"; shift 2 ;;
+        --rtw88-module-deb) RTW88_MODULE_DEB="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -151,6 +153,18 @@ if [ -n "$WIFI_MODULE_DEB" ]; then
     export QM1_WIFI_MODULE_DEB
 else
     export QM1_WIFI_MODULE_DEB=""
+fi
+
+# rtw88 RTL8723BS 回移模块（上游 7.4 的 8723b/8723bs 支持，按镜像内核回移）；
+# 空 = 不装。这是根治 staging r8723bs 永久卡死路径的推荐路径。
+if [ -n "$RTW88_MODULE_DEB" ]; then
+    [ -f "$RTW88_MODULE_DEB" ] || die "--rtw88-module-deb 指向的文件不存在：$RTW88_MODULE_DEB"
+    _rtw88_deb_dir="$(cd "$(dirname "$RTW88_MODULE_DEB")" && pwd)"
+    _rtw88_deb_name="$(basename "$RTW88_MODULE_DEB")"
+    QM1_RTW88_MODULE_DEB="$_rtw88_deb_dir/$_rtw88_deb_name"
+    export QM1_RTW88_MODULE_DEB
+else
+    export QM1_RTW88_MODULE_DEB=""
 fi
 
 log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"
