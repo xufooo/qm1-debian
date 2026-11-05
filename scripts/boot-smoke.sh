@@ -170,6 +170,55 @@ ROOT_UUID="$(debugfs -R "cat /etc/fstab" "$BOOT_IMG" 2>/dev/null \
 [ -n "$ROOT_UUID" ] || die "从镜像的 /etc/fstab 里读不出根分区的 UUID"
 log "根 UUID：$ROOT_UUID"
 
+# ---------- 2a. 把客户机写进磁盘的 journal 取出来 ----------
+# 这个函数在两处被调用：
+#   ① 客户机正常关机之后（正常路径：拿完整 journal 做断言）；
+#   ② 客户机没走到 multi-user.target 就超时了（取证路径）。
+# 超时时最有价值的证据不是控制台 —— 它可能只留下半截，而且"控制台静默"
+# 有两种完全不同的原因：
+#   (a) systemd 还在等某个单元（journal 里能明确看到是哪一个）；
+#   (b) 来客机真的卡死了（journal 停在某个时刻之后不再增长）。
+# 不把 journal 摊开就只能靠猜，所以超时时也必须导一次。
+export_journal() {
+    JOURNAL_DIR="$WORK/journal"
+    rm -rf "$JOURNAL_DIR"
+    mkdir -p "$JOURNAL_DIR"
+    JOURNAL_TEXT=""
+    JOURNAL_TEXT_MONO=""
+    JOURNAL_OK="no"
+    # 整盘模式下，客户机写的是整盘副本里的根分区 ⇒ 先把副本里的分区抠回来，
+    # 否则拿到的是开机前那份（没有 journal）。
+    if [ -n "$DISK" ]; then
+        dd if="$DISK_COPY" of="$BOOT_IMG" bs=512 skip="$PART_START" count="$PART_SIZE" conv=sparse status=none || true
+    fi
+    MACHINE_ID="$(debugfs -R "ls -l /var/log/journal" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '^[0-9a-f]{32}$' | head -1 || true)"
+    if [ -n "$MACHINE_ID" ]; then
+        for jf in $(debugfs -R "ls -l /var/log/journal/$MACHINE_ID" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '\.journal' || true); do
+            debugfs -R "dump /var/log/journal/$MACHINE_ID/$jf $JOURNAL_DIR/$jf" "$BOOT_IMG" >/dev/null 2>&1 || true
+        done
+    fi
+    if command -v journalctl >/dev/null 2>&1 && [ -n "$(ls -A "$JOURNAL_DIR" 2>/dev/null)" ]; then
+        JOURNAL_TEXT="$(journalctl --directory="$JOURNAL_DIR" --output=cat --no-pager 2>/dev/null || true)"
+        JOURNAL_TEXT_MONO="$(journalctl --directory="$JOURNAL_DIR" --output=short-monotonic --no-pager 2>/dev/null || true)"
+        [ -n "$JOURNAL_TEXT" ] && JOURNAL_OK="yes"
+    fi
+    return 0
+}
+
+# 超时取证：把 journal 摊开，并单独列出单元事件。
+dump_diagnostics() {
+    echo "BOOT-SMOKE: ---- 客户机 journal 尾部（带单调时钟，最后 60 行）----" >&2
+    if [ "$JOURNAL_OK" = "yes" ]; then
+        printf '%s\n' "$JOURNAL_TEXT_MONO" | tail -60 >&2
+        echo "BOOT-SMOKE: ---- journal 里的单元事件（最后 40 条）----" >&2
+        printf '%s\n' "$JOURNAL_TEXT" \
+            | grep -E 'Starting |Started |Finished |Failed |Timed out|Reached target' \
+            | tail -40 >&2
+    else
+        echo "BOOT-SMOKE: （没能读出客户机的 journal —— 它可能写在 /run/log/journal 里）" >&2
+    fi
+}
+
 # ---------- 2. 起 QEMU，串口日志写文件 ----------
 # console=ttyS0 让 systemd 把开机过程写到串口；mask 掉 getty 是因为登录提示
 # 会占住控制台，日志里全是 "qm1 login:"，反而把有用信息淹掉。
@@ -235,6 +284,8 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     if ! kill -0 "$QEMU_PID" 2>/dev/null; then
         echo "BOOT-SMOKE: QEMU 自己退出了，控制台日志尾部：" >&2
         tail -60 "$CONSOLE" >&2 || true
+        export_journal
+        dump_diagnostics
         exit 1
     fi
     sleep 2
@@ -243,6 +294,10 @@ done
 if ! grep -qE -- "$MILESTONE_RE" "$CONSOLE" 2>/dev/null; then
     echo "BOOT-SMOKE: 客户机没走到 multi-user.target（超时 ${TIMEOUT}s），控制台日志尾部：" >&2
     tail -60 "$CONSOLE" >&2 || true
+    # 超时也是取证现场：控制台只留下半截，看不出是谁在拖。journal 才写得清楚
+    # 哪个单元还挂着 —— 或者 journal 也停了，那就是来客机真的卡死了。
+    export_journal
+    dump_diagnostics
     exit 1
 fi
 log "客户机到达 multi-user.target"
@@ -283,28 +338,10 @@ trap - EXIT
 log "客户机已关机"
 
 # ---------- 5. 把客户机写进磁盘的 journal 取出来 ----------
-# 整盘模式下，客户机写的是整盘副本里的根分区 ⇒ 关机后要重新抠一次，
-# 否则拿到的是开机前那份（没有 journal）。
-if [ -n "$DISK" ]; then
-    dd if="$DISK_COPY" of="$BOOT_IMG" bs=512 skip="$PART_START" count="$PART_SIZE" conv=sparse status=none || true
-fi
-JOURNAL_DIR="$WORK/journal"
-rm -rf "$JOURNAL_DIR"
-mkdir -p "$JOURNAL_DIR"
-JOURNAL_TEXT=""
-JOURNAL_OK="no"
-MACHINE_ID="$(debugfs -R "ls -l /var/log/journal" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '^[0-9a-f]{32}$' | head -1 || true)"
-if [ -n "$MACHINE_ID" ]; then
-    for jf in $(debugfs -R "ls -l /var/log/journal/$MACHINE_ID" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '\.journal' || true); do
-        debugfs -R "dump /var/log/journal/$MACHINE_ID/$jf $JOURNAL_DIR/$jf" "$BOOT_IMG" >/dev/null 2>&1 || true
-    done
-fi
-if command -v journalctl >/dev/null 2>&1 && [ -n "$(ls -A "$JOURNAL_DIR" 2>/dev/null)" ]; then
-    JOURNAL_TEXT="$(journalctl --directory="$JOURNAL_DIR" --output=cat --no-pager 2>/dev/null || true)"
-    [ -n "$JOURNAL_TEXT" ] && JOURNAL_OK="yes"
-fi
+# 客户机是优雅关机的，所以 journal 已经是落盘状态。
+export_journal
 if [ "$JOURNAL_OK" = "yes" ]; then
-    log "已导出客户机的 journal（$(wc -c <"$JOURNAL_DIR"/system.journal 2>/dev/null || echo 0) 字节起）"
+    log "已导出客户机的 journal（$(ls -A "$JOURNAL_DIR" 2>/dev/null | wc -l | tr -d ' ') 个文件）"
 else
     log "警告：没能读到客户机的 journal（可能它写在了 /run/log/journal），只按控制台日志断言"
 fi
