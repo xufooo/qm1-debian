@@ -7,7 +7,9 @@
 #   * Hermes 必须用官方安装方式（官方安装器用 uv 托管 standalone CPython 3.14、
 #     Node.js/npm、ripgrep、FFmpeg）。系统自带的 Debian python3 是 3.13，装不上
 #     Hermes 锁定的依赖 —— 绝不要在设备上源码编译 Python。
-#   * 设备只有 2 GB 内存：Chrome 与 gateway 各有限额，并由 systemd-oomd 兜底。
+#   * 设备只有 2 GB 内存：浏览器单元自己带 MemoryHigh/MemoryMax 限额，并由
+#     systemd-oomd 兜底。网关单元由官方 CLI 安装（hermes gateway install），
+#     它带的是上游自己的重启与退出码语义，我们不再手写同名单元。
 #   * 本脚本可重复执行（幂等）。
 #
 # 用法：
@@ -36,7 +38,13 @@ fi
 SKIP_HERMES=0
 WIFI_SSID="${QM1_WIFI_SSID:-}"
 WIFI_PASS="${QM1_WIFI_PASS:-}"
-HERMES_CMD="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash"
+# 官方安装器的参数（上游 install.sh 逐段读过）：
+#   --non-interactive  等价于 --skip-setup：没有 TTY 时它本来也会跳过 setup/gateway，
+#                       显式写出来是为了让它不要在那儿等终端。
+#   --skip-browser     不让包管理器再下载一套浏览器 —— 我们用 apt 装的 Debian Chromium
+#                       已经能用，32 GB 盘 + 2 GB 内存容不下第二套浏览器。
+#   --skip-computer-use 同理（跳过 cua-driver）。
+HERMES_CMD="curl -fsSL https://hermes-agent.nousresearch.com/install.sh | bash -s -- --non-interactive --skip-browser --skip-computer-use"
 
 log()  { printf '[provision] %s\n' "$*"; }
 warn() { printf '[provision][warn] %s\n' "$*" >&2; }
@@ -172,45 +180,79 @@ else
 fi
 
 # ---------- 6. systemd 单元与资源限额 ----------
-log "写入 systemd --user 单元（gateway 常驻 + 浏览器会话）"
-install -d -m 0755 /etc/systemd/system
+log "配置 Hermes 网关服务与浏览器会话"
 [ -n "$RUN_HOME" ] || die "算不出 $RUN_AS 的家目录（getent 失败）"
 install -d -m 0755 "$RUN_HOME/.config/systemd/user" 2>/dev/null || true
 
-cat > /etc/systemd/system/qm1-agent.slice <<'EOF'
-[Unit]
-Description=QM1 agent workload slice
-Before=slices.target
+# ---- 6a 网关服务：交给官方 CLI 装 ----
+# 上游 hermes_cli/gateway.py 的 user 单元模板带着一整套我们手写时漏掉的关键项：
+#   Environment="HERMES_HOME=..." / HERMES_SUPERVISED_CHILD=1 / 整理过的 PATH /
+#   RestartPreventExitStatus=<致命配置错误码> / ExecReload=USR1 / ExecStop* 助手 /
+#   WorkingDirectory=...
+# 而且上游在每次网关启动时会 refresh_systemd_unit_if_needed() 刷新自己的单元，
+# 我们手写的同名单元会被它改写/替换，两个单元还会互相打架
+# （上游注释：legacy 的 hermes.service 与 hermes-gateway.service 会抢同一个 bot token）。
+# 所以这里不再手写网关单元，改成调用官方安装器 —— 官方安装器的 stage_gateway
+# 做的也正是这件事：
+#     hermes gateway install --if-missing
+HERMES_GATEWAY_UNIT=""
+if [ "$SKIP_HERMES" -eq 0 ] && [ -x "$RUN_HOME/.local/bin/hermes" ]; then
+    log "用官方 CLI 安装网关服务（hermes gateway install --if-missing）"
+    if sudo -u "$RUN_AS" -H bash -lc 'hermes gateway install --if-missing'; then
+        HERMES_GATEWAY_UNIT="hermes-gateway.service"
+        log "网关服务已由官方 CLI 安装"
+    else
+        warn "官方网关服务安装失败 —— 回落到本机自带的最小单元"
+    fi
+elif [ "$SKIP_HERMES" -eq 1 ]; then
+    log "按要求跳过 Hermes：网关服务不安装"
+else
+    warn "$RUN_HOME/.local/bin/hermes 不存在 —— 网关服务装不了（官方安装器没跑成功？）"
+fi
 
-[Slice]
-MemoryHigh=300M
-MemoryMax=420M
-CPUWeight=50
-EOF
-
-cat > "$RUN_HOME/.config/systemd/user/hermes-gateway.service" <<'EOF'
+# ---- 6b 兜底：只有官方没装成时才手写一个最小单元 ----
+if [ -z "$HERMES_GATEWAY_UNIT" ] && [ "$SKIP_HERMES" -eq 0 ]; then
+    cat > "$RUN_HOME/.config/systemd/user/hermes-gateway.service" <<'EOF'
 [Unit]
-Description=Hermes gateway (long running agent)
+Description=Hermes gateway (fallback unit: the upstream install failed)
 After=network-online.target
+Wants=network-online.target
+# 没有凭据时上游网关会自己退出（"Exit 1 if no platform connects"），
+# 限制重启次数，免得它在没有平台凭据时把机器刷成日志。
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=simple
-Slice=qm1-agent.slice
-ExecStart=%h/.local/bin/hermes gateway
+Environment="HERMES_HOME=%h/.hermes"
+Environment="HERMES_SUPERVISED_CHILD=1"
+ExecStart=%h/.local/bin/hermes gateway run
 Restart=on-failure
 RestartSec=10
 MemoryHigh=280M
 MemoryMax=350M
-EOF
+StandardOutput=journal
+StandardError=journal
 
+[Install]
+WantedBy=default.target
+EOF
+    HERMES_GATEWAY_UNIT="hermes-gateway.service"
+    warn "已写入兜底网关单元 —— 它没有官方单元的 RestartPreventExitStatus 等保护，联网后建议重跑 hermes gateway install --force 换成官方单元"
+fi
+
+# ---- 6c 浏览器会话（我们自己管，上游不碰它）----
+# 注意：--user 单元里写 Slice= 只会在用户管理器里找一个"用户作用域"的 slice，
+# 我们之前写的 /etc/systemd/system/qm1-agent.slice 是系统作用域，对 user 单元
+# 根本不起作用 —— 内存限额实际只来自单元自己的 MemoryHigh/MemoryMax。
 cat > "$RUN_HOME/.config/systemd/user/qm1-browser.service" <<'EOF'
 [Unit]
 Description=Headless Chrome session for browser_exec
+After=network-online.target
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-Slice=qm1-agent.slice
 ExecStart=/usr/bin/chromium --headless=new --no-sandbox --disable-dev-shm-usage \
   --disable-gpu --disable-features=VizDisplayCompositor \
   --remote-debugging-port=9222 --user-data-dir=%h/.cache/qm1-chrome about:blank
@@ -249,10 +291,12 @@ else
         _waited=$(( _waited + 1 ))
     done
     if [ -d "$_user_rt" ]; then
+        _units="qm1-browser.service"
+        [ -n "$HERMES_GATEWAY_UNIT" ] && _units="$_units $HERMES_GATEWAY_UNIT"
         # shellcheck disable=SC2086
         sudo -u "$RUN_AS" XDG_RUNTIME_DIR="$_user_rt" \
             DBUS_SESSION_BUS_ADDRESS="unix:path=$_user_rt/bus" \
-            systemctl --user enable --now hermes-gateway.service qm1-browser.service \
+            systemctl --user enable --now $_units \
             || warn "user 单元启动失败（网关或浏览器还没装好？）—— 单元已 enable，稍后 systemctl --user start 即可"
     else
         warn "用户 $RUN_AS 的 user manager 没起来（$_user_rt 不存在）—— 单元已写好，下次登录后 systemctl --user enable --now"
@@ -274,5 +318,14 @@ cat <<EOF
   curl -s http://127.0.0.1:9222/json/version    # headless Chrome 的调试端口
   /usr/local/bin/qm1-selftest          # 硬件驱动自检
 
+网关常驻的前提是**已经配置好消息平台凭据**：上游网关在没有平台连上时会自己
+退出（"Exit 1 if no platform connects so systemd Restart=always retries
+transient errors"），这是它的设计，不是故障。凭据由 hermes setup 写入，
+无终端的自动安装不会替你填 —— 首次使用请手工执行一次：
+
+  hermes setup                         # 选平台、填 token（交互）
+  systemctl --user restart hermes-gateway
+
 EOF
 log "Hermes 用的解释器由官方安装器托管（standalone CPython 3.14），不要用系统 python3 代替。"
+log "网关单元由官方 CLI 安装（hermes gateway install --if-missing）；凭据未配置时网关会自行退出，先跑 hermes setup。"

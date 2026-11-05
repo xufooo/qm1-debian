@@ -395,8 +395,13 @@ jobs:
           #    timesyncd 的 NTP 服务器名解析不了 ⇒ 时钟停在 1970 ⇒ TLS 全废。
           [ -L "$ROOT/etc/resolv.conf" ] \
             || { echo "::error::镜像里 /etc/resolv.conf 不是指向 resolved stub 的软链"; exit 1; }
-          grep -qx '/usr/lib/systemd/resolv.conf' "$ROOT/etc/resolv.conf" \
-            || { echo "::error::/etc/resolv.conf 指向的不是 resolved stub：$(readlink "$ROOT/etc/resolv.conf")"; exit 1; }
+          # ★ 比较**链接目标字符串**，不要去读文件内容：
+          #   /etc/resolv.conf 是绝对软链 → /usr/lib/systemd/resolv.conf，
+          #   在宿主上读它会被内核解析到**宿主的** /usr/lib/systemd/... （不存在）
+          #   ⇒ grep 报 "No such file or directory"，把好的镜像判成坏的。
+          #   （同一个坑：hook03 的 wants 链接、CI 的 link_ok，都要在目标根里解析。）
+          [ "$(link_target "$ROOT/etc/resolv.conf")" = "/usr/lib/systemd/resolv.conf" ] \
+            || { echo "::error::/etc/resolv.conf 指向的不是 resolved stub：$(link_target "$ROOT/etc/resolv.conf")"; exit 1; }
           link_ok "$ROOT/etc/resolv.conf" \
             || { echo "::error::/etc/resolv.conf 是悬空软链：$(link_target "$ROOT/etc/resolv.conf")"; exit 1; }
           RESOLVED_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"

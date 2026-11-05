@@ -222,8 +222,21 @@ ls ~/.local/share/uv/python/*/bin/python3.14   # Hermes 用的解释器
 ```
 
 内存预算（2 GiB 的机器）：zram 768M + mem=1900M + `/dev/shm` 256M +
-`systemd-oomd`；Hermes 网关与浏览器都挂在 `qm1-agent.slice` 上，有
-`MemoryHigh/MemoryMax` 限制。
+`systemd-oomd`；headless Chrome 的用户单元带 `MemoryHigh/MemoryMax`
+（350M/450M）。Hermes 网关的单元由官方 CLI 安装
+（`hermes gateway install --if-missing`），带的是上游自己的重启与退出码
+语义 —— 上游在网关启动时会刷新自己的单元，我们手写的同名单元会被它
+改写并互相打架，所以不再手写。
+
+网关常驻的前提是**已经配置好消息平台凭据**：上游网关在没有平台连上
+时会自己退出（`Exit 1 if no platform connects`），这是它的设计，不是
+故障。凭据由 `hermes setup` 写入，无终端的自动安装不会替你填，首次使用
+请手工执行一次：
+
+```sh
+hermes setup                              # 选平台、填 token（交互）
+systemctl --user restart hermes-gateway
+```
 
 ---
 
