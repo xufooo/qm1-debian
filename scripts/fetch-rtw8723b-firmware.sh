@@ -26,6 +26,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/build/rtw8723b-fw}"
 MIRROR="${MIRROR:-http://deb.debian.org/debian}"
 SUITE="${SUITE:-sid}"
+# firmware-realtek 在 Debian 的 non-free-firmware 组件里（不在 main）
+COMPONENTS="${COMPONENTS:-non-free-firmware main}"
 PKG="firmware-realtek"
 # 目标文件在包内的相对路径
 BLOB_REL="lib/firmware/rtw88/rtw8723b_fw.bin"
@@ -36,6 +38,7 @@ while [ $# -gt 0 ]; do
         --out-dir) OUT_DIR="$2"; shift 2 ;;
         --mirror)  MIRROR="$2"; shift 2 ;;
         --suite)   SUITE="$2"; shift 2 ;;
+        --component) COMPONENTS="$2"; shift 2 ;;
         -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
         *) die "未知参数：$1" ;;
     esac
@@ -58,9 +61,20 @@ log "从 $SUITE 的 $PKG 取 RTL8723BS 固件（$MIRROR）"
 # ---------------------------------------------------------------------------
 # 1) 从 apt 索引里定位 .deb 的路径与哈希
 # ---------------------------------------------------------------------------
-IDX="$WORK/Packages.xz"
-log "下载索引：$MIRROR/dists/$SUITE/main/binary-all/Packages.xz"
-curl -fsSL --max-time 300 "$MIRROR/dists/$SUITE/main/binary-all/Packages.xz" -o "$IDX"
+IDX=""
+for comp in $COMPONENTS; do
+    url="$MIRROR/dists/$SUITE/$comp/binary-all/Packages.xz"
+    log "下载索引：$url"
+    if curl -fsSL --max-time 300 "$url" -o "$WORK/Packages.xz"; then
+        if xzcat "$WORK/Packages.xz" | grep -q "^Package: $PKG\$"; then
+            IDX="$WORK/Packages.xz"
+            log "命中组件：$comp"
+            break
+        fi
+        log "$comp 组件里没有 $PKG，换下一个组件"
+    fi
+done
+[ -n "$IDX" ] || die "在 $SUITE 的 [$COMPONENTS] 组件里都找不到 $PKG"
 
 # 只取 firmware-realtek 那个 stanza 的 Filename / SHA256 / Version
 read -r DEB_PATH DEB_SHA DEB_VER <<EOF

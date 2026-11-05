@@ -32,7 +32,7 @@ set -euo pipefail
 
 KVER=""
 OUT_DIR="out"
-SOURCE="auto"
+SOURCE="vendor"
 JOBS="$(nproc --ignore=1 2>/dev/null || echo 2)"
 KERNEL_REPO="https://github.com/torvalds/linux.git"
 KERNEL_REF="v6.12"
@@ -216,7 +216,10 @@ case "$SOURCE" in
     upstream) build_upstream || die "the upstream backport failed" ;;
     vendor)   build_vendor   || die "the vendor build failed" ;;
     auto)
-        build_upstream || { warn "falling back to the vendor tree"; build_vendor || die "both builds failed"; }
+        # 上游 7.4 的芯片驱动需要 7.4 时期的 rtw88 核心 API（mac_postinit /
+        # query_phy_status / set_ampdu_factor / led_set / hw_feature_report …），
+        # 在 6.12 上编不过；能编过的是维护中的 vendor rtw88 树，所以默认先试它。
+        build_vendor || { warn "falling back to the upstream backport"; build_upstream || die "both builds failed"; }
         ;;
 esac
 
@@ -254,7 +257,12 @@ if [ ! -f "$FW_DIR/rtw8723b_fw.bin" ]; then
         bash "$fetch_script" --out-dir "$FW_DIR" >&2 || warn "the firmware fetch failed"
     fi
 fi
-[ -f "$FW_DIR/rtw8723b_fw.bin" ] || die "rtw8723b_fw.bin is missing (Debian sid firmware-realtek)"
+if [ ! -f "$FW_DIR/rtw8723b_fw.bin" ] && [ -f "$WORK/vendor/firmware/rtw8723b_fw.bin" ]; then
+    warn "using the firmware blob shipped with the vendor tree"
+    cp "$WORK/vendor/firmware/rtw8723b_fw.bin" "$FW_DIR/rtw8723b_fw.bin"
+    [ -f "$WORK/vendor/firmware/rtw8723b_wow_fw.bin" ] && cp "$WORK/vendor/firmware/rtw8723b_wow_fw.bin" "$FW_DIR/rtw8723b_wow_fw.bin" || true
+fi
+[ -f "$FW_DIR/rtw8723b_fw.bin" ] || die "rtw8723b_fw.bin is missing (Debian sid firmware-realtek, or the vendor tree fallback)"
 
 # ---------------------------------------------------------------------------
 # package the .deb
