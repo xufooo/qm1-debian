@@ -14,6 +14,13 @@ compiled into the single out-of-tree module `rtw88_qm1`.
 * These patches are **carried patches**, not upstream commits: the mail
   headers carry no upstream `From <sha>` on purpose.  Where a patch is
   upstream's, its upstream commit id is named in the body.
+* **The paths inside a patch are relative to the rtw88 directory**
+  (`a/sdio.c`, `a/rtw8723b.c`), *not* to the kernel tree.  The build
+  script copies the rtw88 sources into one flat directory and applies the
+  patches there with `-p1`, so a path like
+  `a/drivers/net/wireless/realtek/rtw88/sdio.c` would be stripped down to
+  a path that does not exist in that directory and the patch would not
+  apply.  This is checked by `scripts/test-upstream-patches.sh`.
 
 ## Why the snapshot does not already contain them
 
@@ -126,10 +133,21 @@ not the shipping path.  The shipping module is the upstream one.
 
 ## Verification
 
-The six patches were applied with GNU patch to the pinned upstream files
-(`sdio.c`, `rtw8723b.c` fetched at the pinned SHA) in order: all succeed
-with zero fuzz, zero offsets, zero rejects.  The result was checked for
-the expected content (the oversized-RX guard, the RX status copy after
-the frequency update, no `channel_invalid`, `nss = 1`,
-`bw = BIT(RTW_CHANNEL_WIDTH_20)`).  Compiling and loading the module is
-covered by CI; nothing here was tested on real hardware yet.
+`scripts/test-upstream-patches.sh` is the blocking check (it runs in the
+`lint` workflow).  It
+
+1. rejects any patch whose diff header carries the kernel-tree prefix,
+2. fetches the pinned upstream files (`mac80211.c`, `rtw8723bs.c`, `tx.c`,
+   `sdio.c`, `rtw8723b.c`) at the pinned SHA,
+3. applies the whole series **in order** with GNU patch (`-p1`), and
+4. checks the result for the expected content: the oversized-RX guard,
+   the RX status copy *after* the frequency update, no `channel_invalid`,
+   `nss = 1`, `ant_num = 1` and `bw = BIT(RTW_CHANNEL_WIDTH_20)` only.
+
+This check exists because the alternative failure mode is quiet: when a
+patch does not apply, `scripts/build-rtw88-8723bs-module.sh` falls back to
+the vendor tree, the build does not fail, and the only symptom is an
+image that ships the staging driver with its known permanent-hang paths.
+
+Compiling and loading the module is covered by CI; nothing here was
+tested on real hardware yet.

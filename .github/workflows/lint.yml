@@ -163,6 +163,18 @@ jobs:
           # 反例必须挂。断言串腐化了当场就发现，不用烧一轮 CI。
           bash scripts/test-boot-smoke-assert.sh
 
+      - name: Upstream rtw88 patch set (applies to the pinned tree)
+        run: |
+          set -euo pipefail
+          # 出货模块用的是上游 rtw88 整树回移 + 一组本地补丁。这组补丁
+          # 打不上时，构建脚本会**回退**到打了补丁的 staging 模块 —— 那一
+          # 棵树有已知的永久卡死路径。构建不会红，只有一条 warning，等到
+          # 镜像守卫那一步才失败，而失败信息离真正的原因隔了十万八千里。
+          #
+          # 这里把"补丁能不能在钉死的那棵树上打上"单独拎出来当一道阻断
+          # 检查：不需要内核头、不需要编译，几秒钟给出确切答案。
+          bash scripts/test-upstream-patches.sh
+
       - name: Overlay sanity (required files present)
         run: |
           set -euo pipefail
