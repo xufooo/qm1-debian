@@ -42,16 +42,24 @@ qm1_crc_normalize() {   # qm1_crc_normalize <crc>
     printf '%s' "$_c"
 }
 
-# Build the "symbol -> CRC" lookup table: the kernel's exported symbols plus
-# the ones our own module set exports.
+# Build the "symbol -> CRC -> source" lookup table: the kernel's exported
+# symbols plus the ones our own module set exports.
+#
+# The source tag matters: a symbol can be exported by BOTH the kernel (the
+# in-tree rtw88_core) and by our own module set (the out-of-tree copy).  At
+# load time the module resolves it from **our** copy, because the in-tree
+# rtw88 modules are blacklisted in the image (they export the same symbol
+# names, so the two could never be loaded together).  So our own CRC is the
+# one that has to match — the kernel's entry for the same name is only a
+# fallback for symbols we do not export ourselves.
 qm1_crc_symbol_table() {   # qm1_crc_symbol_table <kernel-symvers> [own-symvers]
     _k="$1"
     _o="$2"
     if [ -n "$_k" ] && [ -f "$_k" ]; then
-        awk -F'\t' 'NF >= 2 && $2 != "" { print $2 " " $1 }' "$_k"
+        awk -F'\t' 'NF >= 2 && $2 != "" { print $2 " " $1 " kernel" }' "$_k"
     fi
     if [ -n "$_o" ] && [ -f "$_o" ]; then
-        awk -F'\t' 'NF >= 2 && $2 != "" { print $2 " " $1 }' "$_o"
+        awk -F'\t' 'NF >= 2 && $2 != "" { print $2 " " $1 " own" }' "$_o"
     fi
 }
 
@@ -75,7 +83,10 @@ qm1_check_modversions_crc() {   # qm1_check_modversions_crc <table-file> <import
     while read -r _crc _sym _provider; do
         [ -n "${_sym:-}" ] || continue
         _n=$((_n + 1))
-        _want="$(awk -v s="$_sym" '$1 == s { print $2; exit }' "$_table")"
+        _want="$(awk -v s="$_sym" '$1 == s && $3 == "own" { print $2; exit }' "$_table")"
+        if [ -z "$_want" ]; then
+            _want="$(awk -v s="$_sym" '$1 == s { print $2; exit }' "$_table")"
+        fi
         if [ -z "$_want" ]; then
             printf '[modversions][fail] "%s" is imported but nobody exports it (neither the kernel nor this module set)\n' \
                 "$_sym" >&2
@@ -85,8 +96,10 @@ qm1_check_modversions_crc() {   # qm1_check_modversions_crc <table-file> <import
         _c1="$(qm1_crc_normalize "$_crc")"
         _c2="$(qm1_crc_normalize "$_want")"
         if [ "$_c1" != "$_c2" ]; then
-            printf '[modversions][fail] "%s" is imported with CRC %s but the target kernel exports it with CRC %s\n' \
-                "$_sym" "$_c1" "$_c2" >&2
+            _src="$(awk -v s="$_sym" '$1 == s && $3 == "own" { print "this module set"; exit }' "$_table")"
+            [ -n "$_src" ] || _src="the target kernel"
+            printf '[modversions][fail] "%s" is imported with CRC %s but %s exports it with CRC %s\n' \
+                "$_sym" "$_c1" "$_src" "$_c2" >&2
             _bad=$((_bad + 1))
         fi
     done < "$_imports"

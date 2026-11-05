@@ -425,6 +425,7 @@ EOF
     [ -f "$mod/rtw88_qm1.ko" ] || { warn "upstream build produced no module"; return 1; }
     MOD_DIR="$mod"
     MOD_NAMES="rtw88_qm1.ko"
+    OWN_SYMVERS="$mod/Module.symvers"
     return 0
 }
 
@@ -495,6 +496,10 @@ build_vendor() {
     done
     MOD_DIR="$mod"
     MOD_NAMES="rtw_core.ko rtw_sdio.ko rtw_8723b.ko rtw_8723bs.ko"
+    # vendor 树里 rtw_sdio.ko 导入的是**我们自己的** rtw_core.ko 导出的符号
+    # （rtw_core_init / rtw_register_hw / rtw_chip_info_setup …），
+    # 它们的 CRC 必须在 vendor 构建自己的 Module.symvers 里查。
+    OWN_SYMVERS="$WORK/vendor/Module.symvers"
     return 0
 }
 
@@ -556,6 +561,11 @@ clone_ref() {   # clone_ref <url> <dir> <ref>
 
 MOD_DIR=""
 MOD_NAMES=""
+# 这一份构建自己的 Module.symvers（我们自己导出的符号的 CRC）。
+# 必须指到**构建目录**，不是 MOD_DIR —— MOD_DIR 只是拷出来的 .ko，
+# 里面没有 Module.symvers（第一版就是这么写的，于是模块之间互相导入的
+# 符号全被误判成"没人导出"，CI 直接红）。
+OWN_SYMVERS=""
 case "$SOURCE" in
     upstream-full)  build_upstream_full || die "the full upstream rtw88 build failed" ;;
     vendor)   build_vendor   || die "the vendor build failed" ;;
@@ -607,8 +617,13 @@ assert_modversions_crc() {   # assert_modversions_crc <ko> [<ko> ...]
         warn "no Module.symvers under $KSRC — the modversions CRC check is skipped"
         return 0
     fi
-    local own_symvers="$MOD_DIR/Module.symvers"
+    local own_symvers="$OWN_SYMVERS"
     local table_file imports_file ko n=0
+    if [ -z "$own_symvers" ] || [ ! -f "$own_symvers" ]; then
+        # 我们自己的导出符号不在表里 ⇒ 模块之间互相导入的符号会被误判成
+        # "没人导出"。这不是误报，是表的缺项 ⇒ 必须说出来。
+        warn "no Module.symvers for this build (own=$own_symvers) — symbols our modules export to each other cannot be checked"
+    fi
     table_file="$WORK/crc-table.txt"
     qm1_crc_symbol_table "$ksymvers" "$own_symvers" > "$table_file"
     for ko in "$@"; do

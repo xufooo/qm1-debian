@@ -113,6 +113,43 @@ else
     bad "the CRC normalisation is symmetric"
 fi
 
+# 7. a symbol exported by BOTH the kernel and our own module set, with
+#    different CRCs.  At load time the module resolves it from OUR copy
+#    (the in-tree rtw88 modules are blacklisted in the image — they export
+#    the same names, so the two can never be loaded together).  So the
+#    comparison has to be made against OUR CRC, not the kernel's.
+#
+#    This is not a made-up case: it is exactly what the first CI run of
+#    this check reported — every rtw88_core symbol of the vendor tree
+#    "mismatched", because the table only had the kernel's entries.
+cat > "$WORK/kernel-both.symvers" <<'EOF'
+0xaaaaaaaa	rtw_core_init	rtw88_core	EXPORT_SYMBOL
+EOF
+cat > "$WORK/own-both.symvers" <<'EOF'
+0xbbbbbbbb	rtw_core_init	rtw_core	EXPORT_SYMBOL
+EOF
+qm1_crc_symbol_table "$WORK/kernel-both.symvers" "$WORK/own-both.symvers" > "$WORK/table-both.txt"
+cat > "$WORK/imports-both-ours.txt" <<'EOF'
+0xbbbbbbbb rtw_core_init rtw_core
+EOF
+if qm1_check_modversions_crc "$WORK/table-both.txt" "$WORK/imports-both-ours.txt" >/dev/null 2>"$WORK/err.txt"; then
+    ok "a symbol exported by both is checked against our own CRC"
+else
+    bad "a symbol exported by both is checked against our own CRC: $(cat "$WORK/err.txt")"
+fi
+
+# 8. ... but a CRC that matches neither must still be caught.
+cat > "$WORK/imports-both-bogus.txt" <<'EOF'
+0xcccccccc rtw_core_init rtw_core
+EOF
+if qm1_check_modversions_crc "$WORK/table-both.txt" "$WORK/imports-both-bogus.txt" >/dev/null 2>"$WORK/err.txt"; then
+    bad "a CRC that matches neither the kernel nor our own set is caught"
+elif grep -q 'rtw_core_init' "$WORK/err.txt"; then
+    ok "a CRC that matches neither the kernel nor our own set is caught and named"
+else
+    bad "a CRC that matches neither the kernel nor our own set is caught and named: $(cat "$WORK/err.txt")"
+fi
+
 if [ "$fails" -ne 0 ]; then
     printf 'modversions CRC self test: %d case(s) failed\n' "$fails" >&2
     exit 1
