@@ -174,16 +174,35 @@ jobs:
           bash scripts/build-rtl8723bs-module.sh --kver "${QM1_KERNEL_ABI}"
           ls -l build/wifi-module/
 
+      - name: Build rtw88 RTL8723BS module (upstream backport)
+        if: env.QM1_TARGET_ARCH == 'amd64'
+        run: |
+          # 上游把 RTL8723B/BS 并进 rtw88 之后，还没有发行版内核带着它
+          # （sid 内核 7.2 < 7.4），所以按镜像内核回移成树外模块。
+          # 构建失败不阻断流水线：回退到打了补丁的 staging 模块。
+          if bash scripts/build-rtw88-8723bs-module.sh \
+               --kver "${QM1_KERNEL_ABI}" \
+               --out-dir build/rtw88-module; then
+            echo "rtw88-module=ok" >> "$GITHUB_ENV"
+            ls -l build/rtw88-module/
+          else
+            echo "::warning::rtw88 回移模块构建失败，回退到打了补丁的 staging 模块"
+            echo "rtw88-module=fallback" >> "$GITHUB_ENV"
+          fi
+
       - name: Build root filesystem (mmdebstrap + hooks)
         run: |
           set -eux
           ARCH="${{ inputs.arch || 'amd64' }}"
           EXTRA=()
           if [ "$ARCH" = "amd64" ]; then
-            # 钉死内核 point release（6.12.113），并装上打了补丁的 Wi-Fi 模块
+            # 钉死内核 point release（6.12.113），并装上 Wi-Fi 驱动
             EXTRA+=(--kernel-version "${QM1_KERNEL_VERSION}")
-            MODDEB="$(ls build/wifi-module/*.deb | head -1)"
-            EXTRA+=(--wifi-module-deb "$MODDEB")
+            if [ "${rtw88-module:-fallback}" = "ok" ]; then
+              EXTRA+=(--rtw88-module-deb "$(ls build/rtw88-module/*.deb | head -1)")
+            else
+              EXTRA+=(--wifi-module-deb "$(ls build/wifi-module/*.deb | head -1)")
+            fi
           fi
           bash scripts/build-rootfs.sh \
             --out build/rootfs \

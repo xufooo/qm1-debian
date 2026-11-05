@@ -35,6 +35,8 @@ on:
       - "scripts/fetch-rtl8723bs-source.sh"
       - "scripts/build-rtl8723bs-module.sh"
       - "scripts/rtl8723bs-module.README.md"
+      - "scripts/build-rtw88-8723bs-module.sh"
+      - "scripts/fetch-rtw8723b-firmware.sh"
       - "patches/rtl8723bs/**"
       - ".github/workflows/build-wifi-module.yml"
   schedule:
@@ -195,5 +197,235 @@ jobs:
         with:
           name: qm1-wifi-module-log
           path: build/wifi-module/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 上游 rtw88 回移模块（推荐路径）
+  #
+  # 上游把 RTL8723B / RTL8723BS 并进 rtw88 之后（Linux 7.4 合并窗口），
+  # staging 驱动 r8723bs 被删除（c520f3af7df4）。还没有发行版内核带着这段代码
+  # （Debian sid 内核 7.2 < 7.4），所以按目标内核回移成树外模块，
+  # 连同 Debian sid 的 rtw88/rtw8723b_fw.bin 固件一起打包。
+  # ---------------------------------------------------------------------------
+  rtw88:
+    name: rtw88 backport (recommended)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: debian:trixie-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential dpkg-dev curl git kmod ca-certificates xz-utils
+
+      - name: Add trixie-proposed-updates
+        run: |
+          set -eux
+          # 6.12.x 的 point release 会滚动，钉住的那一版可能只在 proposed-updates
+          printf 'deb http://deb.debian.org/debian trixie-proposed-updates main\n' \
+            > /etc/apt/sources.list.d/trixie-proposed-updates.list
+          apt-get update -qq
+
+      - name: Resolve target kernel headers
+        id: kernel
+        run: |
+          set -eu
+          PINNED_ABI='6.12.113+deb13-amd64'
+          KVER=''
+          want="${{ inputs.kernel_version }}"
+          if [ -n "$want" ]; then
+            case "$want" in
+              *+*) KVER="$want" ;;
+              *)   KVER="$want+deb13-amd64" ;;
+            esac
+          else
+            KVER="$PINNED_ABI"
+          fi
+          if ! apt-get install -y -qq --no-install-recommends "linux-headers-$KVER"; then
+            echo "::warning::linux-headers-$KVER 不在仓库里了（point release 会滚动），改用发行版元包"
+            apt-get install -y -qq --no-install-recommends linux-headers-amd64
+            KVER="$(ls -d /lib/modules/*/build 2>/dev/null | sed 's#^/lib/modules/##; s#/build$##' | sort -V | tail -1)"
+          fi
+          [ -n "$KVER" ] || { echo "::error::找不到内核头文件"; exit 1; }
+          [ -d "/lib/modules/$KVER/build" ] || { echo "::error::缺少 /lib/modules/$KVER/build"; exit 1; }
+          echo "目标内核：$KVER"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "kver_slug=${KVER//+/-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the rtw88 RTL8723BS module
+        run: |
+          set -eux
+          bash scripts/build-rtw88-8723bs-module.sh \
+            --kver "${{ steps.kernel.outputs.kver }}" \
+            --out-dir build/rtw88-module
+
+      - name: Verify package contents
+        run: |
+          set -eux
+          KVER="${{ steps.kernel.outputs.kver }}"
+          DEB="$(ls build/rtw88-module/*.deb | head -1)"
+          [ -n "$DEB" ]
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB" | tee build/rtw88-module/contents.txt
+          grep -q "lib/modules/$KVER/extra/rtw88/" build/rtw88-module/contents.txt
+          grep -q "lib/firmware/rtw88/rtw8723b_fw.bin" build/rtw88-module/contents.txt
+          grep -q "etc/modprobe.d/qm1-rtw88-8723bs.conf" build/rtw88-module/contents.txt
+          grep -q "lib/systemd/system/qm1-rtw88-8723bs.service" build/rtw88-module/contents.txt
+          # modprobe 配置必须 blacklist 掉 staging 驱动，否则两个模块抢同一个 alias
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO ./etc/modprobe.d/qm1-rtw88-8723bs.conf > build/rtw88-module/modprobe.conf
+          grep -q '^blacklist r8723bs$' build/rtw88-module/modprobe.conf
+          echo "包内容校验通过"
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "### rtw88 RTL8723BS 回移模块"
+            echo
+            echo "- 目标内核：${{ steps.kernel.outputs.kver }}"
+            echo "- 软件包：$(ls build/rtw88-module/*.deb 2>/dev/null || echo '（未产出）')"
+            echo "- 说明：上游把 RTL8723B/BS 并进 rtw88（Linux 7.4 合并窗口）后删掉了 staging 驱动；"
+            echo "  这里按镜像内核回移成树外模块，固件取自 Debian sid 的 firmware-realtek。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload module package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-rtw88-8723bs-module-${{ steps.kernel.outputs.kver_slug }}
+          path: build/rtw88-module/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-rtw88-8723bs-log
+          path: build/rtw88-module/
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # 上游 rtw88 回移模块（推荐路径）
+  #
+  # 上游把 RTL8723B / RTL8723BS 并进 rtw88 之后（Linux 7.4 合并窗口），
+  # staging 驱动 r8723bs 被删除（c520f3af7df4）。还没有发行版内核带着这段代码
+  # （Debian sid 内核 7.2 < 7.4），所以按目标内核回移成树外模块，
+  # 连同 Debian sid 的 rtw88/rtw8723b_fw.bin 固件一起打包。
+  # ---------------------------------------------------------------------------
+  rtw88:
+    name: rtw88 backport (recommended)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: debian:trixie-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential dpkg-dev curl git kmod ca-certificates xz-utils
+
+      - name: Add trixie-proposed-updates
+        run: |
+          set -eux
+          # 6.12.x 的 point release 会滚动，钉住的那一版可能只在 proposed-updates
+          printf 'deb http://deb.debian.org/debian trixie-proposed-updates main\n' \
+            > /etc/apt/sources.list.d/trixie-proposed-updates.list
+          apt-get update -qq
+
+      - name: Resolve target kernel headers
+        id: kernel
+        run: |
+          set -eu
+          PINNED_ABI='6.12.113+deb13-amd64'
+          KVER=''
+          want="${{ inputs.kernel_version }}"
+          if [ -n "$want" ]; then
+            case "$want" in
+              *+*) KVER="$want" ;;
+              *)   KVER="$want+deb13-amd64" ;;
+            esac
+          else
+            KVER="$PINNED_ABI"
+          fi
+          if ! apt-get install -y -qq --no-install-recommends "linux-headers-$KVER"; then
+            echo "::warning::linux-headers-$KVER 不在仓库里了（point release 会滚动），改用发行版元包"
+            apt-get install -y -qq --no-install-recommends linux-headers-amd64
+            KVER="$(ls -d /lib/modules/*/build 2>/dev/null | sed 's#^/lib/modules/##; s#/build$##' | sort -V | tail -1)"
+          fi
+          [ -n "$KVER" ] || { echo "::error::找不到内核头文件"; exit 1; }
+          [ -d "/lib/modules/$KVER/build" ] || { echo "::error::缺少 /lib/modules/$KVER/build"; exit 1; }
+          echo "目标内核：$KVER"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "kver_slug=${KVER//+/-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the rtw88 RTL8723BS module
+        run: |
+          set -eux
+          bash scripts/build-rtw88-8723bs-module.sh \
+            --kver "${{ steps.kernel.outputs.kver }}" \
+            --out-dir build/rtw88-module
+
+      - name: Verify package contents
+        run: |
+          set -eux
+          KVER="${{ steps.kernel.outputs.kver }}"
+          DEB="$(ls build/rtw88-module/*.deb | head -1)"
+          [ -n "$DEB" ]
+          dpkg-deb -I "$DEB"
+          dpkg-deb -c "$DEB" | tee build/rtw88-module/contents.txt
+          grep -q "lib/modules/$KVER/extra/rtw88/" build/rtw88-module/contents.txt
+          grep -q "lib/firmware/rtw88/rtw8723b_fw.bin" build/rtw88-module/contents.txt
+          grep -q "etc/modprobe.d/qm1-rtw88-8723bs.conf" build/rtw88-module/contents.txt
+          grep -q "lib/systemd/system/qm1-rtw88-8723bs.service" build/rtw88-module/contents.txt
+          # modprobe 配置必须 blacklist 掉 staging 驱动，否则两个模块抢同一个 alias
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO ./etc/modprobe.d/qm1-rtw88-8723bs.conf > build/rtw88-module/modprobe.conf
+          grep -q '^blacklist r8723bs$' build/rtw88-module/modprobe.conf
+          echo "包内容校验通过"
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "### rtw88 RTL8723BS 回移模块"
+            echo
+            echo "- 目标内核：${{ steps.kernel.outputs.kver }}"
+            echo "- 软件包：$(ls build/rtw88-module/*.deb 2>/dev/null || echo '（未产出）')"
+            echo "- 说明：上游把 RTL8723B/BS 并进 rtw88（Linux 7.4 合并窗口）后删掉了 staging 驱动；"
+            echo "  这里按镜像内核回移成树外模块，固件取自 Debian sid 的 firmware-realtek。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload module package
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-rtw88-8723bs-module-${{ steps.kernel.outputs.kver_slug }}
+          path: build/rtw88-module/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Upload build log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-rtw88-8723bs-log
+          path: build/rtw88-module/
           if-no-files-found: ignore
           retention-days: 7
