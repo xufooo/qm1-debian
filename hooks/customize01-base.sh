@@ -92,6 +92,27 @@ fi
 # avahi-daemon 保持关闭（2GB 内存，少一个常驻服务）；resolved 不再 disable。
 chroot "$TARGET" systemctl disable avahi-daemon >/dev/null 2>&1 || true
 
+# ★ 发行版的 systemd-networkd-wait-online.service 要从 multi-user.target 上摘掉。
+#
+# 它的语义是"等到网络真的可用，才让 multi-user.target 达成"，默认超时 120s。
+# 这台机器没有 RJ45，内置 Wi-Fi 是唯一链路 —— 一旦 Wi-Fi 没连上（信号弱、
+# 口令写错、路由器没开），整机就要多等 120 秒才开机，而这 120 秒里它
+# 什么也干不了。这和"Wi-Fi 单元的 start job 拖住 multi-user.target"
+# 是同一类病：网络的问题不该挡开机。
+#
+# 该等的地方另有安排：provision-agent 自己会等 DNS（90s）和系统时钟
+# （120s）—— 那两样才是装 Hermes/Chrome 之前真正必须具备的。
+chroot "$TARGET" systemctl disable systemd-networkd-wait-online.service >/dev/null 2>&1 || true
+# systemctl disable 在构建 chroot 里不一定生效（没有运行中的 systemd），
+# 所以自己把链接摘掉，并当场断言确实摘干净了。
+if [ -e "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service" ]; then
+    rm -f "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service"
+fi
+if [ -e "$TARGET/etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service" ]; then
+    echo "[hook01][fail] systemd-networkd-wait-online.service 仍在 multi-user.target.wants 里 —— 网络不通时整机会多等 120 秒" >&2
+    exit 1
+fi
+
 # 时间同步必须开：这台机器没有电池、没有 RTC 时钟从 1970 年开始，
 # 而 TLS 证书有效期校验、agent 任务调度、日志时间戳全都依赖正确时钟。
 # 时间同步是 timers.target 激活的单元。

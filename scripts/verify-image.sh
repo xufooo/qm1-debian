@@ -100,6 +100,17 @@ check_absent_content() {
     fi
 }
 
+# 不存在检查：某个路径**不应该**在镜像里（用于"我们已经把它摘掉了"这类断言）
+check_absent() {
+    local path="$1" desc="$2"
+    if debugfs -R "stat $path" "$IMG" >/dev/null 2>&1; then
+        printf '  FAIL %-46s (%s)\n' "$path" "$desc"
+        fail=$((fail + 1))
+    else
+        printf '  OK   %-46s (%s)\n' "$path" "$desc"
+    fi
+}
+
 # 软链目标检查：debugfs 的 stat 对软链会给出 Fast link dest
 # ★ 必须在镜像内部判断软链是否指向存在的目标；直接在宿主机上 readlink -e
 #   会跑到宿主根去解析绝对目标，必然误判成悬空。
@@ -148,6 +159,12 @@ check_exists /etc/wpa_supplicant/wpa_supplicant.conf "Wi-Fi 配置"
 # 日志里还不报错。屏蔽它，Wi-Fi 只留一条路。
 check_link /etc/systemd/system/wpa_supplicant.service /dev/null \
     "发行版 wpa_supplicant.service 已屏蔽（Wi-Fi 由 qm1-wifi@.service 独占）"
+# systemd-networkd-wait-online 不许挂在 multi-user.target 上：它的语义是
+# "等到网络可用才让多用户目标达成"，默认超时 120s —— 这台机器没有 RJ45，
+# Wi-Fi 一旦没连上，整机就白等 120 秒。等待改由 provision-agent 自己
+# 做（等 DNS + 等时钟），那才是装 Hermes/Chrome 之前真正需要的。
+check_absent /etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service \
+    "wait-online 没有挂在 multi-user.target 上（网络不通不挡开机）"
 # 这份是**回退**参数（发行版树内 staging r8723bs），不是出货配置。
 # 出货配置是 qm1-rtw88-8723bs.conf（在下面的 rtw88 段里按内容校验）。
 # 留着这份是为了"rtw88 起不来、需要临时回退"时不用重踩省电的坑。

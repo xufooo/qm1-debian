@@ -293,8 +293,14 @@ fi
 # 上一版只匹配"不一致"和"没有 EFI System 分区"两句，于是函数换了种说法
 # 拒绝（"ESP 不是从 1 MiB 开始"），用例反而判它没拒绝 —— 断言比被测
 # 代码更 brittle 的时候，红的永远是测试。
-plan_bad_out="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1)"
-plan_bad_rc=$?
+# ★ 这里必须用 "&& ... || ..." 的写法取返回码，不能写成
+#   out="$(cmd)"; rc=$?
+#   —— 脚本开头是 set -euo pipefail，命令替换里的非零返回码会让**整个
+#   脚本当场退出**，连 bad() 那行提示都打不出来（CI 里看到的就是：
+#   上一条 ok 之后直接 "Process completed with exit code 1"，没有任何
+#   失败说明）。这是同一个坑的第二个变体：断言写对了，也可能被
+#   shell 的严格模式吃掉。
+plan_bad_out="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1)" && plan_bad_rc=0 || plan_bad_rc=$?
 if [ "$plan_bad_rc" -ne 0 ] \
    && printf '%s' "$plan_bad_out" | grep -qE '不一致|没有 EFI System 分区|不是从 1 MiB 开始|拒绝按另一种布局'; then
     ok "拒绝了与约定布局不符的镜像（根分区不在 ESP 之后）"

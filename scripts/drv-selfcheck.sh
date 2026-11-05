@@ -826,13 +826,18 @@ fi
 #   （模块装上了却绑不上设备）—— 两者的现场现象一样（没有 wlan0），
 #   但修法完全不同，必须分开报。
 #   modalias 从 uevent 里取（设备核心一定写 MODALIAS=），modalias 文件作为兜底。
+#   ★ modalias 的格式是内核定的 "sdio:c*v%04Xd%04X*"：vendor 四位大写十六进制、
+#     中间一个**小写 d** 分隔、device 四位大写十六进制 —— 所以这张卡
+#     （0x024c:0xb723）在真机上长成 "sdio:c*v024CdB723*"（CI 里 modinfo
+#     打印出来的就是这个原样）。按 "024CB723" 去匹配是匹配不上的，
+#     那样连正常的机器都会被报成"没有枚举到这张卡"。
 _sdio_our=""
 for _sd in /sys/bus/sdio/devices/*; do
     [ -e "$_sd" ] || continue
     _ma="$(sed -n 's/^MODALIAS=//p' "$_sd/uevent" 2>/dev/null || true)"
     [ -n "$_ma" ] || _ma="$(cat "$_sd/modalias" 2>/dev/null || true)"
     case "$_ma" in
-        *024CB723*|*024cb723*)
+        *024CdB723*|*024cdb723*)
             _sd_drv="$(basename "$(readlink -f "$_sd/driver" 2>/dev/null)" 2>/dev/null || true)"
             [ -n "$_sd_drv" ] || _sd_drv="未认领"
             if [ "$_sd_drv" = "未认领" ]; then

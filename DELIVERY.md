@@ -255,6 +255,25 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 
 这三项的逐条判据见 `15_实机验收清单.md`（在项目文档目录里）。
 
+### 5.2 到了真机上，设备自己会先查一遍
+
+`qm1-selftest`（`/usr/local/bin/qm1-selftest`）在机器上跑一遍，除了上面
+四条，还查这些：
+
+| 检查 | 判据 |
+|---|---|
+| 系统状态 | `systemctl is-system-running` 必须是 running（degraded 只警告） |
+| 内核套数 | `/lib/modules` 下只允许有一套内核（签名版和 `-unsigned` 互 Conflicts，多一套就会让模块 vermagic 对不上） |
+| Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c*v024CB723*`，且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
+| 出货模块 | `modinfo` 的 alias 必须认领 `v024CB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
+| 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` ⇒ 8250 抢占了那条串口（要 DSDT 覆盖）；没有 HID ⇒ 镜像**故意**没加载 `hci_uart`（`/run/qm1-bluetooth.failed` 里写着原因） |
+
+> 为什么"网络没连上"不许拖住开机：发行版的 `systemd-networkd-wait-online`
+> 语义是"等到网络可用才让多用户目标达成"，默认超时 120 秒 —— 这台机器
+> 没有 RJ45，Wi-Fi 一旦没连上，整机就白等 120 秒。镜像把它从
+> `multi-user.target` 上摘掉了；真正该等的东西（DNS、系统时钟）由
+> `qm1-provision.service` 自己等（DNS 90 秒、时钟 120 秒）。
+
 ---
 
 ## 6. 装完之后（可选）
