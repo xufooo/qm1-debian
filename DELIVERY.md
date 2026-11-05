@@ -208,12 +208,32 @@ sudo bash install-qm1.sh --image qm1-disk.img --target /dev/mmcblk1 \
 systemd-resolved **都不提供 `/etc/resolv.conf`**，镜像里不自己挂上
 stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全失败。
 
+### 5.1 这些判据在 CI 里已经查过多少
+
+流水线现在会在 QEMU 里**真的把出厂镜像启动一次**
+（`scripts/boot-smoke.sh`）：用 `console=ttyS0` + `systemd.debug_shell=1`
+起来之后，在客户机里断言 systemd 到了 running/degraded、`qm1` 账号存在
+（uid 1000）、`/etc/resolv.conf` 指向 resolved 的 stub、
+`qm1-wifi@wlan0.service` 是 enabled、钉住的 6.12.113 内核模块在位。
+
+也就是说第 1、2 条与「内核/initrd/systemd 起得来」这一层，**在 CI 里
+就有证据**，不用等刷机才发现。
+
+但 QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，所以：
+
+- 第 3 条（Wi-Fi 真连上）、蓝牙、eMMC 掉卡 —— **只能真机验**；
+- 第 4 条（时钟）需要真实网络与 NTP —— QEMU 里验不了。
+
+这三项的逐条判据见 `15_实机验收清单.md`（在项目文档目录里）。
+
 ---
 
 ## 6. 装完之后（可选）
 
 Hermes CLI 与 headless Chrome 由 `qm1-provision.service` 在首次启动时
-安装（需要网络）。装完：
+安装（需要网络 —— 它等 `network-online.target`，也就是等 wlan0 拿到
+地址）。它只在成功一次之后才会跳过（标记 `/var/lib/qm1/provision-done`），
+失败则下次开机自动重试。装完：
 
 ```sh
 systemctl --user status hermes-gateway     # 常驻网关

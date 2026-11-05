@@ -376,6 +376,17 @@ jobs:
             || { echo "::error::蓝牙服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
           link_ok "$BT_LINK" \
             || { echo "::error::qm1-bluetooth.service 的 wants 链接是悬空的：$(link_target "$BT_LINK")"; exit 1; }
+          # 运行时部署单元：没有它，刷完机不会自动铺 Hermes/Chrome
+          # （DELIVERY.md 承诺的是"开机即用"，不是"装完系统手工敲一行"）。
+          [ -f "$ROOT/etc/systemd/system/qm1-provision.service" ] \
+            || { echo "::error::镜像里没有 qm1-provision.service"; exit 1; }
+          [ -x "$ROOT/usr/local/sbin/qm1-provision" ] \
+            || { echo "::error::镜像里缺少可执行的 /usr/local/sbin/qm1-provision"; exit 1; }
+          PROV_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-provision.service"
+          [ -L "$PROV_LINK" ] \
+            || { echo "::error::运行时部署服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
+          link_ok "$PROV_LINK" \
+            || { echo "::error::qm1-provision.service 的 wants 链接是悬空的：$(link_target "$PROV_LINK")"; exit 1; }
           # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
           # Debian 13 的 6.12.113+deb13-amd64 实测：
           #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m

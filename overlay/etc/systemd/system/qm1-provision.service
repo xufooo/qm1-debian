@@ -1,0 +1,22 @@
+[Unit]
+Description=QM1 runtime provisioning (Hermes CLI + headless Chrome)
+Documentation=file:///usr/local/share/qm1/README-runtime.txt
+# 等网络真的可用：内置 Wi-Fi 是这台机器唯一的联网链路，
+# networkd 的 30-wifi.network 标了 RequiredForOnline=yes ⇒ network-online.target
+# 只有在 wlan0 拿到地址之后才达成。
+After=network-online.target qm1-wifi@wlan0.service
+Wants=network-online.target
+# 没有 agent 脚本（裁剪过的镜像）就什么都不做；已经铺好就不重复铺。
+ConditionPathExists=/usr/local/share/qm1/provision-agent.sh
+ConditionPathExists=!/var/lib/qm1/provision-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qm1-provision
+# 装 Hermes 要下载官方安装器、uv 托管的 Python 3.14、Node 运行时 —— 慢是正常的。
+TimeoutStartSec=3600
+# 失败不重试到死：标记没写出来，下次开机还会再试一次（ConditionPathExists 仍在）。
+
+[Install]
+WantedBy=multi-user.target

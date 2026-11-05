@@ -167,6 +167,8 @@ jobs:
             overlay/etc/systemd/system/qm1-install.service \
             overlay/usr/local/sbin/qm1-bluetooth-up \
             overlay/usr/local/sbin/qm1-hardware-survey \
+            overlay/usr/local/sbin/qm1-provision \
+            overlay/etc/systemd/system/qm1-provision.service \
             overlay/usr/local/lib/qm1/install-lib.sh \
             overlay/etc/udev/rules.d/60-qm1-emmc-power.rules \
             scripts/grub.cfg.example \

@@ -103,6 +103,11 @@ enable_overlay_unit "qm1-health-collect.timer" "qm1-health-collect.timer" "timer
 # 蓝牙控制器初始化（内核 hci_uart + btrtl 路线，见单元里的说明）
 enable_overlay_unit "qm1-bluetooth.service" "qm1-bluetooth.service" "multi-user.target"
 
+# 运行时部署（Hermes CLI + headless Chrome）：等 network-online 之后跑一次
+# provision-agent.sh，成功后写 /var/lib/qm1/provision-done；失败下次开机重试。
+# 没有这个单元的话，刷完机不会自动铺运行时 —— 交付口径是"开机即用"。
+enable_overlay_unit "qm1-provision.service" "qm1-provision.service" "multi-user.target"
+
 # 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
 # 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
 enable_overlay_unit "qm1-install.service" "qm1-install.service" "multi-user.target"
