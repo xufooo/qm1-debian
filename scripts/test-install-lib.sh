@@ -288,13 +288,19 @@ fi
 
 # 反向用例：根分区不在 ESP 之后的镜像必须被拒绝（宁可不装，
 # 也不能按另一种布局重建分区表）。
-plan_bad="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1 || true)"
-case "$plan_bad" in
-    *不一致*|*"没有 EFI System 分区"*)
-        ok "拒绝了与约定布局不符的镜像（根分区不在 ESP 之后）" ;;
-    *)
-        bad "非约定布局的镜像没有被拒绝：'$plan_bad'" ;;
-esac
+#
+# 这里判的是**行为**（必须非零退出），而不是某一句文案：
+# 上一版只匹配"不一致"和"没有 EFI System 分区"两句，于是函数换了种说法
+# 拒绝（"ESP 不是从 1 MiB 开始"），用例反而判它没拒绝 —— 断言比被测
+# 代码更 brittle 的时候，红的永远是测试。
+plan_bad_out="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1)"
+plan_bad_rc=$?
+if [ "$plan_bad_rc" -ne 0 ] \
+   && printf '%s' "$plan_bad_out" | grep -qE '不一致|没有 EFI System 分区|不是从 1 MiB 开始|拒绝按另一种布局'; then
+    ok "拒绝了与约定布局不符的镜像（根分区不在 ESP 之后）"
+else
+    bad "非约定布局的镜像没有被拒绝（rc=${plan_bad_rc}）：'$plan_bad_out'"
+fi
 
 if [ "$fails" -eq 0 ]; then
     echo "install-lib 测试全部通过"
