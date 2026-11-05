@@ -66,8 +66,11 @@ if { [ -z "$IA32_MODDIR" ] || [ -z "$AMD64_MODDIR" ]; } && [ "${FETCH_DEBIAN:-0}
     trap 'rm -rf "$TMP"' EXIT
     fetch_pkg() {   # $1=包名 $2=架构
         local pkg="$1" arch="$2" url
+        # ★ awk 里不要用 exit：Packages.gz 解出来有好几十 MB，awk 提前退出会让
+        #   gzip 收到 SIGPIPE（141），而本脚本 set -o pipefail ⇒ 整条管道被判失败
+        #   ⇒ 取包这一段必然挂。读完整份索引再打印最后一条匹配即可。
         url="$(curl -fsSL "https://deb.debian.org/debian/dists/$DEB_SUITE/main/binary-$arch/Packages.gz" \
-               | gzip -dc | awk -v p="$pkg" '$1=="Package:"{cur=$2} $1=="Filename:"&&cur==p{print $2; exit}')"
+               | gzip -dc | awk -v p="$pkg" '$1=="Package:"{cur=$2} $1=="Filename:"&&cur==p{last=$2} END{print last}')"
         [ -n "$url" ] || die "在 $DEB_SUITE/$arch 索引里找不到 $pkg"
         curl -fsSL -o "$TMP/$(basename "$url")" "https://deb.debian.org/debian/$url"
         dpkg-deb -x "$TMP/$(basename "$url")" "$TMP/root"

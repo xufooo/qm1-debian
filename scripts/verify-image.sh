@@ -48,6 +48,36 @@ check_attr() {
     fi
 }
 
+# 内容检查：debugfs -R "cat <path>"，在镜像内取文件正文
+check_content() {
+    local path="$1" regex="$2" desc="$3"
+    local out
+    out="$(debugfs -R "cat $path" "$IMG" 2>/dev/null || true)"
+    if grep -qE "$regex" <<<"$out"; then
+        printf '  OK   %-46s (%s)\n' "$path" "$desc"
+    else
+        printf '  FAIL %-46s (%s)\n' "$path" "$desc"
+        printf '%s\n' "$out" | head -5 | sed 's/^/         /' >&2
+        fail=$((fail + 1))
+    fi
+}
+
+# 软链目标检查：debugfs 的 stat 对软链会给出 Fast link dest
+# ★ 必须在镜像内部判断软链是否指向存在的目标；直接在宿主机上 readlink -e
+#   会跑到宿主根去解析绝对目标，必然误判成悬空。
+check_link() {
+    local path="$1" want="$2" desc="$3"
+    local out dest
+    out="$(debugfs -R "stat $path" "$IMG" 2>/dev/null || true)"
+    dest="$(sed -n 's/.*Fast link dest: "\(.*\)".*/\1/p' <<<"$out")"
+    if [ "$dest" = "$want" ]; then
+        printf '  OK   %-46s (%s)\n' "$path" "$desc"
+    else
+        printf '  FAIL %-46s (%s) —— 实际目标：%s\n' "$path" "$desc" "${dest:-（不是软链或读不到）}"
+        fail=$((fail + 1))
+    fi
+}
+
 log "校验 ext4 镜像：$IMG"
 
 echo "-- 属主与权限（打包阶段最容易丢的部分）--"
@@ -130,6 +160,27 @@ echo "-- 蓝牙（内核 hci_uart + btrtl + 发行版固件）--"
 check_exists "/etc/systemd/system/qm1-bluetooth.service" "蓝牙初始化单元（内核路线）"
 check_exists "/lib/firmware/rtl_bt/rtl8723bs_fw.bin" "蓝牙固件（缺它 btrtl 无法下发）"
 check_exists "/lib/firmware/rtl_bt/rtl8723bs_config-OBDA8723.bin" "蓝牙配置固件（按 ACPI HID 取名）"
+
+echo "-- 开机即用基线（DNS / 账号 / Wi-Fi 单元 / fstab / 超时）--"
+# 这一段对应审计 B 组那 8 条「装上去也用不了」的问题。
+# CI 的 boot-to-usable 步骤查的是解包出来的根目录树；这里查的是**最终产物**
+# （ext4 镜像），因为「文件在树里」不等于「进了镜像」——mkfs.ext4 -d 复制时
+# 才可能把内容丢掉，而丢掉之后的镜像照样能构建成功。
+check_link /etc/resolv.conf /usr/lib/systemd/resolv.conf \
+    "DNS 数据源指向 systemd-resolved 的 stub（Debian 13 的包不带 /etc/resolv.conf）"
+check_exists /usr/lib/systemd/resolv.conf "systemd-resolved 的 stub 文件本体"
+check_content /etc/passwd '^qm1:' "有可登录账号 qm1（口令由安装器装机时生成）"
+check_content /etc/fstab '^[^#]*[[:space:]]/[[:space:]]' "fstab 里有根分区条目（systemd 才能按 fstab 管理根、fsck-root 才有意义）"
+check_exists /etc/systemd/system/qm1-wifi@.service "Wi-Fi 单元（wpa_supplicant）"
+check_content /etc/systemd/system/qm1-wifi@.service '^TimeoutStartSec=(1[2-9][0-9]|[2-9][0-9]{2,})' \
+    "Wi-Fi 单元的超时 ≥120s（ExecStartPre 要等 60s 让 SDIO 枚举出接口）"
+check_content /etc/systemd/system.conf.d/quick-boot.conf '^TimeoutStartSec=120' \
+    "全局单元超时 120s（30s 会在接口出现前把 Wi-Fi 单元掐掉）"
+check_exists /etc/systemd/system/qm1-firstboot.service "首启脚本单元"
+check_exists /etc/udev/rules.d/60-qm1-emmc-power.rules "eMMC runtime suspend 的 udev 规则（initramfs 阶段就要生效）"
+check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
+check_exists /usr/local/sbin/qm1-bluetooth-up "蓝牙初始化辅助脚本（失败要留痕）"
+check_exists /usr/local/lib/qm1/install-lib.sh "安装器共用的磁盘/凭据函数库"
 
 echo "-- 伪文件系统应为空 --"
 for d in /dev /proc /sys /run; do
