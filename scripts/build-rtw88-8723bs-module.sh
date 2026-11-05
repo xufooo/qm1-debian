@@ -226,19 +226,57 @@ build_upstream_full() {
     mkdir -p "$mod"
     cp "$src"/*.c "$src"/*.h "$mod"/ 2>/dev/null || true
 
-    # Split the tree the way upstream does: one module for the core, one for
-    # the SDIO transport and one per chip.  Only the chip we care about and the
-    # SDIO transport are built; PCI and USB are irrelevant on this device.
-    local core_files="" f
-    for f in "$mod"/*.c; do
-        case "$(basename "$f")" in
-            sdio.c|pci.c|usb.c) continue ;;
-            rtw[0-9]*.c) continue ;;
-        esac
-        # kernel builds want object names, not source names
-        core_files="$core_files $(basename "$f" .c).o"
+    # Mirror upstream's own object lists instead of globbing the directory.
+    # Upstream splits the tree into a core module, one module per chip family
+    # and the transport modules, and it compiles only some of the core files
+    # depending on the kernel configuration:
+    #   rtw88_core-$(CONFIG_PM)          += wow.o
+    #   rtw88_core-$(CONFIG_RTW88_LEDS)  += led.o
+    # led.c carries its own definitions while the core headers provide a stub
+    # when CONFIG_RTW88_LEDS is off, so building led.o unconditionally breaks.
+    local up_mk="$src/Makefile"
+    [ -f "$up_mk" ] || { warn "upstream rtw88 Makefile not found"; return 1; }
+    local core_objs chip_8723b chip_8723bs chip_8723x sdio_objs
+    core_objs=$(awk '
+        /^rtw88_core-y[ \t]*\+=/ {
+            inblk=1
+            line=$0
+            sub(/^[^=]*\+=[ \t]*/, "", line)
+            gsub(/\\/, "", line)
+            gsub(/^[ \t]+/, "", line)
+            if (line != "") print line
+            next
+        }
+        inblk {
+            line=$0
+            cont = (line ~ /\\$/)
+            gsub(/\\/, "", line)
+            gsub(/^[ \t]+/, "", line)
+            if (line != "") print line
+            if (!cont) exit
+        }
+    ' "$up_mk" | tr '\n' ' ' | tr -s ' ')
+    chip_8723b=$(awk '/^rtw88_8723b-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
+    chip_8723bs=$(awk '/^rtw88_8723bs-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
+    chip_8723x=$(awk '/^rtw88_8723x-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
+    sdio_objs=$(awk '/^rtw88_sdio-objs/ {sub(/^[^:]*:=[ \t]*/, ""); print; exit}' "$up_mk")
+    [ -n "$core_objs" ] && [ -n "$chip_8723b" ] && [ -n "$chip_8723bs" ] \
+        && [ -n "$sdio_objs" ] \
+        || { warn "could not read the upstream object lists"; return 1; }
+
+    # CONFIG gated parts, same rules as upstream
+    local kcfg=""
+    for c in "$KSRC/.config" "$KSRC/../../linux-headers-$KVER/.config" "/boot/config-$KVER"; do
+        if [ -f "$c" ]; then kcfg="$c"; break; fi
     done
-    [ -n "$core_files" ] || { warn "no core sources found in the upstream tree"; return 1; }
+    if [ -n "$kcfg" ] && grep -q '^CONFIG_PM=y' "$kcfg"; then
+        core_objs="$core_objs wow.o"
+    fi
+    if [ -n "$kcfg" ] && grep -q '^CONFIG_RTW88_LEDS=y' "$kcfg"; then
+        core_objs="$core_objs led.o"
+    else
+        log "target kernel has no CONFIG_RTW88_LEDS; leaving led.o out (as upstream does)"
+    fi
 
     # struct sdio_driver.shutdown only exists in newer kernels; the upstream
     # 8723BS driver uses it.  Drop the callback when the target kernel does
@@ -253,29 +291,33 @@ build_upstream_full() {
 
     cat > "$mod/Makefile" <<EOF
 # Out-of-tree build of the complete upstream rtw88 tree.
+# The object lists are taken from the upstream Makefile of $UPSTREAM_REF.
 obj-m += rtw88_qm1_core.o
-rtw88_qm1_core-objs := $core_files
-obj-m += rtw88_qm1_sdio.o
-rtw88_qm1_sdio-objs := sdio.o
+rtw88_qm1_core-objs := $core_objs
+obj-m += rtw88_qm1_8723x.o
+rtw88_qm1_8723x-objs := $chip_8723x
 obj-m += rtw88_qm1_8723b.o
-rtw88_qm1_8723b-objs := rtw8723b.o rtw8723b_table.o
+rtw88_qm1_8723b-objs := $chip_8723b
 obj-m += rtw88_qm1_8723bs.o
-rtw88_qm1_8723bs-objs := rtw8723bs.o
+rtw88_qm1_8723bs-objs := $chip_8723bs
+obj-m += rtw88_qm1_sdio.o
+rtw88_qm1_sdio-objs := $sdio_objs
 ccflags-y += -I\$(src)
 EOF
 
     log "compiling against $KSRC"
     make -C "$KSRC" M="$mod" -j"$JOBS" modules \
         CONFIG_RTW88_CORE=y CONFIG_RTW88=m CONFIG_RTW88_SDIO=m \
-        CONFIG_RTW88_8723B=m CONFIG_RTW88_8723BS=m \
+        CONFIG_RTW88_8723X=m CONFIG_RTW88_8723B=m CONFIG_RTW88_8723BS=m \
         || { warn "the full upstream rtw88 tree does not compile against $KVER"; return 1; }
 
     local m
-    for m in rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko; do
+    for m in rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723x.ko \
+             rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko; do
         [ -f "$mod/$m" ] || { warn "upstream build is missing $m"; return 1; }
     done
     MOD_DIR="$mod"
-    MOD_NAMES="rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko"
+    MOD_NAMES="rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723x.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko"
     return 0
 }
 
