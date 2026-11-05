@@ -194,6 +194,16 @@ jobs:
             echo "RTW88_MODULE=fallback" >> "$GITHUB_ENV"
           fi
 
+      - name: Build the Bluetooth vendor package (rtk_hciattach)
+        if: env.QM1_TARGET_ARCH == 'amd64'
+        run: |
+          set -eux
+          # 内置蓝牙是 ACPI 枚举的 UART（OBDA8723/OBDA0623），主线没有 Realtek
+          # UART HCI 驱动，要靠用户态 rtk_hciattach 下发厂商固件。
+          # 这一步不需要内核头文件，几秒钟就完。
+          bash scripts/build-bt-hciattach.sh --out-dir build/bt-hciattach
+          ls -l build/bt-hciattach/
+
       - name: Build root filesystem (mmdebstrap + hooks)
         run: |
           set -eux
@@ -207,6 +217,7 @@ jobs:
             else
               EXTRA+=(--wifi-module-deb "$(ls build/wifi-module/*.deb | head -1)")
             fi
+            EXTRA+=(--bt-hciattach-deb "$(ls build/bt-hciattach/*.deb | head -1)")
           fi
           bash scripts/build-rootfs.sh \
             --out build/rootfs \
@@ -276,6 +287,29 @@ jobs:
               || { echo "::error::modprobe 配置里缺少 rtw_core 参数 $p"; exit 1; }
           done
           echo "OK   rtw88 根治模块、固件与开机加载项全部就位"
+
+      - name: Assert the Bluetooth vendor package is inside the image
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          [ -x "$ROOT/usr/sbin/rtk_hciattach" ] \
+            || { echo "::error::镜像里没有 /usr/sbin/rtk_hciattach（内置蓝牙无法初始化）"; exit 1; }
+          for f in rtlbt_fw rtlbt_config; do
+            [ -f "$ROOT/lib/firmware/rtl_bt/$f" ] \
+              || { echo "::error::镜像里缺少蓝牙固件 $f"; exit 1; }
+          done
+          [ -x "$ROOT/usr/local/bin/qm1-bt-attach.sh" ] \
+            || { echo "::error::镜像里没有 qm1-bt-attach.sh"; exit 1; }
+          [ -f "$ROOT/lib/systemd/system/qm1-bluetooth.service" ] \
+            || { echo "::error::镜像里没有 qm1-bluetooth.service"; exit 1; }
+          [ -L "$ROOT/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service" ] \
+            || { echo "::error::蓝牙服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
+          # 内核侧必须有 btuart（CONFIG_BT_HCIUART），否则厂商固件下发后没人接手串口
+          KCFG=$(ls "$ROOT"/boot/config-* 2>/dev/null | head -1 || true)
+          [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件，无法确认 CONFIG_BT_HCIUART"; exit 1; }
+          grep -qE '^CONFIG_BT_HCIUART=y$' "$KCFG" \
+            || { echo "::error::内核缺少 CONFIG_BT_HCIUART=y"; exit 1; }
+          echo "OK   蓝牙厂商初始化包、固件、服务与开机自启全部就位"
 
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
