@@ -1,0 +1,65 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+Date: Thu, 5 Nov 2026 12:40:00 +0800
+Subject: [PATCH 1/1] rtw88: extend the TX report purge timeout for the
+ RTL8723BS
+
+The vendor rtw88 tree arms the TX report purge timer with
+RTW_TX_PROBE_TIMEOUT, which is 500 ms for every chip and every bus.  The
+RTL8723BS reports late and unreliably, so the timer expires while frames
+are still in flight: rtw_tx_report_purge_timer() then purges the whole
+tx_report queue and drops those skbs without ever reporting them as
+transmitted.  The kernel retries them, TCP retransmits, and the link
+looks healthy while the throughput collapses -- exactly the "network
+stops flowing" symptom this device is known for.
+
+Upstream already raised that timeout for this chip: commit 4d688f22ebbf
+("wifi: rtw88: tx: extend the TX report purge timeout to RTL8723BS",
+merged in the Linux 7.4 merge window) gives the 8723BS 2500 ms, and
+current upstream master generalises it to RTW_TX_PROBE_TIMEOUT_LONG
+(2500 ms) for every bus except PCIe.  The vendor tree this project
+builds from never picked that up, so apply the same value here.
+
+Without this patch the image would keep the 500 ms timeout and could
+still show the very symptom the rtw88 backport was supposed to cure.
+---
+ tx.c | 21 ++++++++++++++++++++++----
+ 1 file changed, 19 insertions(+), 2 deletions(-)
+
+--- a/tx.c
++++ b/tx.c
+@@ -235,6 +235,7 @@
+ void rtw_tx_report_enqueue(struct rtw_dev *rtwdev, struct sk_buff *skb, u8 sn)
+ {
+ 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
++	unsigned long timeout;
+ 	unsigned long flags;
+ 	u8 *drv_data;
+ 
+@@ -246,7 +247,25 @@
+ 	__skb_queue_tail(&tx_report->queue, skb);
+ 	spin_unlock_irqrestore(&tx_report->q_lock, flags);
+ 
+-	mod_timer(&tx_report->purge_timer, jiffies + RTW_TX_PROBE_TIMEOUT);
++	/*
++	 * The RTL8723BS reports late and unreliably.  With the default 500 ms
++	 * purge timeout the timer expires while frames are still in flight and
++	 * the whole queue is dropped, so the kernel never learns that those
++	 * frames were transmitted and TCP stalls -- the classic "the link is
++	 * up but the throughput collapses" symptom.
++	 *
++	 * Upstream extended the same timeout for this chip (rtw88: extend the
++	 * TX report purge timeout to RTL8723BS, commit 4d688f22ebbf, merged in
++	 * the Linux 7.4 merge window) and later generalised it to 2500 ms for
++	 * every bus except PCIe.  Adopt the same value here.
++	 */
++	if (rtwdev->chip->id == RTW_CHIP_TYPE_8723B &&
++	    rtw_hci_type(rtwdev) == RTW_HCI_TYPE_SDIO)
++		timeout = msecs_to_jiffies(2500);
++	else
++		timeout = RTW_TX_PROBE_TIMEOUT;
++
++	mod_timer(&tx_report->purge_timer, jiffies + timeout);
+ }
+ EXPORT_SYMBOL(rtw_tx_report_enqueue);
+ 

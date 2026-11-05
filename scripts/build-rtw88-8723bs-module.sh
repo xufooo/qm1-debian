@@ -41,6 +41,9 @@ VENDOR_REPO="MocLG/rtw88-rtl8723bs"
 VENDOR_REF="0f64b72d8ec091d811a1a44f8b314e9df1b72d78"
 FIRMWARE_DIR=""
 DEB_NAME="qm1-rtw88-8723bs"
+# 本仓库对 vendor 树的本地补丁（patches/rtw88/*.patch）。这些补丁承载上游
+# 还没进 vendor 树的修复，例如 8723BS 的 TX report purge 超时（上游 4d688f22ebbf）。
+PATCH_DIR=""
 
 log()  { printf '[rtw88] %s\n' "$*" >&2; }
 warn() { printf '[rtw88][warn] %s\n' "$*" >&2; }
@@ -59,6 +62,8 @@ Usage: build-rtw88-8723bs-module.sh --kver <kernel-abi> [options]
   --upstream-ref <ref>  ref that carries the 8723b chip driver (default: master)
   --vendor-repo <repo>  github repo of the vendor rtw88 tree
   --vendor-ref <sha>    commit of the vendor tree
+  --patch-dir <dir>     directory with local *.patch files applied to the
+                        vendor tree (default: <repo>/patches/rtw88)
   --firmware-dir <dir>  directory that holds rtw8723b_fw.bin
 EOF
 }
@@ -74,6 +79,7 @@ while [ $# -gt 0 ]; do
         --upstream-ref)  UPSTREAM_REF="$2"; shift 2 ;;
         --vendor-repo)   VENDOR_REPO="$2"; shift 2 ;;
         --vendor-ref)    VENDOR_REF="$2"; shift 2 ;;
+        --patch-dir)     PATCH_DIR="$2"; shift 2 ;;
         --firmware-dir)  FIRMWARE_DIR="$2"; shift 2 ;;
         -h|--help)       usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
@@ -82,6 +88,11 @@ done
 
 [ -n "$KVER" ] || { usage; die "--kver is required"; }
 case "$SOURCE" in auto|upstream|vendor) ;; *) die "invalid --source: $SOURCE" ;; esac
+
+if [ -z "$PATCH_DIR" ]; then
+    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    PATCH_DIR="$SCRIPT_DIR/../patches/rtw88"
+fi
 
 for cmd in make gcc git curl dpkg-deb modinfo; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing tool: $cmd"
@@ -177,6 +188,42 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
+# local patches for the vendor tree
+#
+# The vendor tree misses fixes that upstream already merged for this chip --
+# most importantly the TX report purge timeout (upstream 4d688f22ebbf gives
+# the 8723BS 2500 ms instead of 500 ms).  Those patches live in
+# patches/rtw88/ and are applied here; a missing patch directory is fatal,
+# because building the unpatched vendor tree would ship the very symptom
+# this backport is meant to cure.
+# ---------------------------------------------------------------------------
+apply_patches() {   # apply_patches <tree-dir>
+    local dir="$1" p n=0
+    [ -d "$dir" ] || die "patch target $dir does not exist"
+    [ -d "$PATCH_DIR" ] || die "patch directory $PATCH_DIR does not exist"
+    for p in "$PATCH_DIR"/*.patch; do
+        [ -e "$p" ] || continue
+        n=$((n + 1))
+    done
+    [ "$n" -gt 0 ] || die "no *.patch found in $PATCH_DIR"
+    for p in "$PATCH_DIR"/*.patch; do
+        [ -e "$p" ] || continue
+        log "dry-run $(basename "$p")"
+        if ! (cd "$dir" && patch -p1 --dry-run --batch --forward < "$p"); then
+            die "patch does not apply to the vendor tree: $(basename "$p")"
+        fi
+    done
+    for p in "$PATCH_DIR"/*.patch; do
+        [ -e "$p" ] || continue
+        log "applying $(basename "$p")"
+        (cd "$dir" && patch -p1 --batch --forward < "$p") \
+            || die "failed to apply $(basename "$p")"
+    done
+    find "$dir" \( -name '*.rej' -o -name '*.orig' \) -delete
+    log "$n patch(es) applied to the vendor tree"
+}
+
+# ---------------------------------------------------------------------------
 # vendor tree: self contained rtw88 copy with the RTL8723BS support
 # ---------------------------------------------------------------------------
 build_vendor() {
@@ -189,6 +236,10 @@ build_vendor() {
     tar -xzf "$tarball" -C "$WORK/vendor" --strip-components=1 \
         || { warn "cannot unpack the vendor tree"; return 1; }
     [ -f "$WORK/vendor/Makefile" ] || { warn "vendor tree has no Makefile"; return 1; }
+
+    # 本仓库的本地补丁（TX report purge 超时等）必须打上，否则编出来的模块
+    # 仍带着 500 ms 的旧超时。
+    apply_patches "$WORK/vendor" || return 1
 
     log "compiling the vendor tree against $KSRC"
     make -C "$KSRC" M="$WORK/vendor" -j"$JOBS" modules \

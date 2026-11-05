@@ -311,6 +311,7 @@ Debian 13 的 `firmware-realtek` 里也没有 `rtw88/rtw8723b_fw.bin`（sid 才�
 |------|------|
 | `scripts/build-rtw88-8723bs-module.sh` | 默认走 **vendor rtw88 树**（`--source vendor`）：编出 `rtw_core.ko` / `rtw_sdio.ko` / `rtw_8723b.ko` / `rtw_8723bs.ko`。`--source upstream` 可切到「上游芯片文件 + 6.12 头文件」的实验路线（在 6.12 上编不过，见上）。校验 vermagic 必须与目标内核一致、模块 alias 必须认领 `0x024c:0xb723`，最后打成 `.deb` |
 | `scripts/fetch-rtw8723b-firmware.sh` | 从 Debian sid 的 `firmware-realtek` 里只取 `rtw88/rtw8723b_fw.bin`（用 sid 包索引里的 SHA256 校验 .deb 本身） |
+| `patches/rtw88/*.patch` | 打给 vendor 树的本地补丁（构建脚本自动按序应用，缺补丁直接失败）。目前是 `0001`：把 **8723BS 的 TX report purge 超时从 500 ms 提到 2500 ms** —— vendor 树没跟上上游 `4d688f22ebbf`（上游 7.4 起给 8723BS 单独放宽，现已推广成非 PCIe 总线一律 2500 ms）。不补这一条，超时器会在帧还在路上时把整条 tx_report 队列清掉、内核永远等不到「已发送」，正是「链路通但吞吐塌陷 / 断流」的成因 |
 
 打好的 deb 里包含：模块（`/lib/modules/<abi>/extra/rtw88/`）、固件（`/lib/firmware/rtw88/`）、
 `/etc/modprobe.d/qm1-rtw88-8723bs.conf`（`blacklist r8723bs` + rtw88 核心自己的参数
@@ -331,8 +332,9 @@ bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
 
 hook 会核对 vermagic 与镜像内核一致、固件在位，并把 `/etc/modules-load.d/qm1-hardware.conf`
 里的 `r8723bs` 换成回移后的模块名；`drv-selfcheck.sh` 看到 rtw88 模块时直接报 PASS。
-CI 里 `build-image` 已经把这条链路串起来了；rtw88 模块构建失败时流水线会回退到打了补丁的
-staging 模块，不阻断镜像产出。
+CI 里 `build-image` 已经把这条链路串起来了。**rtw88 模块是硬要求**：构建步骤虽然带
+「失败就退回打了补丁的 staging 模块」的兜底，但后面的断言步骤会直接 `exit 1` ——
+镜像里只允许出现 rtw88 根治模块，不允许悄悄退回那四条永久卡死路径的 staging 驱动。
 
 #### 蓝牙：RTL8723BS 的 BT 部分（ACPI UART + 厂商固件下发）
 

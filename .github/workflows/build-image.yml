@@ -77,6 +77,9 @@ on:
       - "scripts/**"
       - "hooks/**"
       - "overlay/**"
+      # 树外模块的本地补丁（patches/rtw88/）直接进到镜像里的 rtw88 模块，
+      # 只改补丁不改脚本时也必须重建镜像。
+      - "patches/**"
       - ".github/workflows/build-image.yml"
   schedule:
     # 每周一 03:00 UTC —— 验证 Debian 仓库侧变化没有把构建打断
