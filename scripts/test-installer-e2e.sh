@@ -161,21 +161,15 @@ file_content() {  # $1=分区设备 $2=相对路径
 # 取整块盘（不是分区）的 sha256
 whole_sha() { sha256sum "$1" | awk '{print $1}'; }
 
-# 某个字节区间是不是全 0
+# 某个字节区间里有没有 GPT 头的签名 "EFI PART"
 #
-# 这里**不能**写成 "… | grep -q '[^0]'"：grep -q 命中即退出，
-# 上游的 od/tr 会收到 SIGPIPE（141）；本脚本是 set -euo pipefail，
-# 管道里任何一环非零 ⇒ 整条管道判失败 ⇒ 本来"全零"的区域
-# 反而被报成"不是零"。先把输出收进变量里，再判断里面有没有非零字节。
-range_is_zero() {  # $1=文件 $2=偏移 $3=长度
-    _riz_hex=""
-    _riz_hex="$(dd if="$1" bs=1M iflag=skip_bytes,count_bytes skip="$2" count="$3" status=none \
-        | od -An -tx1 | tr -d ' \n')" || return 1
-    [ -n "$_riz_hex" ] || return 1
-    case "$_riz_hex" in
-        *[!0]*) return 1 ;;
-    esac
-    return 0
+# 同样不能用 grep -q（命中即退出 ⇒ 上游 dd 收 SIGPIPE(141) ⇒
+# set -euo pipefail 下管道判失败）。用 grep -c：它把整个输入读完，
+# 退出码非零也只表示"没找到"，不影响 dd 的状态。
+gpt_sig_at() {  # $1=文件 $2=偏移；0 = 那一带里找到了 "EFI PART"
+    _gsa_count="$(dd if="$1" bs=1M iflag=skip_bytes,count_bytes skip="$2" count=1M status=none 2>/dev/null \
+        | grep -ac 'EFI PART')" || _gsa_count=0
+    [ "${_gsa_count:-0}" -gt 0 ]
 }
 
 # 逐分区比对：备份 vs 安装前的原盘（用与安装器同一份实现）
@@ -325,17 +319,26 @@ else
 fi
 
 # 备份 GPT 必须落在盘尾，而不是镜像末尾那个位置
-if dd if="$LOOP_TGT_B" bs=1M skip=767 count=1 status=none 2>/dev/null | grep -q 'EFI PART'; then
+#
+# 用 grep -c 而不是 grep -q：grep -q 一命中就退出，上游的 dd 会收到
+# SIGPIPE（141）；本脚本是 set -euo pipefail，管道里任何一环非零 ⇒
+# 整条管道判失败（这个坑本脚本里踩过两次了）。
+if gpt_sig_at "$LOOP_TGT_B" $(( 767 * 1048576 )); then
     ok "用例 B：备份 GPT 已落在盘尾（最后 1 MiB 内）"
 else
     bad "用例 B：盘尾没找到备份 GPT（分区表没按真实容量重建？）"
 fi
 
-# 镜像原来的备份 GPT 位置（镜像末尾前 1 MiB）必须已被清零
-if range_is_zero "$LOOP_TGT_B" $(( IMAGE_SIZE_B - 1048576 )) 1048576; then
-    ok "用例 B：镜像旧备份 GPT 所在区域已清零"
+# 镜像原来的备份 GPT 头必须不再是有效的 GPT 头。
+#
+# 注意判据不是"那一段必须全零"：镜像的旧备份 GPT 在镜像末尾前 1 MiB 里，
+# 而目标盘比镜像大、根分区又撑到了盘尾 ⇒ 那一段现在属于根文件系统，
+# 装的是根文件系统的字节，本来就该是非零。要判的是"旧备份 GPT 还在不在"：
+# 它的头在镜像的最后一个扇区（IMAGE_SIZE_B - 512），签名是 "EFI PART"。
+if gpt_sig_at "$LOOP_TGT_B" $(( IMAGE_SIZE_B - 512 )); then
+    bad "用例 B：镜像旧备份 GPT 的头还在原处（两个 GPT 并存）"
 else
-    bad "用例 B：镜像旧备份 GPT 所在区域还有残留（两个 GPT 并存）"
+    ok "用例 B：镜像旧备份 GPT 已不再是有效 GPT 头"
 fi
 
 # ESP 的内容必须仍然来自镜像。
