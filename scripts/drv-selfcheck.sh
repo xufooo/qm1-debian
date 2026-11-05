@@ -608,23 +608,35 @@ else
     row WARN "wpa_supplicant" "没在运行 —— Wi-Fi 不会关联"
 fi
 
-_addr="$(ip -br addr show wlan0 2>/dev/null || true)"
-    if grep -q 'wlan0' <<<"$_addr"; then
-    wlan_addr="$(ip -br addr show wlan0 2>/dev/null | awk '{print $3}')"
+# 无线接口的名字由内核与驱动决定（cfg80211 拿到永久 MAC 时会用 wlp<后缀>），
+# 这台机器我们还没在真机上见过它实际叫什么 —— 写死 wlan0 的话，接口其实
+# 好好的，自检却报"接口不存在"，把验收结论带歪。所以先动态找，找不到再
+# 退回约定名。
+WLAN_IF=""
+for _nd in /sys/class/net/*; do
+    [ -e "$_nd/wireless" ] || continue
+    WLAN_IF="${_nd##*/}"
+    break
+done
+[ -n "$WLAN_IF" ] || WLAN_IF=wlan0
+
+_addr="$(ip -br addr show "$WLAN_IF" 2>/dev/null || true)"
+    if grep -q "$WLAN_IF" <<<"$_addr"; then
+    wlan_addr="$(ip -br addr show "$WLAN_IF" 2>/dev/null | awk '{print $3}')"
     if [ -n "$wlan_addr" ]; then
-        row PASS "wlan0 地址" "$wlan_addr"
+        row PASS "$WLAN_IF 地址" "$wlan_addr"
     else
-        row WARN "wlan0 地址" "没有地址（未关联或 DHCP 没拿到）"
+        row WARN "$WLAN_IF 地址" "没有地址（未关联或 DHCP 没拿到）"
     fi
 else
-    row WARN "wlan0" "接口不存在"
+    row WARN "$WLAN_IF" "接口不存在"
 fi
 
 # 「开机即用」第三条：Wi-Fi 真的关联上了没有（iw 的 link 里会写 Connected/not connected）
-if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
-    _link="$(iw dev wlan0 link 2>/dev/null || true)"
+if command -v iw >/dev/null 2>&1 && [ -e "/sys/class/net/$WLAN_IF" ]; then
+    _link="$(iw dev "$WLAN_IF" link 2>/dev/null || true)"
     if grep -q 'Connected to' <<<"$_link"; then
-        _ssid="$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -1)"
+        _ssid="$(iw dev "$WLAN_IF" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -1)"
         row PASS "Wi-Fi 关联" "已关联${_ssid:+（SSID: $_ssid）}"
     elif grep -q 'not connected' <<<"$_link"; then
         row FAIL "Wi-Fi 关联" "未关联 —— 内置 Wi-Fi 是这台机器唯一的联网链路；先看绑定的是哪个模块（rtw88_qm1 才算对）"
@@ -632,15 +644,15 @@ if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
         row WARN "Wi-Fi 关联" "读不到关联状态（iw 没输出）"
     fi
 else
-    row WARN "Wi-Fi 关联" "没有 iw 或 wlan0 不存在"
+    row WARN "Wi-Fi 关联" "没有 iw 或 $WLAN_IF 不存在"
 fi
 
 # 信道宽度：出货模块把 8723B 的能力收窄到 20 MHz（patches/rtw88-upstream/
 # 0006）。40 MHz 在这颗芯片的一个变体上根本不支持，而社区报告里 40 MHz
 # 正是随机断连的来源 —— 这台机器没有第二条链路，稳定性优先。所以这里核对
 # 实际协商到的宽度，宽度不是 20 MHz 就报出来。
-if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
-    _width="$(iw dev wlan0 link 2>/dev/null | sed -n 's/.*width:[[:space:]]*//p' | head -1)"
+if command -v iw >/dev/null 2>&1 && [ -e "/sys/class/net/$WLAN_IF" ]; then
+    _width="$(iw dev "$WLAN_IF" link 2>/dev/null | sed -n 's/.*width:[[:space:]]*//p' | head -1)"
     if [ -z "$_width" ]; then
         row WARN "Wi-Fi 信道宽度" "读不到协商宽度（可能还没关联）"
     elif [ "$_width" = "20 MHz" ]; then
@@ -649,7 +661,7 @@ if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
         row FAIL "Wi-Fi 信道宽度" "协商到的是 $_width —— 应当是 20 MHz（模块没有带上 0006 补丁？）"
     fi
 else
-    row WARN "Wi-Fi 信道宽度" "没有 iw 或 wlan0 不存在"
+    row WARN "Wi-Fi 信道宽度" "没有 iw 或 $WLAN_IF 不存在"
 fi
 
 if systemctl is-enabled --quiet ssh 2>/dev/null; then
@@ -681,9 +693,9 @@ if [ -r "$HEALTH_DIR/latest.txt" ]; then
     hang="$(grep -m1 '^hung_task=' "$HEALTH_DIR/latest.txt" 2>/dev/null | cut -d= -f2)"
     row INFO "eMMC 错误行" "${mmc_err:-未知}（累计，S2 判据）"
     row INFO "挂死类抱怨" "${hang:-未知}（累计，S1 判据）"
-    rxd="$(awk '/^-- wlan0 --$/{f=1;next} f&&/^-- /{f=0} f' "$HEALTH_DIR/latest.txt" 2>/dev/null \
+    rxd="$(awk -v want="-- $WLAN_IF --" '$0==want{f=1;next} f&&/^-- /{f=0} f' "$HEALTH_DIR/latest.txt" 2>/dev/null \
         | tr ' ' '\n' | grep -m1 '^rx_dropped=' | cut -d= -f2)"
-    row INFO "wlan0 丢包" "${rxd:-未知}（累计，S3 判据）"
+    row INFO "$WLAN_IF 丢包" "${rxd:-未知}（累计，S3 判据）"
 else
     row WARN "最新快照" "还没有健康快照 —— 采集器可能没跑起来，或 /var/log/qm1-health 不可写"
 fi

@@ -85,7 +85,25 @@ explain_wait() {
 }
 
 waited=0
+# 兜底：万一内核/驱动给的不是 wlan0（接口名取决于内核与驱动），就退而求其次
+# 找任何一个带 /wireless 的接口。这台机器没有网口，Wi-Fi 断了就是整机断网，
+# 宁可名字对不上，也不能不把 wpa_supplicant 拉起来。
+find_wireless_iface() {
+    for _d in /sys/class/net/*; do
+        [ -e "$_d/wireless" ] || continue
+        printf '%s' "${_d##*/}"
+        return 0
+    done
+    return 1
+}
+
 while ! ip link show "$IFACE" >/dev/null 2>&1; do
+    _alt="$(find_wireless_iface || true)"
+    if [ -n "$_alt" ]; then
+        log "接口名不是 $IFACE，改用内核实际给出的无线接口 $_alt"
+        IFACE="$_alt"
+        break
+    fi
     if [ $((waited % LOG_EVERY)) -eq 0 ]; then
         log "还在等 $IFACE 出现（已等 ${waited}s）：$(explain_wait)"
     fi

@@ -1,7 +1,11 @@
 # 内置 Wi-Fi 是这台机器的主联网链路（整机没有 RJ45）。
 # Priority 越小越优先 → 给它更低的 metric，让默认路由走 Wi-Fi。
+#
+# Name 同时收 wlan* 与 wlp*：接口名由内核与驱动决定（cfg80211 在拿到
+# 永久 MAC 时会用 wlp<后缀> 的命名法），这台机器我们还没在真机上见过
+# 实际叫什么 —— 匹配窄了，DHCP 就不生效，Wi-Fi 关联上了也拿不到地址。
 [Match]
-Name=wlan*
+Name=wlan* wlp*
 
 [Network]
 DHCP=yes
