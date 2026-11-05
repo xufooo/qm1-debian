@@ -376,6 +376,26 @@ jobs:
             || { echo "::error::采集器缺少挂死类内核抱怨计数"; exit 1; }
           echo "OK   稳定性取证采集器、定时器与压测脚本全部就位"
 
+      - name: Assert the hardware fixups are inside the image
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          # 每个功能都要真的能用：eMMC 不自动挂起、CPU 调频、HDMI 音频、蓝牙绑定
+          [ -x "$ROOT/usr/local/sbin/qm1-hardware-fixups" ] \
+            || { echo "::error::镜像里没有 /usr/local/sbin/qm1-hardware-fixups"; exit 1; }
+          [ -f "$ROOT/lib/systemd/system/qm1-hardware-fixups.service" ] \
+            || [ -f "$ROOT/etc/systemd/system/qm1-hardware-fixups.service" ] \
+            || { echo "::error::镜像里缺少 systemd 单元 qm1-hardware-fixups.service"; exit 1; }
+          [ -L "$ROOT/etc/systemd/system/multi-user.target.wants/qm1-hardware-fixups.service" ] \
+            || { echo "::error::qm1-hardware-fixups.service 没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
+          [ -f "$ROOT/etc/default/qm1-hardware" ] \
+            || { echo "::error::镜像里缺少 /etc/default/qm1-hardware"; exit 1; }
+          for needle in 'power/control' 'scaling_governor' 'snd-hda-codec-hdmi' 'hci_uart'; do
+            grep -q "$needle" "$ROOT/usr/local/sbin/qm1-hardware-fixups" \
+              || { echo "::error::硬件修正脚本缺少 $needle 相关处理"; exit 1; }
+          done
+          echo "OK   硬件修正脚本、systemd 单元与自启链接全部就位"
+
       - name: Assert the first-boot provisioning is inside the image
         run: |
           set -eu
