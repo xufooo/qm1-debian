@@ -40,9 +40,12 @@ EOF
 # systemd 的 enable/disable 是离线操作（只写符号链接），chroot 里可用。
 # systemctl enable 在 chroot 里偶尔不写符号链接（没有 /proc 时它会拒绝），
 # 所以每个单元都要有确定的手工兜底：单元文件在镜像里就自己建链接。
+# $2 是被依赖的目标（如 multi-user.target / timers.target），
+# 链接要放在 <target>.wants/ 里。
 enable_unit() {
     _unit="$1"
-    _dir="$2"
+    _target="$2"
+    _dir="${_target}.wants"
     chroot "$TARGET" systemctl enable "$_unit" >/dev/null 2>&1 || true
     if [ -f "$TARGET/lib/systemd/system/$_unit" ] \
        && [ ! -e "$TARGET/etc/systemd/system/$_dir/$_unit" ]; then
