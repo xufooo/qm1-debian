@@ -120,12 +120,21 @@ EXDIR="$WORK/x"
 mkdir -p "$EXDIR"
 dpkg-deb -x "$DEB" "$EXDIR"
 
-[ -f "$EXDIR/$BLOB_REL" ] || die "$PKG 里没有 $BLOB_REL（包内容变了？）"
-install -m 0644 "$EXDIR/$BLOB_REL" "$OUT_DIR/rtw8723b_fw.bin"
+# Debian 的 .deb 里固件在 ./usr/lib/firmware/...，解包后带 usr/ 前缀；
+# 两种布局都认（有些包会直接放在 ./lib/...）。
+BLOB_SRC=""
+for _cand in "$EXDIR/usr/$BLOB_REL" "$EXDIR/$BLOB_REL"; do
+    if [ -f "$_cand" ]; then BLOB_SRC="$_cand"; break; fi
+done
+[ -n "$BLOB_SRC" ] || die "$PKG 里没有 $BLOB_REL（包内容变了？）"
+install -m 0644 "$BLOB_SRC" "$OUT_DIR/rtw8723b_fw.bin"
 
-if [ -f "$EXDIR/$BLOB_REL_WOW" ]; then
-    install -m 0644 "$EXDIR/$BLOB_REL_WOW" "$OUT_DIR/rtw8723b_wow_fw.bin"
-fi
+for _wow in "$EXDIR/usr/$BLOB_REL_WOW" "$EXDIR/$BLOB_REL_WOW"; do
+    if [ -f "$_wow" ]; then
+        install -m 0644 "$_wow" "$OUT_DIR/rtw8723b_wow_fw.bin"
+        break
+    fi
+done
 
 {
     echo "# 来源：$MIRROR  $SUITE  $PKG $DEB_VER"
