@@ -45,11 +45,11 @@ If the QM1 ever proves that 40 MHz works on this module, the change can
 be reverted, or the upstream efuse series can be backported properly.
 
 ---
- drivers/net/wireless/realtek/rtw88/rtw8723b.c | 4 ++--
+ rtw8723b.c | 4 ++--
  1 file changed, 2 insertions(+), 2 deletions(-)
-diff --git a/drivers/net/wireless/realtek/rtw88/rtw8723b.c b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
---- a/drivers/net/wireless/realtek/rtw88/rtw8723b.c
-+++ b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
+diff --git a/rtw8723b.c b/rtw8723b.c
+--- a/rtw8723b.c
++++ b/rtw8723b.c
 @@ -2361,8 +2361,7 @@
  	/* No firmware hardware feature report exists, so fill it in here. */
  	efuse->hw_cap.nss = 1;

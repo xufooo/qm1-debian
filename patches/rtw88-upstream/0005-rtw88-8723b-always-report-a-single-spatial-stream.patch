@@ -25,10 +25,10 @@ Why we carry it:
   removes a dependency on the RF path being initialised before the
   capability is reported.
 ---
-diff --git a/drivers/net/wireless/realtek/rtw88/rtw8723b.c b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
+diff --git a/rtw8723b.c b/rtw8723b.c
 index f2164a7333e6..19bb9fd7417b 100644
---- a/drivers/net/wireless/realtek/rtw88/rtw8723b.c
-+++ b/drivers/net/wireless/realtek/rtw88/rtw8723b.c
+--- a/rtw8723b.c
++++ b/rtw8723b.c
 @@ -2397,12 +2397,9 @@ static int rtw8723b_read_efuse(struct rtw_dev *rtwdev, u8 *log_map, u8 *phy_map)
  	if (efuse->power_track_type != 0)
  		rtw_warn(rtwdev, "unsupported power track type\n");

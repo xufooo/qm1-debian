@@ -30,10 +30,10 @@ Why we carry it:
 
   The change moves three lines; the PCI and USB paths are unaffected.
 ---
-diff --git a/drivers/net/wireless/realtek/rtw88/sdio.c b/drivers/net/wireless/realtek/rtw88/sdio.c
+diff --git a/sdio.c b/sdio.c
 index dc2fd0f8f9ff..7c22f0ba5329 100644
---- a/drivers/net/wireless/realtek/rtw88/sdio.c
-+++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+--- a/sdio.c
++++ b/sdio.c
 @@ -1332,8 +1332,6 @@ static void rtw_sdio_rx_skb(struct rtw_dev *rtwdev, struct sk_buff *skb,
  			    u32 pkt_offset, struct rtw_rx_pkt_stat *pkt_stat,
  			    struct ieee80211_rx_status *rx_status)

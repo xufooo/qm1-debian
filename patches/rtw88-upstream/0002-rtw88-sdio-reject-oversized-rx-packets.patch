@@ -27,13 +27,13 @@ Why we carry it:
   fix is eight lines and self-contained.
 
 ---
- drivers/net/wireless/realtek/rtw88/sdio.c | 8 ++++++++
+ sdio.c | 8 ++++++++
  1 file changed, 8 insertions(+)
 
-diff --git a/drivers/net/wireless/realtek/rtw88/sdio.c b/drivers/net/wireless/realtek/rtw88/sdio.c
+diff --git a/sdio.c b/sdio.c
 index 7c22f0ba5329..ecd4d751c05a 100644
---- a/drivers/net/wireless/realtek/rtw88/sdio.c
-+++ b/drivers/net/wireless/realtek/rtw88/sdio.c
+--- a/sdio.c
++++ b/sdio.c
 @@ -1388,6 +1388,14 @@ static void rtw_sdio_rxfifo_recv(struct rtw_dev *rtwdev, u32 rx_len)
  		curr_pkt_len = ALIGN(pkt_offset + pkt_stat.pkt_len,
  				     RTW_SDIO_DATA_PTR_ALIGN);
