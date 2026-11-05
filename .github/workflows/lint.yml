@@ -106,6 +106,9 @@ jobs:
             overlay/etc/sysctl.d/90-qm1.conf \
             overlay/etc/default/zramswap \
             overlay/etc/wpa_supplicant/wpa_supplicant.conf \
+            overlay/etc/systemd/network/10-ethernet.network \
+            overlay/etc/systemd/network/30-wifi.network \
+            overlay/etc/systemd/system/qm1-wifi@.service \
             overlay/usr/local/bin/qm1-selftest \
             scripts/grub.cfg.example \
             scripts/drv-selfcheck.sh ; do
