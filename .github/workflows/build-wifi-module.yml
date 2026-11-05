@@ -400,6 +400,25 @@ jobs:
             --source upstream-full \
             --upstream-ref master
 
+      - name: Verify the upstream rtw88 module
+        run: |
+          set -eux
+          KVER="${{ steps.kernel.outputs.kver }}"
+          DEB="$(ls build/rtw88-upstream/*.deb | head -1)"
+          dpkg-deb -c "$DEB" | tee build/rtw88-upstream/contents.txt
+          grep -q "lib/modules/$KVER/extra/rtw88/rtw88_qm1.ko" build/rtw88-upstream/contents.txt
+          grep -q "lib/firmware/rtw88/rtw8723b_fw.bin" build/rtw88-upstream/contents.txt
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO "./lib/modules/$KVER/extra/rtw88/rtw88_qm1.ko" \
+            > build/rtw88-upstream/rtw88_qm1.ko
+          modinfo -F vermagic build/rtw88-upstream/rtw88_qm1.ko | grep -q "^$KVER"
+          modinfo -F alias build/rtw88-upstream/rtw88_qm1.ko | grep -qi "b723"
+          dpkg-deb --fsys-tarfile "$DEB" \
+            | tar -xO ./etc/modprobe.d/qm1-rtw88-8723bs.conf \
+            > build/rtw88-upstream/modprobe.conf
+          grep -q '^options rtw88_qm1 disable_lps_deep=y$' build/rtw88-upstream/modprobe.conf
+          grep -q '^blacklist rtw88_core$' build/rtw88-upstream/modprobe.conf
+
       - name: Write summary
         if: always()
         run: |
