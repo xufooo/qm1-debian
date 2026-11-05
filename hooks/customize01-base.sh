@@ -44,9 +44,16 @@ chroot "$TARGET" systemctl enable systemd-oomd >/dev/null 2>&1 || true
 # 用 systemd-networkd：它顺带负责写 /etc/resolv.conf，所以 systemd-resolved
 # 可以继续关着（2GB 内存，少一个常驻服务）。
 chroot "$TARGET" systemctl enable systemd-networkd >/dev/null 2>&1 || true
-for svc in systemd-resolved avahi-daemon bluetooth systemd-timesyncd; do
+for svc in systemd-resolved avahi-daemon; do
     chroot "$TARGET" systemctl disable "$svc" >/dev/null 2>&1 || true
 done
+
+# 时间同步必须开：这台机器没有电池、没有 RTC 时钟从 1970 年开始，
+# 而 TLS 证书有效期校验、agent 任务调度、日志时间戳全都依赖正确时钟。
+chroot "$TARGET" systemctl enable systemd-timesyncd >/dev/null 2>&1 || true
+# 蓝牙栈（bluez）也要开：厂商固件下发后由它管理 hci0 并负责配对；
+# 它依赖 overlay 的 bluetooth.service.d/qm1.conf 排在 qm1-bluetooth.service 之后。
+chroot "$TARGET" systemctl enable bluetooth >/dev/null 2>&1 || true
 
 # --- 首次启动不要在硬件随机数池上等太久 ------------------------------------
 mkdir -p "$TARGET/etc/systemd/system.conf.d"

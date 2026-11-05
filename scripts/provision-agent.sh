@@ -45,6 +45,26 @@ log "内存：$(free -m | awk '/^Mem:/{print $2" MiB 总 / "$7" MiB 可用"}')"
 # ---------- 1. 运行时依赖 ----------
 log "安装运行时依赖（Chromium 运行库 / 字体 / ripgrep / ffmpeg / 工具链）"
 export DEBIAN_FRONTEND=noninteractive
+# 时钟必须先对：官方安装器走 HTTPS，证书有效期校验依赖正确时钟；
+# 这台机器没有 RTC，冷启动时系统时间从 1970 年开始。
+wait_for_clock() {
+    local waited=0 year
+    while [ "$waited" -lt "${QM1_CLOCK_WAIT:-120}" ]; do
+        year="$(date +%Y 2>/dev/null || echo 1970)"
+        if [ "$year" -ge 2025 ] 2>/dev/null; then
+            log "系统时钟已就绪（$(date -u)）"
+            return 0
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    return 1
+}
+
+if ! wait_for_clock; then
+    warn "系统时钟仍未同步（$(date -u)）——TLS 证书校验可能失败，请检查 systemd-timesyncd"
+fi
+
 apt-get update -qq
 apt-get install -y --no-install-recommends \
     ca-certificates curl git gnupg ripgrep ffmpeg \
