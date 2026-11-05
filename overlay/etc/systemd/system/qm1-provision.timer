@@ -1,0 +1,32 @@
+[Unit]
+Description=QM1 runtime provisioning timer (Hermes CLI + headless Chrome)
+Documentation=file:///usr/local/share/qm1/README-runtime.txt
+# ★ 这个 timer 才是"什么时候开始铺运行时"的决策点。
+#
+#   为什么不把 qm1-provision.service 直接挂在 multi-user.target 上？
+#   因为 target 会给 Wants= 成员隐式补 After=，于是
+#   "铺运行时要等 network-online" 就变成了"整机开机要等网络就绪"。
+#   这台机器没有 RJ45，内置 Wi-Fi 是唯一链路；Wi-Fi 没起来时
+#   整机到不了 multi-user.target ⇒ 没有 SSH、看起来像砖了。
+#   （详见 qm1-provision.service 里的说明。）
+#
+#   改成 timer 之后：开机不再等网络，也不再等安装；
+#   装不上、装一半都不会挡住开机，SSH 随时能进来看日志。
+
+[Timer]
+# 开机 60 秒后开始尝试。真正的开始时刻由 qm1-provision.service 自己的
+# After=network-online.target 决定 —— 这里的秒数只是"最早什么时候去排队"。
+OnBootSec=60s
+# 指向真正的服务单元
+Unit=qm1-provision.service
+# 装失败了（网络还没通、下载中断）就十分钟后再来一次。
+# 成功之后服务停在 active (exited)，这个定时器不会再触发；
+# 失败时服务落到 failed/inactive，定时器会重新拉它。
+OnUnitInactiveSec=10min
+# 装 Hermes 要十几分钟，别让定时器精度把 CPU 拖住
+AccuracySec=1min
+# 不做补跑：机器关机时错过就错过了，下次开机自然会重来
+Persistent=false
+
+[Install]
+WantedBy=timers.target

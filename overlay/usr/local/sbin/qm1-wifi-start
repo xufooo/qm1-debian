@@ -1,0 +1,54 @@
+#!/bin/sh
+# qm1-wifi-start — 等无线接口出现，然后把控制权交给 wpa_supplicant
+#
+# 为什么等待必须发生在**这个进程内部**，而不是单元的 ExecStartPre 里：
+#
+#   ExecStartPre 属于单元的 start job。start job 没结束，依赖它的
+#   **multi-user.target 就到不了**（systemd 会给 target 隐式补上
+#   After=，见 systemd.unit(5)「target units will implicitly complement
+#   all configured dependencies of type Wants= or Requires= with After=
+#   dependencies」）。
+#
+#   这台机器没有 RJ45，内置 Wi-Fi 是唯一链路；而"接口没出现"在这台机器上
+#   并不是异常情况（SDIO 没枚举、驱动没绑上、固件没就位都可能发生）。
+#   于是 ExecStartPre 失败 → 单元进入自动重启 → start job 永远不完成 →
+#   整机停在 getty.target 之后：没有 multi-user.target、没有 SSH、
+#   看起来像砖了。
+#
+#   ★ 开机即用的底线：**Wi-Fi 失败绝不能挡开机。**
+#   所以等待搬到进程里：Type=simple 的 start job 在 fork 之后立刻完成，
+#   multi-user.target 随之达成；接口什么时候出现，wpa_supplicant 就在
+#   什么时候被拉起来。
+#
+# 用法：qm1-wifi-start <接口名> [配置文件]
+set -u
+
+IFACE="${1:-wlan0}"
+CONF="${2:-/etc/wpa_supplicant/wpa_supplicant.conf}"
+LOG_TAG=qm1-wifi
+# 每隔多久打一条"还在等"的日志（秒）
+LOG_EVERY="${QM1_WIFI_LOG_EVERY:-15}"
+
+log() {
+    logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true
+    printf '%s\n' "$*" >&2 || true
+}
+
+if [ ! -f "$CONF" ]; then
+    log "没有 $CONF —— 无线配置不存在，退出（单元由 ConditionPathExists 守着，这里只是兜底）"
+    exit 0
+fi
+
+waited=0
+while ! ip link show "$IFACE" >/dev/null 2>&1; do
+    if [ $((waited % LOG_EVERY)) -eq 0 ]; then
+        log "还在等 $IFACE 出现（已等 ${waited}s）"
+    fi
+    waited=$((waited + 1))
+    sleep 1
+done
+
+log "$IFACE 已出现，启动 wpa_supplicant（配置 $CONF）"
+# exec：让 wpa_supplicant 接管这个进程，systemd 就能看着它、
+# 它退出时也能被 Restart= 正常拉起。
+exec /usr/sbin/wpa_supplicant -i "$IFACE" -c "$CONF"

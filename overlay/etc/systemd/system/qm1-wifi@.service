@@ -7,15 +7,26 @@ ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant.conf
 
 [Service]
 Type=simple
-# SDIO 卡的无线接口可能比 network.target 晚几秒才出现，先等它出现
-ExecStartPre=/bin/sh -c 'for i in $(seq 1 60); do ip link show %i >/dev/null 2>&1 && exit 0; sleep 1; done; exit 1'
-# 前台运行（不加 -B）：这样 systemd 能看着它，掉了会按 Restart= 拉起来
-ExecStart=/usr/sbin/wpa_supplicant -i %i -c /etc/wpa_supplicant/wpa_supplicant.conf
+# ★ 等无线接口出现这件事**必须**发生在 ExecStart 进程内部
+#   （见 /usr/local/sbin/qm1-wifi-start 的头注释），绝不能用 ExecStartPre。
+#
+#   ExecStartPre 属于本单元的 start job，而 multi-user.target 因为
+#   Wants= 里挂了本单元，会被 systemd 隐式补上 After=（systemd.unit(5)）：
+#   start job 不完成，multi-user.target 就到不了。
+#
+#   这台机器没有 RJ45，内置 Wi-Fi 是唯一链路；而"接口没出现"在这里
+#   不是异常（SDIO 没枚举、驱动没绑上、固件没就位都可能）。
+#   用 ExecStartPre 等接口 ⇒ 等满就失败 ⇒ Restart= 无限重试 ⇒
+#   start job 永远不完成 ⇒ 整机停在 getty.target 之后：没有 SSH，
+#   看起来像砖了。
+#
+#   ★ 开机即用的底线：Wi-Fi 失败绝不能挡开机。
+ExecStart=/usr/local/sbin/qm1-wifi-start %i
+# 前台运行：这样 systemd 能看着它，掉了会按 Restart= 拉起来
 Restart=always
 RestartSec=5
-# 上面那个 ExecStartPre 最多要等 60 秒（等 SDIO 把 wlan0 枚举出来）。
-# 全局默认的 TimeoutStartSec 一旦比它短，systemd 会在接口出现之前
-# 就把这个单元掐掉 —— 现象是"Wi-Fi 永远起不来，而且日志里什么都没有"。
+# Type=simple 的 start job 在 fork 之后立刻完成，这里给的是
+# "进程必须能在两分钟内 fork 出来"的余量，不是等接口的时间上限。
 TimeoutStartSec=120s
 
 [Install]

@@ -198,6 +198,51 @@ if [ -n "$ifs" ]; then
                 else
                     row FAIL "rtw8723b 固件" "缺 rtw88/rtw8723b_fw.bin（Debian 13 的 firmware-realtek 不含该 blob）"
                 fi
+                # ★ 镜像下发的三个参数必须**运行期**核对。
+                #   构建期（build 脚本）确认过参数存在，CI 也确认了 conf 里有
+                #   options 行，但没有任何一个脚本在真机上读回实际生效值 ——
+                #   参数写错、被别的 conf 覆盖、模块换了名字，都会静默通过。
+                #   这三个参数正是用来压住 8723BS 的省电/死锁路径的：
+                #   disable_lps_deep 关掉深度省电（否则 TX 被看门狗卡住），
+                #   support_bf 开 beamforming，debug_mask=0 关调试打印。
+                #
+                # 两个坑：
+                #   a) 上游这三个参数定义在**核心**模块（core.c/main.c）上
+                #      （module_param_named(disable_lps_deep, ..., bool, 0644)），
+                #      而 wlan0 绑定的模块是 SDIO 那个 —— 整树编译成一个模块时
+                #      两者同名，分开编译时不是。所以这里在所有 rtw* 模块里
+                #      找**真正持有该参数**的那个，不死绑 wlan 的模块名。
+                #   b) bool 型参数在 sysfs 里读回来是 "Y"/"N"，不是 "1"/"0"
+                #      （kernel/params.c 的 param_get_bool 输出的是字母）。
+                #      拿 "1" 去比，会把正确的配置判成 FAIL。
+                _rtw_owner=""
+                for _m in /sys/module/rtw*; do
+                    [ -e "$_m/parameters/disable_lps_deep" ] || continue
+                    _rtw_owner="$(basename "$_m")"
+                    break
+                done
+                _p_lps='?'; _p_bf='?'; _p_dbg='?'
+                if [ -n "$_rtw_owner" ]; then
+                    _p_lps="$(cat "/sys/module/$_rtw_owner/parameters/disable_lps_deep" 2>/dev/null || echo '?')"
+                    _p_bf="$(cat "/sys/module/$_rtw_owner/parameters/support_bf" 2>/dev/null || echo '?')"
+                    _p_dbg="$(cat "/sys/module/$_rtw_owner/parameters/debug_mask" 2>/dev/null || echo '?')"
+                fi
+                # bool 真值：Y/y/1/true/on
+                _bool_true() {
+                    case "$1" in
+                        Y|y|1|true|TRUE|on|ON) return 0 ;;
+                        *) return 1 ;;
+                    esac
+                }
+                if [ -n "$_rtw_owner" ] \
+                   && _bool_true "$_p_lps" && _bool_true "$_p_bf" \
+                   && [ "$_p_dbg" = "0" ]; then
+                    row PASS "rtw88 省电/参数" \
+                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=$_p_dbg（模块 $_rtw_owner）"
+                else
+                    row FAIL "rtw88 省电/参数" \
+                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=$_p_dbg（模块 ${_rtw_owner:-未找到持有该参数的 rtw 模块}）—— 前两项须为真、debug_mask 须为 0（见 /etc/modprobe.d/qm1-rtw88-8723bs.conf；disable_lps_deep 不为真会被省电看门狗卡住 TX）"
+                fi
                 ;;
             *r8723bs_qm1*)
                 # 打了补丁的外部模块（patches/rtl8723bs/），永久卡死路径已修
@@ -249,7 +294,8 @@ if [ -n "$ifs" ]; then
                 ;;
         esac
     else
-        row WARN "无线接口" "未发现 wlan* —— Wi-Fi 未启用或驱动缺失（内置 RTL8723BS 需 r8723bs 模块 + rtl8723bs_nic.bin）"
+        row WARN "无线接口" \
+            "未发现 wlan* —— Wi-Fi 未启用或驱动缺失。出货路径有两条：rtw88 回移模块（rtw88_qm1 + rtw88/rtw8723b_fw.bin，见 /etc/modprobe.d/qm1-rtw88-8723bs.conf）或打了补丁的树外 staging 模块（r8723bs_qm1 + rtlwifi/rtl8723bs_nic.bin）；发行版树内 staging（r8723bs）有永久卡死路径，只能当最后回退"
     fi
 else
     row WARN "网络接口" "除 lo 外无接口"
@@ -470,10 +516,13 @@ else
     row FAIL "可登录账号" "没有 qm1 账号 —— 刷完机没人能登"
 fi
 
-if systemctl is-enabled --quiet qm1-provision.service 2>/dev/null; then
-    row PASS "qm1-provision" "已启用（首启后自动铺 Hermes + headless Chrome）"
+# 铺运行时的入口是 qm1-provision.timer（service 由它触发）。
+# 早先查的是 service 本身是否 enabled；改成 timer 之后 service 不再被 enable，
+# 这条检查必须跟着改，否则永远判成"未启用"。
+if systemctl is-enabled --quiet qm1-provision.timer 2>/dev/null; then
+    row PASS "qm1-provision" "定时器已启用（开机后自动铺 Hermes + headless Chrome）"
 else
-    row WARN "qm1-provision" "未启用 —— 运行时不会自动铺，需手工跑 /usr/local/share/qm1/provision-agent.sh"
+    row WARN "qm1-provision" "定时器未启用 —— 运行时不会自动铺，需手工跑 /usr/local/share/qm1/provision-agent.sh"
 fi
 if [ -f /var/lib/qm1/provision-done ]; then
     row PASS "运行时部署" "已完成（标记 /var/lib/qm1/provision-done）"
@@ -701,7 +750,12 @@ if [ -n "$wlan_mod" ]; then
         esac
     fi
 elif mod_loaded rtw88_qm1 || mod_loaded r8723bs_qm1 || mod_loaded r8723bs; then
-    row WARN "Wi-Fi 驱动" "模块已加载但没有无线接口（udev/modprobe 时序问题，看 dmesg）"
+    # ★ 出货模块已加载却没出无线接口 = FAIL，不是 WARN。
+    #   这正是"模块索引里没有它 / 模块符号残缺 / 树内驱动抢先绑定"的现场表现：
+    #   模块在、设备在、wlan0 不在。以前这里只 warn，于是"Wi-Fi 实际上没起来"
+    #   在自检里显示成一条提醒，运维看一眼就过去了。
+    row FAIL "Wi-Fi 驱动" \
+        "模块已加载但没有无线接口 —— 出货模块装上了却绑不上设备（看 dmesg 里的 rtw88/rtw8723bs；常见原因：模块索引缺它、模块符号残缺 insmod 报 Unknown symbol、或树内 staging 抢先绑走了 SDIO 卡）"
 else
     row WARN "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载"
 fi

@@ -5,11 +5,23 @@ Documentation=file:///usr/local/share/qm1/README-runtime.txt
 # networkd 的 30-wifi.network 标了 RequiredForOnline=yes ⇒ network-online.target
 # 只有在 wlan0 拿到地址之后才达成。
 #
-# After=multi-user.target 是关键：装 Hermes 要下载官方安装器、uv 托管的
-# Python 3.14、Node 运行时，可能要十几分钟。没有这一行的话，这个 oneshot
-# 会被排在 multi-user.target **之前**，机器会看起来"卡在开机画面"。
-# 有了这一行，它在系统已经可用之后才跑 —— 装的时候照样能 SSH 进来。
-After=network-online.target qm1-wifi@wlan0.service multi-user.target
+# ★ 这个单元**不挂在 multi-user.target 上**，而是由 qm1-provision.timer 触发。
+#   原因有两个，都是真机级别的问题：
+#
+#   1) target 会给 Wants=/Requires= 的成员隐式补 After=
+#      （systemd.unit(5)：target units will implicitly complement all configured
+#      dependencies of type Wants= or Requires= with After= dependencies）。
+#      所以只要本单元被 multi-user.target 拉起来，而本单元又要等
+#      network-online.target，就等于"整机开机必须等到网络就绪"——
+#      这台机器没有 RJ45，内置 Wi-Fi 是唯一链路，Wi-Fi 没起来时
+#      整机到不了 multi-user.target ⇒ 没有 SSH、看起来像砖了。
+#
+#   2) 本单元自己是 After=multi-user.target，而它又被 multi-user.target
+#      拉 ⇒ 隐式 After= 与显式 After= 构成**排序环**，systemd 只能
+#      任意断掉一条边，结果不可预期（表现为开机卡住或单元被跳过）。
+#
+#   所以：timer 负责"什么时候开始铺"，本单元只管"网络就绪后再铺"。
+After=network-online.target
 Wants=network-online.target
 # 没有 agent 脚本（裁剪过的镜像）就什么都不做；已经铺好就不重复铺。
 ConditionPathExists=/usr/local/share/qm1/provision-agent.sh
@@ -21,7 +33,5 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/qm1-provision
 # 装 Hermes 要下载官方安装器、uv 托管的 Python 3.14、Node 运行时 —— 慢是正常的。
 TimeoutStartSec=3600
-# 失败不重试到死：标记没写出来，下次开机还会再试一次（ConditionPathExists 仍在）。
-
-[Install]
-WantedBy=multi-user.target
+# 失败不重试到死：标记没写出来，timer 会按 OnUnitInactiveSec 再来一次，
+# 下次开机也会再试一次（ConditionPathExists 仍在）。
