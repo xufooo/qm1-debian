@@ -44,10 +44,28 @@ set -eu
 # shellcheck disable=SC3040
 (set -o pipefail) 2>/dev/null && set -o pipefail || true
 
-log()  { printf '[qm1-install] %s\n' "$*"; }
 warn() { printf '[qm1-install][warn] %s\n' "$*" >&2; }
 die()  { printf '[qm1-install][fail] %s\n' "$*" >&2; exit 1; }
-step() { printf '\n[qm1-install] ===== %s =====\n' "$*"; }
+# ★ 所有输出都走 stderr（stdout 留给将来的机器可读输出）。
+#   原因：stdout 重定向到文件时是块缓冲的，stderr 是无缓冲的 —— 两者混在
+#   同一个文件里时顺序会错乱（stderr 先落盘、stdout 到退出时才刷出来），
+#   排障时看到的"最后一行"根本不是最后发生的事。统一走 stderr 之后，
+#   日志顺序 = 真实顺序。
+log()  { printf '[qm1-install] %s\n' "$*" >&2; }
+step() { printf '\n[qm1-install] ===== %s =====\n' "$*" >&2; }
+
+# ★ 静默退出是排查噩梦：set -e 遇到一条失败命令就直接退出，日志上只留下
+#   "上一条正常输出"，看着像"到这一步就没了"，根本猜不出是哪条命令、
+#   在哪一行失败。这里挂一个 ERR 钩子，把行号和退出码打出来。
+#   （真机上用户只能看到串口日志，这一行就是唯一的线索。）
+#   set -E 让 ERR 钩子在函数与子 shell 里同样生效。
+# shellcheck disable=SC3041  # POSIX sh 没有 -E；本脚本由 bash 执行
+set -E
+# _qm1_rc 先给个初值：shellcheck 看不穿 trap 里的赋值，会把下面那次引用
+# 报成 SC2154（"引用了未赋值的变量"）。
+_qm1_rc=0
+# shellcheck disable=SC3047  # POSIX sh 没有 ERR trap；本脚本由 bash 执行
+trap '_qm1_rc=$?; printf "[qm1-install][fail] 第 %s 行命令失败（退出码 %s）—— 上面的日志停在它前面那条\n" "$LINENO" "$_qm1_rc" >&2; exit "$_qm1_rc"' ERR
 
 ask() {
     # ask <提示> <默认值> → 结果写到 REPLY
@@ -581,7 +599,38 @@ BACKUP_RESTORE_CMD=""
 BACKUP_SRC=""        # 备份数据所在（文件或裸设备）
 BACKUP_BASE=0        # 备份映像的字节 0 在 BACKUP_SRC 里的偏移
 
-avail_bytes() { df -PB1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+avail_bytes() {
+    # 可用空间（字节）。读不到就返回空串，由调用方决定怎么报。
+    #
+    # ★ 这里原来写的是 `df -PB1 --output=avail "$1" 2>/dev/null`：
+    #   -P 是 POSIX 输出格式、--output 是 GNU 扩展；两者一起给，GNU df 会
+    #   直接报错退出（非零），而 2>/dev/null 把那句报错吃掉了 ⇒ 输出为空。
+    #   再加上脚本开了 pipefail：整条管道因此返回非零，而它又被包在
+    #   `need="$(avail_bytes ...)"` 里 ⇒ **set -e 当场退出，一句话都不说** ——
+    #   日志上就只剩"[4/6] 备份"这一行，看着像"走到这里就没了"。
+    # 现在：不用 -P，两种写法依次试；读不到就明确报出来。
+    _ab_row=""
+    # 首选：GNU df 的 --output（Debian 目标系统必然有 coreutils）
+    _ab_row="$(df -B1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9' || true)"
+    case "${_ab_row:-}" in
+        ''|*[!0-9]*) _ab_row="" ;;
+    esac
+    if [ -n "$_ab_row" ]; then
+        printf '%s' "$_ab_row"
+        return 0
+    fi
+    # 退路：POSIX 的 df -Pk（第 4 列是 1K 块的可用数）
+    _ab_row="$(df -Pk "$1" 2>/dev/null \
+        | awk 'NR > 1 && $4 ~ /^[0-9]+$/ { print $4; exit }' || true)"
+    case "${_ab_row:-}" in
+        ''|*[!0-9]*) _ab_row="" ;;
+    esac
+    if [ -n "$_ab_row" ]; then
+        printf '%s' "$(( _ab_row * 1024 ))"
+        return 0
+    fi
+    return 0
+}
 
 # 磁盘层面的判断都放在 /usr/local/lib/qm1/install-lib.sh 里（文件在脚本开头
 # 已经 source 过）。
@@ -722,7 +771,7 @@ if [ "$MODE" = "emmc" ]; then
         || die "备份校验失败（逐分区 sha256 不一致）—— 中止。没有对 $TARGET 做任何写入。
 备份位置：$BACKUP_FILE
 先查这三样，再怀疑别的：
-  1) 备份是不是写在了预期位置（尾部备份是按**字节**偏移写的：$BACKUP_RAW_DEV 偏移 $BACKUP_BASE）；
+  1) 备份是不是写在了预期位置（尾部备份是按**字节**偏移写的：${BACKUP_RAW_DEV} 偏移 ${BACKUP_BASE}）；
   2) 介质是不是掉盘/掉电（U 盘质量、供电）；
   3) 目标盘在备份期间有没有被改过（有人插拔了设备）。
 备份不可信就不要继续 —— 这一步没过就等于没有退路。"

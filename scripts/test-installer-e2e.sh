@@ -606,9 +606,18 @@ if bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_G" \
         --backup-dir "$BACKUP_G" \
         > "$WORK/install-g.log" 2>&1; then
     ok "用例 E2：设备侧安装器的 emmc 分支退出码为 0"
+    _e2_rc=0
 else
-    bad "用例 E2：设备侧安装器的 emmc 分支返回非零"
-    tail -40 "$WORK/install-g.log"
+    _e2_rc=$?
+    bad "用例 E2：设备侧安装器的 emmc 分支返回非零（退出码 ${_e2_rc}）"
+    # ★ 整份日志都打出来，不要只打尾部。
+    #   上一版只 tail -40，结果 shell 的 stdout 是块缓冲的、stderr 是不缓冲的，
+    #   两者的先后顺序在文件里是乱的 ⇒ 出错那几行可能落在前面被 tail 切掉，
+    #   于是"为什么失败"完全看不到。退出码也要打出来 —— 被信号杀掉时
+    #   退出码是 128+信号号（137 = SIGKILL，通常是 OOM）。
+    echo "---- 安装器完整输出（退出码 ${_e2_rc}）----"
+    cat "$WORK/install-g.log"
+    echo "---- 安装器输出结束 ----"
 fi
 
 # (1) 覆盖前必须留下整盘备份 —— 这是"还能装回原版系统"的唯一保障。
@@ -668,7 +677,7 @@ for _g_off in $_g_gpt_offsets; do
     [ "$_g_off" = "$_g_gpt_tail" ] && _g_gpt_tail_ok=1
 done
 if [ "$_g_gpt_tail_ok" = "1" ]; then
-    ok "用例 E2：备份 GPT 落在盘尾（偏移 $_g_gpt_tail）"
+    ok "用例 E2：备份 GPT 落在盘尾（偏移 ${_g_gpt_tail}）"
 else
     bad "用例 E2：盘尾没有备份 GPT（偏移：${_g_gpt_offsets:-}）"
 fi
