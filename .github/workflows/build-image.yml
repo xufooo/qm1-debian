@@ -457,6 +457,26 @@ jobs:
           if grep -qE '^After=.*multi-user\.target' "$ROOT/etc/systemd/system/qm1-provision.service"; then
             echo "::error::qm1-provision.service 还 After=multi-user.target —— 会和 target 的隐式 After= 撞排序环"; exit 1
           fi
+
+          # ★ 开机自检：也要由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
+          #   不能算单元失败（否则整机变 degraded，真故障会被噪声淹没）。
+          [ -f "$ROOT/etc/systemd/system/qm1-selftest.service" ] \
+            || { echo "::error::镜像里没有 qm1-selftest.service"; exit 1; }
+          [ -f "$ROOT/etc/systemd/system/qm1-selftest.timer" ] \
+            || { echo "::error::镜像里没有 qm1-selftest.timer"; exit 1; }
+          [ -x "$ROOT/usr/local/bin/qm1-selftest-report" ] \
+            || { echo "::error::镜像里缺少可执行的 /usr/local/bin/qm1-selftest-report"; exit 1; }
+          ST_LINK="$ROOT/etc/systemd/system/timers.target.wants/qm1-selftest.timer"
+          [ -L "$ST_LINK" ] \
+            || { echo "::error::开机自检定时器没有开机自启（缺 timers.target.wants 链接）"; exit 1; }
+          link_ok "$ST_LINK" \
+            || { echo "::error::qm1-selftest.timer 的 wants 链接是悬空的：$(link_target "$ST_LINK")"; exit 1; }
+          grep -q '^Unit=qm1-selftest.service' "$ROOT/etc/systemd/system/qm1-selftest.timer" \
+            || { echo "::error::qm1-selftest.timer 没有指向 qm1-selftest.service"; exit 1; }
+          grep -q '^TimeoutStartSec=' "$ROOT/etc/systemd/system/qm1-selftest.service" \
+            || { echo "::error::qm1-selftest.service 没有 TimeoutStartSec —— 自检卡住会把单元一直占着"; exit 1; }
+          grep -q '^SuccessExitStatus=1' "$ROOT/etc/systemd/system/qm1-selftest.service" \
+            || { echo "::error::qm1-selftest.service 没有 SuccessExitStatus=1 —— 报告里有 FAIL 行会把整机标成 degraded"; exit 1; }
           # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
           # Debian 13 的 6.12.113+deb13-amd64 实测：
           #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m

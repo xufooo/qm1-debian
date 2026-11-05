@@ -138,6 +138,12 @@ enable_overlay_unit "qm1-bluetooth.service" "qm1-bluetooth.service" "multi-user.
 #   两条链互不阻塞。
 enable_overlay_unit "qm1-provision.timer" "qm1-provision.timer" "timers.target"
 
+# 开机自检：开机后跑一遍硬件体检，报告进 journal，机读 JSON 落盘。
+#
+# 用 timer 触发，和运行时部署同理：挂进 multi-user.target 就等于
+# "整机开机必须等自检跑完"，自检卡住整机就卡住（这个坑踩过两次）。
+enable_overlay_unit "qm1-selftest.timer" "qm1-selftest.timer" "timers.target"
+
 # 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
 # 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
 enable_overlay_unit "qm1-install.service" "qm1-install.service" "multi-user.target"

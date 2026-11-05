@@ -358,6 +358,17 @@ check_content /etc/systemd/system/qm1-provision.timer '^Unit=qm1-provision.servi
 check_absent_content /etc/systemd/system/qm1-provision.service '^After=.*multi-user\.target' \
     "部署单元不能 After=multi-user.target（会和 target 的隐式 After= 撞成排序环）"
 
+# ★ 开机自检：必须由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
+#   不该被当成"单元起不来"（那会让整机变 degraded，把真故障淹没在噪声里）。
+check_exists /etc/systemd/system/qm1-selftest.timer "开机自检的定时器（把自检移出开机关键路径）"
+check_content /etc/systemd/system/qm1-selftest.timer '^Unit=qm1-selftest.service' \
+    "自检定时器指向 qm1-selftest.service"
+check_content /etc/systemd/system/qm1-selftest.service '^TimeoutStartSec=' \
+    "自检单元要有超时（自检要读 dmesg/iw，卡住不能一直占着）"
+check_content /etc/systemd/system/qm1-selftest.service '^SuccessExitStatus=1' \
+    "自检有 FAIL 行时不算单元失败（那是报告内容，不是单元起不来）"
+check_exists /usr/local/bin/qm1-selftest-report "开机自检的包装脚本（表格进 journal，JSON 落盘）"
+
 echo "-- 伪文件系统应为空 --"
 for d in /dev /proc /sys /run; do
     n="$(debugfs -R "ls -l $d" "$IMG" 2>/dev/null | grep -cv '^d' || true)"

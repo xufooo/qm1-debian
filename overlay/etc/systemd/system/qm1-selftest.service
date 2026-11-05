@@ -1,9 +1,20 @@
 [Unit]
 Description=QM1 hardware self-check
+Documentation=file:/usr/local/lib/qm1/drv-selfcheck.sh
 After=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/qm1-selftest
+# 自检脚本有 FAIL 行时返回 1 —— 那是"体检报告里有 FAIL 项"，不是单元起不来；
+# 真正的起不来会是别的退出码（脚本找不到、没法执行等）。所以把 1 也算成功，
+# 结论看 journal 里的报告和 /var/lib/qm1/selftest-last.json。
+#
+# 为什么不让它一失败就让整机变 degraded：自检是"体检"，不是"看门狗"。
+# 它要读 dmesg、/sys、iw，任何一样卡住都会把结论变成噪声；把它降级成
+# 一份报告（journal + JSON），故障现场才能被安静地读出来。
+SuccessExitStatus=1
+# 自检要读 dmesg、/sys、iw、跑 iw link —— 万一卡住，不能一直占着这个单元。
+TimeoutStartSec=120
+ExecStart=/usr/local/bin/qm1-selftest-report
 StandardOutput=journal
 StandardError=journal

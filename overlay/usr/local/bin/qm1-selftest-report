@@ -1,0 +1,32 @@
+#!/bin/sh
+# ============================================================================
+# qm1-selftest-report — 开机自检的包装（开机自检单元用）
+#
+# 只跑一次自检，然后把结果分两路：
+#   * 原样打到 stdout —— 进 journal，人能直接看；
+#   * 其中以 "{" 开头的那一行（机读 JSON）落到
+#     /var/lib/qm1/selftest-last.json —— 验收时可以直接取，不用重新跑。
+#
+# 为什么不让单元直接跑 qm1-selftest：
+#   * 单元的 stdout 进 journal，但 JSON 那行会被淹没在表格里；
+#   * 验收清单里"设备自己查过了吗"这一条需要一个能落盘的结论。
+#
+# 退出码沿用自检脚本：0 = 没有 FAIL 行，1 = 有 FAIL 行。
+#   单元那边用 SuccessExitStatus=1 把 1 也当成功 —— 报告里有 FAIL 项
+#   是这台机器的事实，不是"这个单元起不来"。真正的起不来会是别的退出码。
+# ============================================================================
+set -u
+
+mkdir -p /var/lib/qm1
+
+_out="$(/usr/local/bin/qm1-selftest --json 2>&1)"
+_rc=$?
+
+printf '%s\n' "$_out"
+
+# JSON 是自检脚本在表格之后追加的一行，形如 {"pass":..,"warn":..,"fail":..}
+# 用 grep 取出来写文件。这里不用 grep -q（-q 命中即退出会给上游发 SIGPIPE，
+# 在 pipefail 下会误判成失败），直接重定向落盘即可。
+printf '%s\n' "$_out" | grep '^{' > /var/lib/qm1/selftest-last.json 2>/dev/null || true
+
+exit "$_rc"

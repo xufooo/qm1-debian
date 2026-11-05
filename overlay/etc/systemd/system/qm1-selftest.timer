@@ -1,0 +1,21 @@
+[Unit]
+Description=Run the QM1 hardware self-check once after boot
+Documentation=file:/usr/local/lib/qm1/drv-selfcheck.sh
+
+[Timer]
+# 开机 2 分钟后跑一次：那时候 multi-user.target 早就到了（单元自己
+# After=multi-user.target），Wi-Fi 也该关联上了 —— 自检里"无线接口
+# 关联"那一行才有意义。
+#
+# 为什么用 timer 而不是把单元直接挂进 multi-user.target：
+#   target 会给 Wants= 成员隐式补 After=（systemd.unit(5)），所以挂上去
+#   就等于"整机开机必须等自检跑完"。自检要读 dmesg、/sys、iw，哪一样卡住
+#   都会把整机拖住 —— 这个坑我们已经踩过两次（Wi-Fi 单元、蓝牙单元）。
+#   挂到 timers.target 上就没有这个问题。
+OnBootSec=2min
+AccuracySec=30s
+Unit=qm1-selftest.service
+Persistent=false
+
+[Install]
+WantedBy=timers.target
