@@ -84,6 +84,21 @@ hook 会临时挂 `<suite>-proposed-updates` 精确安装，装完即撤，
 镜像**自带引导链**：ESP 里有 `BOOTIA32.EFI` + `BOOTX64.EFI` + 内核 + initrd + `grub.cfg`，
 写进 eMMC 就能脱离 U 盘自启动。安装按「先 U 盘试跑 → 再动 eMMC」的顺序做。
 
+### 两种发布形态
+
+| 产物 | 是什么 | 怎么用 |
+|---|---|---|
+| `qm1-disk.img` | **原始整盘镜像**（GPT：p1 ESP + p2 根） | 写到 U 盘当启动盘，或用 `install-qm1.sh` 写进 eMMC |
+| `qm1-installer.img` | **安装包**（同样的分区，但 ESP 的菜单换成"装到 eMMC"） | 写进 U 盘 → 开机 → 选第 ① 项 → 脚本自动备份、写入、校验 |
+
+两个镜像内容一致，区别只有 ESP 里的 `grub.cfg`：
+
+- `qm1-disk.img` 里的菜单 = 直接启动已装好的系统；
+- `qm1-installer.img` 里的菜单 = ① 安装到 eMMC（备份 → 写入 → 校验）
+  ② 试用系统（不写盘，可先跑驱动自检） ③ GRUB 命令行（救援）。
+  它还额外带一份 `grub-normal.cfg`，安装脚本装完会把它拷回目标 ESP，
+  所以装好之后从 eMMC 启动看到的仍是普通菜单。
+
 ### 第 1 步：先在 U 盘上试跑（不碰 eMMC）
 
 ```bash
@@ -93,6 +108,30 @@ sudo dd if=build/out/qm1-disk.img of=/dev/sdX bs=4M conv=fsync status=progress
 
 插好 U 盘 → BIOS 里选 U 盘启动 → GRUB 菜单选 `QM1 Debian 13 (64-bit amd64)`。
 能进系统并跑通自检，说明引导链和驱动都成立，再考虑刷 eMMC。
+
+### 安装包形态：一键装到 eMMC（推荐路径）
+
+```bash
+# 把安装介质写到 U 盘
+sudo dd if=build/out/qm1-installer.img of=/dev/sdX bs=4M conv=fsync status=progress
+```
+
+开机 → BIOS 选 U 盘启动 → GRUB 里选 `① 安装 QM1 Debian 13 到 eMMC`。
+系统会：
+
+1. 确认目标 `/dev/mmcblk0`、当前不是从 eMMC 启动（否则拒绝重装）；
+2. **先备份**——空间够就整盘备份 + SHA-256；不够就只备份分区表与前 16 MiB
+   并明确警告（32 GiB eMMC 的整盘备份通常塞不进 U 盘，
+   想留完整原件请先在别处 `dd` 一份）；
+3. 在 eMMC 上写分区表（p1 ESP / p2 根，根分区撑满整盘），逐分区 `dd` 写入；
+4. 把目标 ESP 的 `grub.cfg` 换回正常菜单；
+5. 逐分区比对 SHA-256；
+6. 提示拔 U 盘、重启、从 eMMC 启动。
+
+后台跑法（不想看着屏幕）：在 GRUB 里按 `e` 编辑第 ① 项，在内核参数后加
+`systemd.unit=multi-user.target`，或者直接看串口日志
+（`console=ttyS0,115200n8`，1.3 GHz 的 Atom 上整盘备份 + 6 GiB 拷贝 + 两遍
+SHA-256 大约十几分钟）。
 
 ### 第 2 步：备份 eMMC（硬前置，不可跳过）
 
@@ -117,6 +156,7 @@ sudo bash scripts/install-qm1.sh \
 > U 盘跳板（`\EFI\BOOT\BOOTIA32.EFI` + `grub.cfg` 指向 eMMC 根 UUID）引导，
 > 或在 GRUB 里 `set root=UUID=<root_uuid>` 后 `linux /boot/vmlinuz-*`。
 > 根 UUID 见 `build/out/manifest.txt` 的 `root_uuid=`。
+> 安装介质自带跳板：它的 ESP 里就有 `BOOTIA32.EFI`，装完拔盘前留在 U 盘上即可当救援盘用。
 
 ### 第 4 步：首次开机与运行时安装
 
