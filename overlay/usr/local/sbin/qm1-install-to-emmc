@@ -106,6 +106,14 @@ ROOT_MIB=$(( TARGET_MIB - ROOT_START_MIB - 1 ))
 [ "$ROOT_MIB" -gt 0 ] || die "目标盘太小：${TARGET_MIB} MiB"
 
 log "在 $TARGET 上写分区表：p1 ESP ${ESP_MIB} MiB（EFI System），p2 根分区 ${ROOT_MIB} MiB（Linux）"
+
+# 写之前先确认目标盘上没有已挂载的分区（否则复制会失败或写坏数据）
+for p in $(lsblk -ndo NAME,TYPE "$TARGET" 2>/dev/null | awk '$2=="part"{print $1}'); do
+    if findmnt -rn "/dev/$p" >/dev/null 2>&1; then
+        die "目标分区 /dev/$p 还挂着，先卸载再安装"
+    fi
+done
+
 SPEC="$(mktemp)"
 trap 'rm -f "$SPEC"' EXIT
 {
@@ -115,9 +123,23 @@ trap 'rm -f "$SPEC"' EXIT
 } > "$SPEC"
 LC_ALL=C sfdisk "$TARGET" < "$SPEC" >/dev/null
 
-PART1="${TARGET}p1"
-PART2="${TARGET}p2"
+# 让内核重新读分区表，然后等分区节点出现（mmcblk 用 p1/p2，nvme 之类用 1/2，别写死）
+partprobe "$TARGET" 2>/dev/null || true
+udevadm settle 2>/dev/null || true
+PART1=""
+PART2=""
+for _ in $(seq 1 20); do
+    mapfile -t NEWPARTS < <(lsblk -ndo NAME,TYPE "$TARGET" 2>/dev/null | awk '$2=="part"{print $1}')
+    if [ "${#NEWPARTS[@]}" -ge 2 ]; then
+        PART1="/dev/${NEWPARTS[0]}"
+        PART2="/dev/${NEWPARTS[1]}"
+        break
+    fi
+    sleep 0.5
+done
+[ -n "$PART1" ] && [ -n "$PART2" ] || die "分区设备没出现（等 10 秒仍未看到两个分区）"
 [ -b "$PART1" ] && [ -b "$PART2" ] || die "分区设备没出现：$PART1 / $PART2"
+log "目标分区：$PART1（ESP） / $PART2（根）"
 
 # ---------- 复制内容 ----------
 # 根分区当前是挂载状态：先改只读，避免复制过程中有写入导致内容不一致
@@ -185,14 +207,26 @@ else
     rc=1
 fi
 
-{
-    echo "installed_at=$(date -Is)"
-    echo "target=$TARGET"
-    echo "source=$SRC_DISK"
-    echo "esp_sha256_at_write=$DST_ESP_HASH"
-    echo "rootfs_sha256_at_write=$DST_ROOT_HASH"
-    echo "backup=${BACKUP_FILE:-none}"
-} > /etc/qm1-installed-to-emmc 2>/dev/null || true
+# 安装记录要落在**目标 eMMC 的根文件系统**里（当前跑着的根是安装介质，
+# 直接写 /etc 只会留在 U 盘上）
+DST_ROOT_MNT="$(mktemp -d)"
+if mount "$PART2" "$DST_ROOT_MNT" 2>/dev/null; then
+    {
+        echo "installed_at=$(date -Is)"
+        echo "target=$TARGET"
+        echo "source=$SRC_DISK"
+        echo "esp_sha256_at_write=$DST_ESP_HASH"
+        echo "rootfs_sha256_at_write=$DST_ROOT_HASH"
+        echo "backup=${BACKUP_FILE:-none}"
+    } > "$DST_ROOT_MNT/etc/qm1-installed-to-emmc" 2>/dev/null \
+        || warn "安装记录写入目标根分区失败"
+    sync
+    umount "$DST_ROOT_MNT"
+    log "安装记录已写入目标根分区：/etc/qm1-installed-to-emmc"
+else
+    warn "挂载目标根分区失败 —— 安装记录没能写进 eMMC"
+fi
+rmdir "$DST_ROOT_MNT" 2>/dev/null || true
 
 echo
 echo "================================================================"
