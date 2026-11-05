@@ -332,19 +332,25 @@ jobs:
 
 
   # ---------------------------------------------------------------------------
-  # 上游 rtw88 整树回移（本质修好路径，探针作业）
+  # 上游 rtw88 整树回移（本质修好路径）—— **这条就是出货的那条路**
   #
   # 上游把 rtw88 大重构了（main.c 拆成 fw.c/efuse.c/mac80211.c/... ，8723b 芯片
   # 驱动挪到新核心 API），所以「6.12 头文件 + 上游芯片文件」拼不起来。要真正用
   # 上游驱动（而不是 vendor 树），必须把整棵 rtw88 从同一个版本一起编成树外模块。
   #
-  # 这个作业只回答一件事：上游整树能不能在目标内核（6.12）上编过。
-  # 编不过不会让流水线变红（continue-on-error），产出的日志用来定位缺哪个 API。
+  # 这个作业问的是：出货的那棵树能不能在目标内核（6.12）上编过。
+  #
+  # 它**必须让流水线变红** —— build-image.yml 里出货的模块就是用
+  # --source upstream-full 编的；这里编不过，那边会回退到 staging 模块，
+  # 而 staging 那个 r8723bs 有已知的永久卡死路径。宁可在这里红，也不要
+  # 到镜像守卫那一层才红（那时候离原因已经很远了）。
+  #
+  # 补丁本身能不能打上，由 lint workflow 里的
+  # scripts/test-upstream-patches.sh 单独把关（那一步失败就是这里失败）。
   # ---------------------------------------------------------------------------
   rtw88-upstream:
-    name: rtw88 full upstream tree (probe)
+    name: rtw88 full upstream tree (shipping path)
     runs-on: ubuntu-latest
-    continue-on-error: true
     defaults:
       run:
         shell: bash
