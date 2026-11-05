@@ -54,6 +54,20 @@ enable_unit() {
                "$TARGET/etc/systemd/system/$_dir/$_unit"
         echo "[hook01] 已启用 $_unit（$_dir）: $(ls -l "$TARGET/etc/systemd/system/$_dir/$_unit" 2>&1)"
     fi
+    # ★ 启用失败必须响亮地失败，不能悄悄跳过。
+    #   这六个单元（ssh / oomd / networkd / resolved / timesyncd / bluetooth）
+    #   每一个没起来都会让"开机即用"缺一条腿：没有 ssh 就登不进，
+    #   没有 networkd 就没有地址、没有 resolved 就没有 DNS、
+    #   没有 timesyncd 时钟停在 1970、TLS 全废。
+    #   原来这里失败只留一句"没打印已启用"，构建照样绿 ⇒ 刷上去才发现。
+    if [ ! -f "$TARGET/lib/systemd/system/$_unit" ]; then
+        echo "[hook01][fail] 镜像里没有 $_unit 的单元文件（/lib/systemd/system/$_unit）" >&2
+        exit 1
+    fi
+    if [ ! -e "$TARGET/etc/systemd/system/$_dir/$_unit" ]; then
+        echo "[hook01][fail] $_unit 没有被启用（$TARGET/etc/systemd/system/$_dir/$_unit 不存在）" >&2
+        exit 1
+    fi
 }
 
 enable_unit ssh.service multi-user.target

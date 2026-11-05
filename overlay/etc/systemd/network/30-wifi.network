@@ -11,4 +11,11 @@ Name=wlan* wlp*
 DHCP=yes
 IPv6AcceptRA=yes
 Priority=10
-RequiredForOnline=yes
+# ★ 故意不写 RequiredForOnline=yes（默认就是 no）。
+#   RequiredForOnline=yes 的语义是"这条链路必须就绪，多用户目标才算达成"，
+#   它只有配合 systemd-networkd-wait-online 才起作用 —— 而那个服务我们
+#   故意从 multi-user.target 上摘掉了（这台机器没有 RJ45，Wi-Fi 一旦没连上
+#   整机会白等 120 秒；而且 Wi-Fi 失败绝不能挡开机）。
+#   如果这里留着 yes，哪天有人把 wait-online 加回来，开机就会重新变成
+#   "Wi-Fi 连不上 ⇒ 没有 SSH ⇒ 看起来像砖了"。留 no 是把这条陷阱拆掉。
+RequiredForOnline=no

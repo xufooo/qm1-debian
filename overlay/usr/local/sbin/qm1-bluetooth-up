@@ -24,11 +24,17 @@
 
 set -u
 
+# ★ 失败证据要能活过重启。
+#   原来只写 /run（tmpfs）⇒ 机器一重启，唯一的线索就没了 —— 而蓝牙这件事
+#   恰恰是"要现场复现才看得见"的问题。现在把内容写进 /var/lib/qm1/，
+#   /run 下留一个指向它的软链，老路径照旧能读。
+MARKER_PERSIST=/var/lib/qm1/bluetooth-failed
 MARKER=/run/qm1-bluetooth.failed
 LOG_TAG=qm1-bluetooth
 
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; printf '%s\n' "$*" >&2 || true; }
 
+mkdir -p /var/lib/qm1 2>/dev/null || true
 rm -f "$MARKER"
 
 # 这台机有没有暴露蓝牙的 ACPI HID？
@@ -53,8 +59,9 @@ write_marker() {
         echo "firmware=$( [ -f /lib/firmware/rtl_bt/rtl8723bs_fw.bin ] && echo present || echo missing )"
         echo "serdev_driver=$( [ -d /sys/bus/serio/drivers/hci_uart_h5 ] && echo registered || echo absent )"
         echo "hint=$1"
-    } >"$MARKER"
-    chmod 0644 "$MARKER" 2>/dev/null || true
+    } >"$MARKER_PERSIST"
+    chmod 0644 "$MARKER_PERSIST" 2>/dev/null || true
+    ln -sf "$MARKER_PERSIST" "$MARKER" 2>/dev/null || true
 }
 
 if [ -z "$acpi_hid" ] && [ ! -e /etc/qm1/bluetooth-force ]; then

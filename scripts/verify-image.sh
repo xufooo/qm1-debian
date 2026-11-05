@@ -173,6 +173,22 @@ check_link /etc/systemd/system/wpa_supplicant.service /dev/null \
 # 做（等 DNS + 等时钟），那才是装 Hermes/Chrome 之前真正需要的。
 check_absent /etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service \
     "wait-online 没有挂在 multi-user.target 上（网络不通不挡开机）"
+# ★ 这六个单元每一个没被 enable，"开机即用"就缺一条腿：
+#   ssh      → 登不进
+#   oomd     → 2 GiB 机器没有内存压力管理，随手 OOM
+#   networkd → 没有地址（Wi-Fi 是唯一链路）
+#   resolved → 没有 DNS（也就没有时间同步 ⇒ 时钟停在 1970 ⇒ TLS 全废）
+#   timesyncd→ 时钟停在 1970
+#   bluetooth→ 蓝牙控制器不出现
+#   hooks/customize01-base.sh 的 enable_unit 现在会在启用失败时直接失败，
+#   这里再从镜像这一侧独立核对一遍：两边都不靠"我以为启用了"。
+for _u in ssh.service systemd-oomd.service systemd-networkd.service \
+         systemd-resolved.service bluetooth.service; do
+    check_exists "/etc/systemd/system/multi-user.target.wants/$_u" \
+        "$_u 已启用"
+done
+check_exists /etc/systemd/system/timers.target.wants/systemd-timesyncd.service \
+    "systemd-timesyncd.service 已启用"
 # ★ 首启标记绝不能随镜像出厂。
 #   qm1-firstboot.service 的启动条件是 ConditionPathExists=!/var/lib/qm1/firstboot-done
 #   —— 标记在，条件就不成立，整个单元被 systemd 跳过，首启配置（Wi-Fi 凭据、

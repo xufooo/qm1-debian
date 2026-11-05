@@ -415,10 +415,15 @@ else
     row WARN "蓝牙 ACPI" "没有 OBDA8723/OBDA0623 ⇒ DSDT 没把蓝牙 UART 暴露出来，镜像因此**故意没有**加载 hci_uart"
 fi
 # 没加载也要留痕：原因写在标记文件里，别让它悄悄消失
-if [ -f /run/qm1-bluetooth.failed ]; then
+# ★ 先看持久的那份（/var/lib/qm1/bluetooth-failed），再看 /run 下那个软链 ——
+#   机器重启之后 /run 被清空，但蓝牙这个故障恰恰是要"事后复现"的，
+#   证据只留在 tmpfs 里等于没有证据。
+if [ -f /var/lib/qm1/bluetooth-failed ]; then
+    row INFO "蓝牙失败标记" "$(tr '\n' ' ' < /var/lib/qm1/bluetooth-failed)"
+elif [ -f /run/qm1-bluetooth.failed ]; then
     row INFO "蓝牙失败标记" "$(tr '\n' ' ' < /run/qm1-bluetooth.failed)"
 else
-    row INFO "蓝牙失败标记" "没有 /run/qm1-bluetooth.failed（蓝牙这一项没有失败记录）"
+    row INFO "蓝牙失败标记" "没有蓝牙失败记录（/var/lib/qm1/bluetooth-failed 与 /run/qm1-bluetooth.failed 都不存在）"
 fi
 
 if [ -d /sys/class/rtc ]; then
