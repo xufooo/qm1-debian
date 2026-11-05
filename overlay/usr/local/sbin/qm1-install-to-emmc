@@ -753,6 +753,7 @@ if [ "$MODE" = "emmc" ]; then
             BACKUP_SRC="$BACKUP_FILE"
             BACKUP_BASE=0
             BACKUP_RESTORE_CMD="dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync"
+            BACKUP_WHERE="目录 ${BACKUP_STORE} 里的文件 ${BACKUP_FILE}（偏移 0）"
             ;;
         raw:*)
             BACKUP_RAW_DEV="${BACKUP_METHOD#raw:}"
@@ -770,14 +771,25 @@ if [ "$MODE" = "emmc" ]; then
             BACKUP_SRC="$BACKUP_RAW_DEV"
             # 恢复命令也必须带偏移 —— 备份不在文件里，而在介质的尾部。
             BACKUP_RESTORE_CMD="dd if=\"$BACKUP_RAW_DEV\" of=\"$TARGET\" bs=4M seek=\"$BACKUP_BASE\" oflag=seek_bytes conv=notrunc,fsync"
+            BACKUP_WHERE="介质 ${BACKUP_RAW_DEV} 的尾部未分区空间（字节偏移 ${BACKUP_BASE}）"
             ;;
     esac
 
+    # ★ 这段文案在两种备份分支下都可能被用到，所以它只能引用
+    #   在**两个分支里都赋值过**的变量。
+    #   之前这里写的是 ${BACKUP_RAW_DEV} —— 那个变量只在 raw:* 分支
+    #   赋值，dir:* 分支（--backup-dir，也就是 CI 与真机最常用的那条路）
+    #   下根本没定义 ⇒ 脚本开了 set -u ⇒ 这段"备份校验失败"的解释
+    #   在真正要显示的时候自己先崩了：
+    #     line 777: BACKUP_RAW_DEV: unbound variable
+    #   用户看到的只有一句 shell 报错，既不知道是备份校验失败，
+    #   也不知道"没有对目标做任何写入"。
+    #   —— 一条用来解释失败的文案自己失败，等于没写。
     verify_backup_partitions \
         || die "备份校验失败（逐分区 sha256 不一致）—— 中止。没有对 $TARGET 做任何写入。
-备份位置：$BACKUP_FILE
+备份位置：${BACKUP_WHERE:-未知}
 先查这三样，再怀疑别的：
-  1) 备份是不是写在了预期位置（尾部备份是按**字节**偏移写的：${BACKUP_RAW_DEV} 偏移 ${BACKUP_BASE}）；
+  1) 备份是不是写在了预期位置（尾部备份是按**字节**偏移写的：${BACKUP_BASE}）；
   2) 介质是不是掉盘/掉电（U 盘质量、供电）；
   3) 目标盘在备份期间有没有被改过（有人插拔了设备）。
 备份不可信就不要继续 —— 这一步没过就等于没有退路。"

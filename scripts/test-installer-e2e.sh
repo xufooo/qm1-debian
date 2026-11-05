@@ -676,11 +676,15 @@ if [ "${_g_esp_start:-}" = "2048" ]; then
 else
     bad "用例 E2：ESP 的起始扇区是 ${_g_esp_start:-?}（应该是 2048；sfdisk 行：${_g_esp_line:-?}）"
 fi
-# 交叉核对（只作参考，不参与判定）：lsblk 的 START 是**字节**，1 MiB = 1048576。
-_g_esp_start_bytes="$(lsblk -bnro START,PARTTYPE "$LOOP_TGT_G" 2>/dev/null \
+# 交叉核对（只作参考，不参与判定）：lsblk 的 START 列**永远是扇区**，
+# 不是字节 —— 即使加了 -b（那个开关只影响 SIZE 等尺寸列）。
+# ESP 起于 1 MiB ⇒ 2048 个 512 字节扇区。
+# 之前这里以为 START 是字节、拿 1048576 去比，于是每次都报一条
+# "与 sfdisk 不一致，值得看一眼" 的假警告。
+_g_esp_start_sectors="$(lsblk -bnro START,PARTTYPE "$LOOP_TGT_G" 2>/dev/null \
     | awk -v t="$ESP_GUID" 'tolower($2) == t { print $1; exit }')"
-if [ -n "${_g_esp_start_bytes:-}" ] && [ "$_g_esp_start_bytes" != "1048576" ]; then
-    warn "用例 E2：lsblk 报的 ESP 起始是 ${_g_esp_start_bytes} 字节（应为 1048576）—— 与 sfdisk 不一致，值得看一眼"
+if [ -n "${_g_esp_start_sectors:-}" ] && [ "$_g_esp_start_sectors" != "2048" ]; then
+    warn "用例 E2：lsblk 报的 ESP 起始是 ${_g_esp_start_sectors} 扇区（应为 2048）—— 与 sfdisk 不一致，值得看一眼"
 fi
 
 # (3) 整盘上只能有两份 GPT 头（主表 + 盘尾备份表），不能有第三份留在中间。
