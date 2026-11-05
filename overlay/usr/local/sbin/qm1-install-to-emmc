@@ -804,24 +804,39 @@ rmdir "$DST_ROOT_MNT" 2>/dev/null || true
 #
 # 原来这一步整个没有 —— 刷完 eMMC 后，固件里没有指向新系统的启动项，
 # 结果就是"装完了，但开机还是进原来的系统（或没有系统）"。
-# ESP 上有两条可引导文件（make-esp.sh 写入）：
-#   \EFI\BOOT\BOOTX64.EFI（64 位）、\EFI\BOOT\BOOTIA32.EFI（32 位兜底）
-# 优先登记 64 位那条；efibootmgr 不可用时靠 \EFI\BOOT\ 兜底路径 + 手工命令。
+#
+# 登记**哪一个**引导器，这里有个容易踩的坑：
+#   ESP 上有两条可引导文件（make-esp.sh 写入）：
+#     \EFI\BOOT\BOOTIA32.EFI —— PE32（32 位）
+#     \EFI\BOOT\BOOTX64.EFI  —— PE32+（64 位）
+#   **IA32 的固件根本加载不了 PE32+ 的 BOOTX64.EFI**，而 64 位固件按 UEFI
+#   规范必须能加载 IA32 应用 ⇒ 只有 BOOTIA32.EFI 是"两种固件都能加载"的那条。
+#   这台机器的固件就是 32 位 IA32（ASUS 给这批平板点的 EDK 只支持 IA32），
+#   所以优先登记 BOOTIA32.EFI；ESP 里没有它才退回 BOOTX64.EFI。
+#   之前这里优先登记 BOOTX64.EFI：在 32 位固件上登记出来的是一条**加载不了**
+#   的启动项，等于白登记。
+# efibootmgr 不可用时靠 \EFI\BOOT\ 兜底路径 + 手工命令。
 EFI_ENTRY_DONE="no"
+EFI_LOADER=""
 if [ -e /sys/firmware/efi/efivars ]; then
     if command -v efibootmgr >/dev/null 2>&1; then
         _esp_mnt="$(mktemp -d)"
         if mount "$PART1" "$_esp_mnt" 2>/dev/null; then
-            if [ -f "$_esp_mnt/EFI/BOOT/BOOTX64.EFI" ]; then
+            if [ -f "$_esp_mnt/EFI/BOOT/BOOTIA32.EFI" ]; then
+                EFI_LOADER='\EFI\BOOT\BOOTIA32.EFI'
+            elif [ -f "$_esp_mnt/EFI/BOOT/BOOTX64.EFI" ]; then
+                EFI_LOADER='\EFI\BOOT\BOOTX64.EFI'
+            fi
+            if [ -n "$EFI_LOADER" ]; then
                 if efibootmgr -c -d "$TARGET" -p "$PART1_NO" -L "QM1 Debian" \
-                        -l '\EFI\BOOT\BOOTX64.EFI' 2>/dev/null; then
-                    log "已登记 UEFI 启动项：QM1 Debian（\EFI\BOOT\BOOTX64.EFI，磁盘 $TARGET 分区 p$PART1_NO）"
+                        -l "$EFI_LOADER" 2>/dev/null; then
+                    log "已登记 UEFI 启动项：QM1 Debian（$EFI_LOADER，磁盘 $TARGET 分区 p$PART1_NO）"
                     EFI_ENTRY_DONE="yes"
                 else
                     warn "efibootmgr 登记启动项失败（可以稍后手工执行，见下方提示）"
                 fi
             else
-                warn "目标 ESP 里没有 \EFI\BOOT\BOOTX64.EFI —— 无法登记启动项"
+                warn "目标 ESP 里没有 \EFI\BOOT\BOOTIA32.EFI / BOOTX64.EFI —— 无法登记启动项"
             fi
             umount "$_esp_mnt" 2>/dev/null || true
         else
@@ -837,9 +852,10 @@ fi
 if [ "$EFI_ENTRY_DONE" != "yes" ]; then
     cat <<EOF
   手工登记（进入已装好的系统后执行，或从 U 盘的安装环境执行）：
-    efibootmgr -c -d $TARGET -p $PART1_NO -L "QM1 Debian" -l '\\EFI\\BOOT\\BOOTX64.EFI'
+    efibootmgr -c -d $TARGET -p $PART1_NO -L "QM1 Debian" -l '\\\\EFI\\\\BOOT\\\\BOOTIA32.EFI'
     efibootmgr -o 1        # 可选：把它设为第一启动项
-  兜底：\\EFI\\BOOT\\BOOTX64.EFI 是固件的可引导路径，多数固件会自动找到它。
+  兜底：\\\\EFI\\\\BOOT\\\\BOOTIA32.EFI 是固件的可引导路径，多数固件会自动找到它
+  （BOOTX64.EFI 只有在固件是 64 位时才加载得了，别优先用它）。
 EOF
 fi
 

@@ -22,8 +22,9 @@
 #
 # 关键约束：
 #   * 镜像自带 ESP（引导器 + 内核 + initrd + grub.cfg），写完即可脱离 U 盘自启动；
-#   * 写完会用 efibootmgr 登记 \EFI\BOOT\BOOTX64.EFI（固件不扫内部存储
-#     的 \EFI\BOOT 时仍需保留 U 盘跳板，见 README 的救援一节）；
+#   * 写完会用 efibootmgr 登记 \EFI\BOOT\BOOTIA32.EFI（IA32 与 64 位固件
+#     都能加载它；BOOTX64.EFI 是 PE32+，这台机器的 32 位固件加载不了）；
+#     固件不扫内部存储的 \EFI\BOOT 时仍需保留 U 盘跳板，见 README 的救援一节）；
 #   * 备份与 sha256 校验是硬前置，不可跳过（--no-backup 仅用于已确认无数据的盘）。
 #
 # 另一条安装路径：从 U 盘启动安装介质，选菜单 ①「安装到 eMMC」。
@@ -198,30 +199,55 @@ fi
 # ---------- 6. 登记 UEFI 启动项 ----------
 # 写完盘还不够：这台机器的固件不一定扫描内部存储的 \EFI\BOOT，
 # 登记一条 UEFI 启动项才稳。找不到 ESP 就明说，别让人以为装好了。
+#
+# 登记**哪一个**引导器有个容易踩的坑：ESP 上有两条（make-esp.sh 写入）
+#   \EFI\BOOT\BOOTIA32.EFI —— PE32（32 位）
+#   \EFI\BOOT\BOOTX64.EFI  —— PE32+（64 位）
+# **IA32 固件加载不了 PE32+ 的 BOOTX64.EFI**；而 64 位固件按 UEFI 规范
+# 必须能加载 IA32 应用 ⇒ 只有 BOOTIA32.EFI 是"两种固件都能加载"的那条。
+# 这台机器的固件就是 32 位 IA32 ⇒ 优先登记 BOOTIA32.EFI。
+# （之前这里写死 BOOTX64.EFI：在 32 位固件上登记出来的是一条加载不了的启动项。）
 ESP_NO=""
+ESP_PART=""
 ESP_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 while read -r _part _ptype _pno; do
     [ -n "${_ptype:-}" ] || continue
     case "$_ptype" in
-        "$ESP_TYPE"|"${ESP_TYPE^^}") ESP_NO="$_pno"; break ;;
+        "$ESP_TYPE"|"${ESP_TYPE^^}") ESP_NO="$_pno"; ESP_PART="/dev/$_part"; break ;;
     esac
 done < <(lsblk -nro NAME,PARTTYPE,PARTN "$TARGET" 2>/dev/null || true)
+
+# 到目标 ESP 上看一眼实际有哪些引导器（只读挂载）
+ESP_LOADER=""
+if [ -n "$ESP_PART" ]; then
+    _esp_mnt="$(mktemp -d)"
+    if mount -o ro "$ESP_PART" "$_esp_mnt" 2>/dev/null; then
+        if [ -f "$_esp_mnt/EFI/BOOT/BOOTIA32.EFI" ]; then
+            ESP_LOADER='\EFI\BOOT\BOOTIA32.EFI'
+        elif [ -f "$_esp_mnt/EFI/BOOT/BOOTX64.EFI" ]; then
+            ESP_LOADER='\EFI\BOOT\BOOTX64.EFI'
+        fi
+        umount "$_esp_mnt" 2>/dev/null || true
+    fi
+    rmdir "$_esp_mnt" 2>/dev/null || true
+fi
+[ -n "$ESP_LOADER" ] || ESP_LOADER='\EFI\BOOT\BOOTIA32.EFI'   # 兜底：IA32 那条两边固件都能加载
 
 if [ -z "$ESP_NO" ]; then
     warn "在 $TARGET 上找不到 EFI System 分区（PARTTYPE $ESP_TYPE）—— 跳过 EFI 启动项登记。"
     warn "如果开机后找不到系统，请用 U 盘跳板引导，或手工执行："
-    warn "  efibootmgr -c -d $TARGET -p <ESP分区号> -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+    warn "  efibootmgr -c -d $TARGET -p <ESP分区号> -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTIA32.EFI'"
 elif ! command -v efibootmgr >/dev/null 2>&1; then
     warn "没有 efibootmgr（apt install efibootmgr）—— 跳过 EFI 启动项登记。"
-    warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+    warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '$ESP_LOADER'"
 elif [ ! -d /sys/firmware/efi/efivars ]; then
     warn "当前不是以 UEFI 方式启动（没有 /sys/firmware/efi/efivars）—— 跳过 EFI 启动项登记。"
 else
-    if efibootmgr -c -d "$TARGET" -p "$ESP_NO" -L "QM1 Debian" -l '\EFI\BOOT\BOOTX64.EFI'; then
-        log "已登记 UEFI 启动项：QM1 Debian → \\EFI\\BOOT\\BOOTX64.EFI"
+    if efibootmgr -c -d "$TARGET" -p "$ESP_NO" -L "QM1 Debian" -l "$ESP_LOADER"; then
+        log "已登记 UEFI 启动项：QM1 Debian → $ESP_LOADER"
     else
         warn "efibootmgr 登记失败 —— 请手工执行："
-        warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+        warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '$ESP_LOADER'"
     fi
 fi
 
