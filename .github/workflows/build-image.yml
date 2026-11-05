@@ -598,6 +598,12 @@ jobs:
           # 写盘校验失败必须中止，不能只 warn 完继续
           grep -q '写入校验失败 —— 中止' "$INSTALLER" \
             || { echo "::error::安装器写盘校验失败没有中止"; exit 1; }
+          # 磁盘层面的判断被拆到库里了，安装器缺库就会直接退出 —— 必须真的
+          # 在镜像里（这个库同时是 CI 里被合成 GPT 镜像验证过的那份）。
+          [ -f "$ROOT/usr/local/lib/qm1/install-lib.sh" ] \
+            || { echo "::error::镜像里缺少 /usr/local/lib/qm1/install-lib.sh（安装器会直接退出）"; exit 1; }
+          grep -q 'install-lib.sh' "$INSTALLER" \
+            || { echo "::error::安装器没有引用 install-lib.sh"; exit 1; }
           echo "OK   安装器支持非破坏性路径 + 备份(含逐分区校验) + provisioning + UEFI 启动项"
 
       - name: Assert QM1 hardware driver & firmware coverage

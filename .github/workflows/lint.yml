@@ -54,7 +54,8 @@ jobs:
           # POSIX sh 的四个用 sh 方言，避免拿错方言刷出一堆假阳性）。
           shellcheck -s bash -S warning \
             overlay/usr/local/sbin/qm1-firstboot \
-            overlay/usr/local/sbin/qm1-install-to-emmc
+            overlay/usr/local/sbin/qm1-install-to-emmc \
+            overlay/usr/local/lib/qm1/install-lib.sh
           shellcheck -s sh -S warning \
             overlay/usr/local/sbin/qm1-hardware-fixups \
             overlay/usr/local/sbin/qm1-health-collect \
@@ -117,6 +118,17 @@ jobs:
           fi
           echo "privacy scan clean"
 
+      - name: Installer disk helpers (synthetic GPT images)
+        run: |
+          set -euo pipefail
+          # 安装器里"哪些字节写到哪里"的逻辑以前从来没有被任何东西执行过 ——
+          # 它写错的后果不是构建失败，是一块报废的 eMMC。这里用合成的 GPT
+          # 镜像直接验证：分区按类型识别（不按顺序）、备份校验能通过、
+          # 改一个字节也能被发现。
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq util-linux
+          sudo bash scripts/test-install-lib.sh
+
       - name: Overlay sanity (required files present)
         run: |
           set -euo pipefail
@@ -142,6 +154,7 @@ jobs:
             overlay/etc/systemd/system/qm1-bluetooth.service \
             overlay/etc/systemd/system/qm1-install.service \
             overlay/usr/local/sbin/qm1-bluetooth-up \
+            overlay/usr/local/lib/qm1/install-lib.sh \
             overlay/etc/udev/rules.d/60-qm1-emmc-power.rules \
             scripts/grub.cfg.example \
             scripts/grub-installer.cfg.example \
