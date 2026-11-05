@@ -183,6 +183,10 @@ jobs:
           if bash scripts/build-rtw88-8723bs-module.sh \
                --kver "${QM1_KERNEL_ABI}" \
                --out-dir build/rtw88-module; then
+            # 注意：GITHUB_ENV 的变量名不能带短横线 —— bash 的 ${name-word} 会把
+            # "rtw88-module" 当成 "${rtw88}" 再跟字面量 "-module"，展开结果永远
+            # 不等于 "ok"，根治模块会被静默丢掉、镜像里只剩会永久卡死的 staging
+            # 驱动。所以这里用下划线命名。
             echo "RTW88_MODULE=ok" >> "$GITHUB_ENV"
             ls -l build/rtw88-module/
           else
@@ -235,6 +239,43 @@ jobs:
           done
           grep -q 'vmlinuz' build/out/esp-listing.txt || { echo "::error::ESP 缺少内核"; exit 1; }
           grep -q 'initrd' build/out/esp-listing.txt || { echo "::error::ESP 缺少 initrd"; exit 1; }
+
+      - name: Assert the rtw88 Wi-Fi module is inside the image
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          KABI="${QM1_KERNEL_ABI}"
+          # 根治模块必须真的进到镜像里。之前的 bug：GITHUB_ENV 里用了带短横线的
+          # 变量名（rtw88-module），bash 里 "${rtw88-module:-fallback}" 展开成
+          # 字面量 "module:-fallback"，判断永远为假 → 镜像里只剩会永久卡死的
+          # staging 驱动，而流水线一路绿灯。这里把这条做成硬断言。
+          if [ "${RTW88_MODULE:-fallback}" != "ok" ]; then
+            echo "::error::rtw88 根治模块没有构建成功；镜像里只有已知存在永久卡死路径的 staging r8723bs，不能放行"
+            exit 1
+          fi
+          KO="$ROOT/lib/modules/${KABI}/extra/rtw88/rtw_8723bs.ko"
+          [ -f "$KO" ] || { echo "::error::镜像里没有 $KO"; exit 1; }
+          for f in rtw_core.ko rtw_sdio.ko rtw_8723b.ko; do
+            [ -f "$ROOT/lib/modules/${KABI}/extra/rtw88/$f" ] \
+              || { echo "::error::镜像里缺少 rtw88 模块 $f"; exit 1; }
+          done
+          [ -f "$ROOT/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
+            || { echo "::error::镜像里没有 rtw88 固件 rtw88/rtw8723b_fw.bin"; exit 1; }
+          grep -qx 'rtw_8723bs' "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
+            || { echo "::error::modules-load.d 里没有 rtw_8723bs"; exit 1; }
+          if grep -qx 'r8723bs' "$ROOT/etc/modules-load.d/qm1-hardware.conf"; then
+            echo "::error::modules-load.d 里还留着 staging r8723bs，会和 rtw88 抢 SDIO 设备"
+            exit 1
+          fi
+          grep -q 'blacklist r8723bs' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+            || { echo "::error::modprobe 配置里没有 blacklist staging 驱动"; exit 1; }
+          # modprobe 里的 options 只能写 rtw_core 真实存在的参数，写错参数会让
+          # modprobe 直接拒绝加载模块（Invalid argument）。
+          for p in disable_lps_deep support_bf debug_mask; do
+            grep -q "options rtw_core .*$p=" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+              || { echo "::error::modprobe 配置里缺少 rtw_core 参数 $p"; exit 1; }
+          done
+          echo "OK   rtw88 根治模块、固件与开机加载项全部就位"
 
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
