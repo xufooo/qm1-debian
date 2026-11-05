@@ -319,7 +319,9 @@ Hermes CLI 与 headless Chrome 由 `qm1-provision.timer` 在开机 60 秒后
 "整机开机必须等网络"，Wi-Fi 一有问题整台机器就到不了 multi-user.target，
 表现为没有 SSH、像砖了。改成 timer 之后，机器先正常起来，安装在后台跑。
 它只在成功一次之后才会跳过（标记 `/var/lib/qm1/provision-done`），
-失败则下次开机自动重试。装完：
+失败则**十分钟后自动重试**（`qm1-provision.service` 的
+`Restart=on-failure` + `RestartSec=600`；一小时里最多试 6 次，
+超过就停手，下次开机再来）。装完：
 
 ```sh
 systemctl --user status hermes-gateway     # 常驻网关

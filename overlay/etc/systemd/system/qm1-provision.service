@@ -33,5 +33,22 @@ RemainAfterExit=yes
 ExecStart=/usr/local/sbin/qm1-provision
 # 装 Hermes 要下载官方安装器、uv 托管的 Python 3.14、Node 运行时 —— 慢是正常的。
 TimeoutStartSec=3600
-# 失败不重试到死：标记没写出来，timer 会按 OnUnitInactiveSec 再来一次，
-# 下次开机也会再试一次（ConditionPathExists 仍在）。
+#
+# ★ 失败要真的重试，而且要十分钟后再来。
+#
+#   原来靠 timer 的 OnUnitInactiveSec=10min 来重试 —— 那是不成立的：
+#   OnUnitInactiveSec 要的是单元"变成 inactive"，而失败的 oneshot 落到的是
+#   **failed**，不是 inactive ⇒ 定时器永远不会因为失败而再次触发
+#   ⇒ 铺运行时失败一次，就不会再试（只能等下次开机）。
+#   （成功的单元停在 active (exited)，同样不是 inactive ⇒ 那条定时器
+#     在成功路径上也是空转。）
+#
+#   所以重试由本单元自己承担：Restart=on-failure 是 Type=oneshot 允许的
+#   （只有 always / on-success 不允许），失败后 systemd 会重新拉起它。
+#   RestartSec=600 就是"十分钟后再来一次"。
+Restart=on-failure
+RestartSec=600
+# 一小时里最多试 6 次；超过就停手（start request repeated too quickly），
+# 下次开机还会从头再来 —— 不做无休止的重试风暴。
+StartLimitIntervalSec=3600
+StartLimitBurst=6

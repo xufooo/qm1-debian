@@ -19,10 +19,21 @@ Documentation=file:///usr/local/share/qm1/README-runtime.txt
 OnBootSec=60s
 # 指向真正的服务单元
 Unit=qm1-provision.service
-# 装失败了（网络还没通、下载中断）就十分钟后再来一次。
-# 成功之后服务停在 active (exited)，这个定时器不会再触发；
-# 失败时服务落到 failed/inactive，定时器会重新拉它。
-OnUnitInactiveSec=10min
+#
+# ★ 这里**故意没有** OnUnitInactiveSec。
+#
+#   原来的写法是"装失败了十分钟后再来一次"，靠 OnUnitInactiveSec=10min。
+#   那是不成立的：OnUnitInactiveSec 要的是单元变成 **inactive**，
+#   而失败的 oneshot 落到的是 **failed** ⇒ 定时器永远不会因为失败而再次
+#   触发 ⇒ 铺运行时失败一次就再也不试了（只能等下次开机）。
+#   成功的单元停在 active (exited)，也不是 inactive ⇒ 同一条定时器在
+#   成功路径上同样是空转；而"条件不满足被跳过"的单元是 inactive，
+#   反而会每十分钟空转一次。
+#
+#   重试改由 qm1-provision.service 自己的 Restart=on-failure / RestartSec=600
+#   承担（Type=oneshot 允许 on-failure），语义明确得多：
+#   成功 = 不再重复；失败 = 十分钟后再来一次。
+#
 # 装 Hermes 要十几分钟，别让定时器精度把 CPU 拖住
 AccuracySec=1min
 # 不做补跑：机器关机时错过就错过了，下次开机自然会重来

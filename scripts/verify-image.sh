@@ -461,6 +461,17 @@ check_content /etc/systemd/system/qm1-provision.timer '^Unit=qm1-provision.servi
     "定时器指向 qm1-provision.service"
 check_absent_content /etc/systemd/system/qm1-provision.service '^After=.*multi-user\.target' \
     "部署单元不能 After=multi-user.target（会和 target 的隐式 After= 撞成排序环）"
+# ★ 失败必须真的会重试。
+#   原来靠 timer 的 OnUnitInactiveSec=10min —— 那是不成立的：
+#   失败的 oneshot 落到的是 failed，不是 inactive ⇒ 定时器永远不会
+#   因为失败而再次触发 ⇒ 铺运行时失败一次就再也不试（只能等下次开机）。
+#   重试必须由服务自己的 Restart=on-failure 承担（Type=oneshot 允许）。
+check_content /etc/systemd/system/qm1-provision.service '^Restart=on-failure' \
+    "部署单元失败后必须会重试（Restart=on-failure）"
+check_content /etc/systemd/system/qm1-provision.service '^RestartSec=' \
+    "部署单元的重试间隔必须写明（RestartSec=）"
+check_absent_content /etc/systemd/system/qm1-provision.timer '^OnUnitInactiveSec=' \
+    "部署定时器不该用 OnUnitInactiveSec 做重试（失败态是 failed 不是 inactive，永远不会触发）"
 
 # ★ 开机自检：必须由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
 #   不该被当成"单元起不来"（那会让整机变 degraded，把真故障淹没在噪声里）。
