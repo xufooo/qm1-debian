@@ -183,9 +183,11 @@ jobs:
           # 上游把 RTL8723B/BS 并进 rtw88 之后，还没有发行版内核带着它
           # （sid 内核 7.2 < 7.4），所以按镜像内核回移成树外模块。
           # 构建失败不阻断流水线：回退到打了补丁的 staging 模块。
+          # 优先用上游整树回移的模块（上游真正的 RTL8723B/BS 支持）。
           if bash scripts/build-rtw88-8723bs-module.sh \
                --kver "${QM1_KERNEL_ABI}" \
-               --out-dir build/rtw88-module; then
+               --out-dir build/rtw88-module \
+               --source upstream-full; then
             # 注意：GITHUB_ENV 的变量名不能带短横线 —— bash 的 ${name-word} 会把
             # "rtw88-module" 当成 "${rtw88}" 再跟字面量 "-module"，展开结果永远
             # 不等于 "ok"，根治模块会被静默丢掉、镜像里只剩会永久卡死的 staging
@@ -269,16 +271,24 @@ jobs:
             echo "::error::rtw88 根治模块没有构建成功；镜像里只有已知存在永久卡死路径的 staging r8723bs，不能放行"
             exit 1
           fi
-          KO="$ROOT/lib/modules/${KABI}/extra/rtw88/rtw_8723bs.ko"
-          [ -f "$KO" ] || { echo "::error::镜像里没有 $KO"; exit 1; }
-          for f in rtw_core.ko rtw_sdio.ko rtw_8723b.ko; do
-            [ -f "$ROOT/lib/modules/${KABI}/extra/rtw88/$f" ] \
-              || { echo "::error::镜像里缺少 rtw88 模块 $f"; exit 1; }
-          done
+          # 两种布局都认：上游整树回移是单模块 rtw88_qm1，vendor 树是
+          # rtw_8723bs + rtw_core + rtw_sdio + rtw_8723b。
+          KO_DIR="$ROOT/lib/modules/${KABI}/extra/rtw88"
+          if [ -f "$KO_DIR/rtw88_qm1.ko" ]; then
+            MOD=rtw88_qm1
+          elif [ -f "$KO_DIR/rtw_8723bs.ko" ]; then
+            MOD=rtw_8723bs
+            for f in rtw_core.ko rtw_sdio.ko rtw_8723b.ko; do
+              [ -f "$KO_DIR/$f" ] \
+                || { echo "::error::镜像里缺少 rtw88 模块 $f"; exit 1; }
+            done
+          else
+            echo "::error::镜像里没有 rtw88 模块（rtw88_qm1.ko / rtw_8723bs.ko）"; exit 1
+          fi
           [ -f "$ROOT/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
             || { echo "::error::镜像里没有 rtw88 固件 rtw88/rtw8723b_fw.bin"; exit 1; }
-          grep -qx 'rtw_8723bs' "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
-            || { echo "::error::modules-load.d 里没有 rtw_8723bs"; exit 1; }
+          grep -qx "$MOD" "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
+            || { echo "::error::modules-load.d 里没有 $MOD"; exit 1; }
           if grep -qx 'r8723bs' "$ROOT/etc/modules-load.d/qm1-hardware.conf"; then
             echo "::error::modules-load.d 里还留着 staging r8723bs，会和 rtw88 抢 SDIO 设备"
             exit 1
@@ -288,8 +298,8 @@ jobs:
           # modprobe 里的 options 只能写 rtw_core 真实存在的参数，写错参数会让
           # modprobe 直接拒绝加载模块（Invalid argument）。
           for p in disable_lps_deep support_bf debug_mask; do
-            grep -q "options rtw_core .*$p=" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-              || { echo "::error::modprobe 配置里缺少 rtw_core 参数 $p"; exit 1; }
+            grep -q "options $MOD .*$p=" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+              || { echo "::error::modprobe 配置里缺少 $MOD 参数 $p"; exit 1; }
           done
           echo "OK   rtw88 根治模块、固件与开机加载项全部就位"
 
