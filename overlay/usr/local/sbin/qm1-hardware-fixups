@@ -108,21 +108,85 @@ audio_fixup() {
 # 4. Bluetooth: make sure the UART controller is bound to hci_uart
 #
 # The ACPI device (OBDA8723) already has a matching alias in hci_uart, so the
-# controller shows up as soon as the module is loaded.  The vendor firmware
-# push (rtk_hciattach) is done by qm1-bluetooth.service.
+# controller shows up as soon as the module is loaded.  The firmware itself
+# comes from the distribution package (rtl_bt/rtl8723bs_fw.bin) and is pushed
+# by the kernel btrtl driver -- qm1-bluetooth.service only waits for hci0.
+#
+# The failure mode to watch for: if 8250_generic claimed the same ACPI node
+# first, hci_uart never gets the port and the Bluetooth function is simply
+# missing (no error, just no hci0).  Detect that and say so.
 # ---------------------------------------------------------------------------
 bluetooth_fixup() {
     modprobe hci_uart 2>/dev/null || true
     if [ -d /sys/class/bluetooth ]; then
         log "bluetooth: $(ls /sys/class/bluetooth | tr '\n' ' ')"
-    else
-        log "bluetooth: no hci device yet (the vendor attach may still be running)"
+        return 0
     fi
+
+    # No hci device.  Check whether a plain 8250 UART grabbed the Bluetooth
+    # ACPI node (its platform path carries the HID, e.g. OBDA8723:00).
+    stolen=""
+    for tty in /sys/class/tty/ttyS*; do
+        [ -e "$tty" ] || continue
+        dev="$(readlink -f "$tty/device" 2>/dev/null || true)"
+        case "$dev" in
+            *OBDA8723*|*obda8723*) stolen="$tty ($dev)" ;;
+        esac
+    done
+    if [ -n "$stolen" ]; then
+        log "bluetooth: NO hci device, and the Bluetooth UART is held by a 8250 serial port: $stolen"
+        log "bluetooth: remedy = blacklist 8250_generic (and 8250_serial) in /etc/modprobe.d/qm1-hardware.conf, then reload hci_uart"
+    else
+        log "bluetooth: no hci device yet (the ACPI node may not be exposed as a serdev port)"
+        log "bluetooth: check 'dmesg | grep -i serdev' -- if the port is missing entirely a DSDT override is needed"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# 5. DMI identity and the microSD card-detect quirk
+#
+# The microSD slot on this platform needs a pull-up on the card-detect GPIO;
+# the firmware DSDT declares it as GpioInt(... PullNone ...), which Linux
+# honours, so the slot never sees a card.  Upstream fixed this in
+# drivers/mmc/host/sdhci-acpi.c with DMI_QUIRK_SD_CD_ENABLE_PULL_UP, matched
+# on DMI_SYS_VENDOR "ASUSTeK COMPUTER INC." + DMI_PRODUCT_NAME "T100TA".
+#
+# That quirk ships in every kernel since v6.10, so Debian 6.12 already has
+# it -- but only if this board reports that exact product name.  Report the
+# identity and whether the quirk can possibly apply, instead of silently
+# leaving a dead slot behind.
+# ---------------------------------------------------------------------------
+dmi_report() {
+    id="/sys/devices/virtual/dmi/id"
+    vendor="$(cat "$id/sys_vendor" 2>/dev/null || echo unknown)"
+    product="$(cat "$id/product_name" 2>/dev/null || echo unknown)"
+    board="$(cat "$id/board_name" 2>/dev/null || echo unknown)"
+    log "dmi: vendor='$vendor' product='$product' board='$board'"
+
+    case "$vendor:$product" in
+        *ASUSTeK*:*T100TA*)
+            log "dmi: upstream sdhci-acpi card-detect pull-up quirk applies to this board"
+            ;;
+        *)
+            log "dmi: the sdhci-acpi card-detect quirk matches 'ASUSTeK COMPUTER INC.'+T100TA only"
+            log "dmi: on this board it does NOT apply, so the microSD slot may stay undetected"
+            ;;
+    esac
+
+    # Is an SD card actually visible right now?
+    for b in /sys/class/block/mmcblk*; do
+        [ -e "$b" ] || continue
+        dev="$(readlink -f "$b/device" 2>/dev/null || true)"
+        type="$(cat "$dev/type" 2>/dev/null || echo unknown)"
+        [ "$type" = "SD" ] && log "dmi: SD card present on $b ($dev)"
+    done
+    return 0
 }
 
 emmc_fixup
 cpufreq_fixup
 audio_fixup
 bluetooth_fixup
+dmi_report
 
 log "qm1-hardware-fixups: done"

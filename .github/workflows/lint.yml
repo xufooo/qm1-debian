@@ -45,6 +45,23 @@ jobs:
           shellcheck -x -S warning scripts/*.sh scripts/lib/*.sh
           shellcheck -s sh -S warning hooks/*.sh
 
+      - name: ShellCheck (shipped overlay)
+        run: |
+          set -euo pipefail
+          # overlay/ 里的脚本就是随镜像出货的系统代码（安装器、首启、自检、
+          # 硬件修正）。之前只有 scripts/ 与 hooks/ 被静态检查，出货代码却是
+          # 盲区 —— 按各自的解释器方言分开检查（bash 的两个用 bash 方言，
+          # POSIX sh 的四个用 sh 方言，避免拿错方言刷出一堆假阳性）。
+          shellcheck -s bash -S warning \
+            overlay/usr/local/sbin/qm1-firstboot \
+            overlay/usr/local/sbin/qm1-install-to-emmc
+          shellcheck -s sh -S warning \
+            overlay/usr/local/sbin/qm1-hardware-fixups \
+            overlay/usr/local/sbin/qm1-health-collect \
+            overlay/usr/local/bin/qm1-selftest \
+            overlay/usr/local/bin/qm1-stress
+          echo "overlay shellcheck clean"
+
       - name: Scripts are executable
         run: |
           set -euo pipefail
