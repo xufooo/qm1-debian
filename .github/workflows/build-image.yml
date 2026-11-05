@@ -145,7 +145,7 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             mmdebstrap debian-archive-keyring mtools dosfstools e2fsprogs fdisk util-linux \
             grub2-common file ca-certificates curl wget gnupg gpgv xz-utils zstd procps kmod \
-            initramfs-tools cpio
+            initramfs-tools cpio qemu-system-x86
           # 两个架构的 EFI 模块：grub-mkimage 与 .mod 必须同版本，
           # 所以直接用 trixie 仓库里的同一套 grub2-common + grub-efi-*-bin
           dpkg --add-architecture i386
@@ -228,6 +228,21 @@ jobs:
             --profile "${{ inputs.profile || 'runtime' }}" \
             --installer \
             --disk-size-gib "${{ inputs.disk_size_gib || 30 }}"
+
+      - name: Boot the image once under QEMU (smoke test)
+        run: |
+          set -eu
+          # 这是整条链路里唯一一处"真的启动一次"：前面的检查全是静态的
+          # （文件在不在、软链指向哪、参数写对没有），全绿也不代表刷上去
+          # 能开机。QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，
+          # 所以它替代不了真机验收 —— 但"内核起不来 / initrd 找不到根 /
+          # systemd 起不来 / 账号没建 / DNS 链没挂上"这一整类问题，
+          # 在这里就能挡下来。
+          bash scripts/boot-smoke.sh \
+            --rootfs build/out/rootfs.img \
+            --timeout 420 \
+            --log build/out/boot-smoke.log
+          tail -40 build/out/boot-smoke.log || true
 
       - name: Verify artifacts
         run: |

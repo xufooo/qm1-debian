@@ -107,12 +107,21 @@ else
 fi
 
 # 目标盘被改了一个字节（根文件系统分区中间）
+# ★ 必须改**环设备本身**，不是它背后的镜像文件：环设备有自己的页缓存，
+#   直接改底层文件，环设备仍从缓存里读出旧内容 ⇒ 校验看不见改动。
+#   （CI 就是这样发现"这个用例其实一直没测到东西"的：改的是文件、读的是缓存，
+#     校验"通过"了，却什么也没证明。）
 off=$(( 64 * 1024 * 1024 ))
-printf 'X' | dd of="$IMG" bs=1 seek="$off" conv=notrunc status=none
+orig="$(dd if="$LOOP" bs=1 skip="$off" count=1 status=none | od -An -tx1 | tr -d ' \n')"
+printf 'X' | dd of="$LOOP" bs=1 seek="$off" conv=notrunc status=none
 if qm1_verify_backup "$LOOP" "$BACKUP" 0; then
     bad "目标盘改了一个字节，校验却通过了"
 else
     ok "目标盘的改动被检出"
+fi
+# 还原（后面的用例还要拿这个盘跟备份比对）
+if [ -n "$orig" ]; then
+    printf "\\x$orig" | dd of="$LOOP" bs=1 seek="$off" conv=notrunc status=none
 fi
 
 # 还原，再改备份
