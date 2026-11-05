@@ -39,10 +39,55 @@ if [ ! -f "$CONF" ]; then
     exit 0
 fi
 
+# "接口没出现"有好几种，得分清楚 —— 它们要修的地方完全不同，日志里必须点名：
+#
+#   * 模块没加载        ⇒ 装错了 / vermagic 不对 / 模块索引没刷新（modprobe 说找不到）
+#   * 加载的是树内 staging ⇒ 隔离没生效（bind 到 r8723bs 而不是出货模块）
+#   * 模块在、卡也在，就是没绑上 ⇒ 固件没就位 / 模块没认领这张卡
+#   * 模块在、卡不在   ⇒ SDIO 卡压根没枚举出来（内核没认出这块设备）
+#
+# 统一放在这里判断，日志里带上结论；否则真机上"wlan0 不出现"只会留下一句
+# "还在等 wlan0"，看不出到底卡在哪一步。
+module_state() {
+    for _m in rtw88_qm1 rtw88_8723bs rtw_8723bs; do
+        [ -d "/sys/module/$_m" ] && { printf 'loaded:%s' "$_m"; return 0; }
+    done
+    [ -d /sys/module/r8723bs ] && { printf 'staging:r8723bs'; return 0; }
+    printf 'none'
+}
+
+sdio_card_present() {
+    for _d in /sys/bus/sdio/devices/*; do
+        [ -e "$_d" ] || continue
+        if grep -qs 'MODALIAS=sdio:c\*v024CdB723\*' "$_d/uevent" 2>/dev/null; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+explain_wait() {
+    case "$(module_state)" in
+        none)
+            printf '驱动模块没加载（/sys/module/ 下没有 rtw88_qm1）—— 这是"装不上/没加载"，不是"接口还没出现"'
+            ;;
+        staging:*)
+            printf '加载的是树内 staging 驱动（r8723bs）—— 隔离没生效，出货模块没抢到这张卡'
+            ;;
+        loaded:*)
+            if sdio_card_present; then
+                printf '驱动在、SDIO 卡也在，就是没绑上（固件没就位或模块没认领这张卡）'
+            else
+                printf '驱动在，但 SDIO 卡没枚举出来（内核没认出这块 SDIO 设备）'
+            fi
+            ;;
+    esac
+}
+
 waited=0
 while ! ip link show "$IFACE" >/dev/null 2>&1; do
     if [ $((waited % LOG_EVERY)) -eq 0 ]; then
-        log "还在等 $IFACE 出现（已等 ${waited}s）"
+        log "还在等 $IFACE 出现（已等 ${waited}s）：$(explain_wait)"
     fi
     waited=$((waited + 1))
     sleep 1
