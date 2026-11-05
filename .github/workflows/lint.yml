@@ -189,6 +189,15 @@ jobs:
           sudo apt-get install -y -qq e2fsprogs
           bash scripts/test-verify-image-helpers.sh
 
+      - name: modversions CRC comparison (synthetic symbol tables)
+        run: |
+          set -euo pipefail
+          # vermagic 里只有内核版本字符串：两个"版本号相同、但不是同一份
+          # 构建"的内核在它眼里一模一样，可内核在 insmod 时会拒绝那个模块
+          # （symbol version mismatch）⇒ 驱动永远加载不上，而构建全绿。
+          # 这里把比对逻辑本身用合成符号表钉住。
+          bash scripts/test-modversions-crc.sh
+
       - name: Overlay permission normalisation (synthetic tree)
         run: |
           set -euo pipefail

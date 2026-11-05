@@ -148,6 +148,10 @@ UPSTREAM_PATCH_DIR="${UPSTREAM_PATCH_DIR:-$REPO_ROOT/patches/rtw88-upstream}"
 # cause.
 . "$SCRIPT_DIR/lib/patch-tree.sh"
 
+# The modversions CRC comparison lives in scripts/lib/modversions-crc.sh so
+# that the build and its test use the same code.
+. "$SCRIPT_DIR/lib/modversions-crc.sh"
+
 for cmd in make gcc git curl dpkg-deb modinfo; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing tool: $cmd"
 done
@@ -587,6 +591,46 @@ if ! grep -qi 'b723' <<<"$_aliases"; then
     die "no built module claims the SDIO device 0x024c:0xb723"
 fi
 log "modules verified against $KVER"
+
+# ---------------------------------------------------------------------------
+# modversions CRC check — see scripts/lib/modversions-crc.sh for the why.
+# vermagic only carries the kernel version string; two different kernel
+# builds with the same version string look identical to it, yet the kernel
+# rejects the module at insmod time ("symbol version mismatch").  The build
+# would stay green and the driver would never load.
+# ---------------------------------------------------------------------------
+assert_modversions_crc() {   # assert_modversions_crc <ko> [<ko> ...]
+    local ksymvers="$KSRC/Module.symvers"
+    if [ ! -f "$ksymvers" ]; then
+        # 没有 Module.symvers 就没法比。这一步不该静默跳过 —— 出货镜像的
+        # 内核与头文件是同源的，CI 里应该有；真没有就明确说出来。
+        warn "no Module.symvers under $KSRC — the modversions CRC check is skipped"
+        return 0
+    fi
+    local own_symvers="$MOD_DIR/Module.symvers"
+    local table_file imports_file ko n=0
+    table_file="$WORK/crc-table.txt"
+    qm1_crc_symbol_table "$ksymvers" "$own_symvers" > "$table_file"
+    for ko in "$@"; do
+        imports_file="$WORK/crc-imports-$(basename "$ko").txt"
+        modprobe --show-modversions "$ko" > "$imports_file" 2>/dev/null || true
+        if [ ! -s "$imports_file" ]; then
+            warn "modprobe --show-modversions produced nothing for $(basename "$ko") — CRC check skipped for it"
+            continue
+        fi
+        if ! qm1_check_modversions_crc "$table_file" "$imports_file"; then
+            die "modversions CRC mismatch for $(basename "$ko") — the kernel would reject this module at insmod time (the vermagic check cannot see this)"
+        fi
+        n=$((n + $(wc -l < "$imports_file" | tr -d ' ')))
+    done
+    log "modversions CRC checked ($n imported symbol(s) against $ksymvers)"
+}
+
+_crc_kos=()
+for _m in $MOD_NAMES; do
+    _crc_kos+=("$MOD_DIR/$_m")
+done
+assert_modversions_crc "${_crc_kos[@]}"
 
 # ---------------------------------------------------------------------------
 # firmware
