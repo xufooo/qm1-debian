@@ -440,6 +440,41 @@ else
     row WARN "qm1-firstboot" "未启用"
 fi
 
+# ---- 「开机即用」四条判据里的前两条（DNS 与账号），在这里逐条查 ----
+# 之前 DELIVERY.md 说这四条"qm1-selftest 会逐条检查"，但自检里只有时钟与
+# Wi-Fi 两项，DNS 与账号没有对应判据 —— 手册与自检对不上，就补上。
+_resolv_target=""
+if [ -L /etc/resolv.conf ]; then
+    _resolv_target="$(readlink /etc/resolv.conf 2>/dev/null || true)"
+fi
+if [ "$_resolv_target" = "/usr/lib/systemd/resolv.conf" ]; then
+    row PASS "DNS 数据源" "/etc/resolv.conf → /usr/lib/systemd/resolv.conf（resolved 的 stub）"
+elif [ -n "$_resolv_target" ]; then
+    row FAIL "DNS 数据源" "/etc/resolv.conf 指向 $_resolv_target，不是 resolved 的 stub —— 没有 DNS 数据源（NTP 解析不了域名 → 时钟停在 1970 → TLS 全废）"
+else
+    row FAIL "DNS 数据源" "/etc/resolv.conf 不是指向 stub 的软链（Debian 13 的 systemd/resolved 都不带这个文件，得自己挂）"
+fi
+
+_qm1_uid="$(id -u qm1 2>/dev/null || true)"
+if [ "$_qm1_uid" = "1000" ]; then
+    row PASS "可登录账号" "qm1 (uid 1000) 存在"
+elif [ -n "$_qm1_uid" ]; then
+    row WARN "可登录账号" "qm1 的 uid 是 $_qm1_uid（预期 1000）"
+else
+    row FAIL "可登录账号" "没有 qm1 账号 —— 刷完机没人能登"
+fi
+
+if systemctl is-enabled --quiet qm1-provision.service 2>/dev/null; then
+    row PASS "qm1-provision" "已启用（首启后自动铺 Hermes + headless Chrome）"
+else
+    row WARN "qm1-provision" "未启用 —— 运行时不会自动铺，需手工跑 /usr/local/share/qm1/provision-agent.sh"
+fi
+if [ -f /var/lib/qm1/provision-done ]; then
+    row PASS "运行时部署" "已完成（标记 /var/lib/qm1/provision-done）"
+else
+    row WARN "运行时部署" "尚未完成（没有 /var/lib/qm1/provision-done）"
+fi
+
 if pgrep -x wpa_supplicant >/dev/null 2>&1; then
     row PASS "wpa_supplicant" "运行中"
 else
@@ -456,6 +491,21 @@ _addr="$(ip -br addr show wlan0 2>/dev/null || true)"
     fi
 else
     row WARN "wlan0" "接口不存在"
+fi
+
+# 「开机即用」第三条：Wi-Fi 真的关联上了没有（iw 的 link 里会写 Connected/not connected）
+if command -v iw >/dev/null 2>&1 && [ -e /sys/class/net/wlan0 ]; then
+    _link="$(iw dev wlan0 link 2>/dev/null || true)"
+    if grep -q 'Connected to' <<<"$_link"; then
+        _ssid="$(iw dev wlan0 link 2>/dev/null | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -1)"
+        row PASS "Wi-Fi 关联" "已关联${_ssid:+（SSID: $_ssid）}"
+    elif grep -q 'not connected' <<<"$_link"; then
+        row FAIL "Wi-Fi 关联" "未关联 —— 内置 Wi-Fi 是这台机器唯一的联网链路；先看绑定的是哪个模块（rtw88_qm1 才算对）"
+    else
+        row WARN "Wi-Fi 关联" "读不到关联状态（iw 没输出）"
+    fi
+else
+    row WARN "Wi-Fi 关联" "没有 iw 或 wlan0 不存在"
 fi
 
 if systemctl is-enabled --quiet ssh 2>/dev/null; then
