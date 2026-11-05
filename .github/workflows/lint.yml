@@ -175,6 +175,17 @@ jobs:
           # 检查：不需要内核头、不需要编译，几秒钟给出确切答案。
           bash scripts/test-upstream-patches.sh
 
+      - name: Image path-existence semantics (synthetic ext4)
+        run: |
+          set -euo pipefail
+          # "镜像里这个文件在不在"这条判断以前看的是 debugfs 的**退出码**，
+          # 而 debugfs 对不存在的路径照样返回 0 ⇒ check_exists 永远说
+          # "存在"（假绿）、check_absent 永远说"不存在"（假红）。
+          # 这里用一块合成 ext4 镜像把语义钉死。
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq e2fsprogs
+          bash scripts/test-verify-image-helpers.sh
+
       - name: Overlay permission normalisation (synthetic tree)
         run: |
           set -euo pipefail

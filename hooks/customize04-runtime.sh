@@ -36,6 +36,20 @@ chroot "$TARGET" /bin/bash -c '
     rm -rf /var/lib/apt/lists/*
 '
 
+# ★ zram 必须**确定地**开着：配置文件在 ≠ zram 设备在跑。
+#   zram-tools 的 postinst 会不会 enable zramswap.service 取决于发行版的
+#   preset，跨版本不是承诺；而这台机器只有 2 GiB 内存，零交换等于随时 OOM。
+#   所以这里显式 enable 一次，不靠发行版的默认行为。
+if chroot "$TARGET" /bin/bash -c '
+        set -e
+        systemctl enable zramswap.service >/dev/null 2>&1 \
+            || echo "warning: could not enable zramswap.service" >&2
+    '; then
+    log "已启用 zramswap.service"
+else
+    log "警告：zram 交换没能启用（这台机器只有 2 GiB 内存）"
+fi
+
 log "安装 uv（Astral）与 standalone CPython 3.14"
 # uv 自己下载的 standalone CPython 与 Hermes 官方锁定的是同一类产物
 # （cpython-3.14.x-...-x86_64-unknown-linux-gnu），因此解释器 ABI 与官方一致。
