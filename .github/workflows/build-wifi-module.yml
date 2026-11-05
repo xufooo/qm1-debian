@@ -330,3 +330,94 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+
+  # ---------------------------------------------------------------------------
+  # 上游 rtw88 整树回移（本质修好路径，探针作业）
+  #
+  # 上游把 rtw88 大重构了（main.c 拆成 fw.c/efuse.c/mac80211.c/... ，8723b 芯片
+  # 驱动挪到新核心 API），所以「6.12 头文件 + 上游芯片文件」拼不起来。要真正用
+  # 上游驱动（而不是 vendor 树），必须把整棵 rtw88 从同一个版本一起编成树外模块。
+  #
+  # 这个作业只回答一件事：上游整树能不能在目标内核（6.12）上编过。
+  # 编不过不会让流水线变红（continue-on-error），产出的日志用来定位缺哪个 API。
+  # ---------------------------------------------------------------------------
+  rtw88-upstream:
+    name: rtw88 full upstream tree (probe)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    defaults:
+      run:
+        shell: bash
+    container:
+      image: debian:trixie-slim
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            build-essential dpkg-dev curl git kmod ca-certificates xz-utils
+
+      - name: Add trixie-proposed-updates
+        run: |
+          set -eux
+          printf 'deb http://deb.debian.org/debian trixie-proposed-updates main\n' \
+            > /etc/apt/sources.list.d/trixie-proposed-updates.list
+          apt-get update -qq
+
+      - name: Resolve target kernel headers
+        id: kernel
+        run: |
+          set -eu
+          KVER=''
+          want="${{ inputs.kernel_version }}"
+          if [ -n "$want" ]; then
+            case "$want" in
+              *+*) KVER="$want" ;;
+              *)   KVER="$want+deb13-amd64" ;;
+            esac
+          else
+            KVER='6.12.113+deb13-amd64'
+          fi
+          if ! apt-get install -y -qq --no-install-recommends "linux-headers-$KVER"; then
+            echo "::warning::linux-headers-$KVER 不在仓库里了，改用发行版元包"
+            apt-get install -y -qq --no-install-recommends linux-headers-amd64
+            KVER="$(ls -d /lib/modules/*/build 2>/dev/null | sed 's#^/lib/modules/##; s#/build$##' | sort -V | tail -1)"
+          fi
+          [ -n "$KVER" ] || { echo "::error::找不到内核头文件"; exit 1; }
+          echo "目标内核：$KVER"
+          echo "kver=$KVER" >> "$GITHUB_OUTPUT"
+          echo "kver_slug=${KVER//+/-}" >> "$GITHUB_OUTPUT"
+
+      - name: Build the whole upstream rtw88 tree
+        run: |
+          set -eux
+          bash scripts/build-rtw88-8723bs-module.sh \
+            --kver "${{ steps.kernel.outputs.kver }}" \
+            --out-dir build/rtw88-upstream \
+            --source upstream-full \
+            --upstream-ref master
+
+      - name: Write summary
+        if: always()
+        run: |
+          {
+            echo "### 上游 rtw88 整树回移探针"
+            echo
+            echo "- 目标内核：${{ steps.kernel.outputs.kver }}"
+            echo "- 源码：上游 master 的 drivers/net/wireless/realtek/rtw88 整棵树"
+            echo "- 结果：${{ job.status }}"
+            echo "- 模块：$(ls build/rtw88-upstream/*.deb 2>/dev/null || echo '（未产出）')"
+            echo "- 结论：编过 = 可以换到真正的上游驱动；编不过 = 看日志缺哪个内核 API。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload the probe result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-rtw88-upstream-probe-${{ steps.kernel.outputs.kver_slug }}
+          path: build/rtw88-upstream/
+          if-no-files-found: ignore
+          retention-days: 7
