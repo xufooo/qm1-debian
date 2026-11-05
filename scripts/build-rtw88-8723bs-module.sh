@@ -96,9 +96,12 @@ for cand in "/lib/modules/${KVER}/build" "/usr/src/linux-headers-${KVER}" "/usr/
 done
 [ -n "$KSRC" ] || die "kernel build tree not found (tried /lib/modules/${KVER}/build and /usr/src/linux-headers-${KVER}); install linux-headers-${KVER}"
 
+# make -C <kernel> 会切目录，所以 M= 必须是绝对路径
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(cd "$OUT_DIR" && pwd)"
 WORK="$OUT_DIR/rtw88-build"
 rm -rf "$WORK"
-mkdir -p "$WORK" "$OUT_DIR"
+mkdir -p "$WORK"
 RTW88_DIR="$WORK/rtw88-src"
 
 # ---------------------------------------------------------------------------
