@@ -323,6 +323,33 @@ Debian 13 的 6.12 内核对本机全部外设驱动都已是模块，因此无�
 `modules-load.d` 只放 `i915`（HDMI 首屏）、`snd_hda_intel`、`btusb`；其余靠 udev 自动加载。
 构建产物里的 `driver-manifest.txt` 会用 `modinfo -k <版本>` 与 `/boot/config-*` 判定每个驱动是 `module` / `builtin` / `absent`，CI 对启动关键项做硬断言。
 
+### 空闲 C-state（Bay Trail 已知问题，已加预防性参数）
+
+QM1 的 CPU 是 Bay Trail-T（Intel Atom Z3735F）。这个平台有一段长期社区问题：**进入平台不支持的深 C-state（MWAIT C6）会让整机假死**（挂死只能拔电源）。跟踪单与出处都是老帖，但今天仍然成立：
+
+- Ubuntu Launchpad **#1503731**「8086:0f31 Ubuntu 15.04-15.10 freezes totally」——0f31 是 Bay Trail SDHCI 的 PCI ID
+- kernel.org bug **#109051**（标题含 `intel_idle.max_cstate=1 re…`）
+- AskUbuntu **803640**「System freezes completely with Intel Bay Trail」
+
+**上游至今没有修**：master 的 `drivers/idle/intel_idle.c` 里 `byt_cstates[]` 仍然提供 `C6N(0x58) / C6S(0x52) / C7(0x60)`，也没有任何 CPU 黑名单。
+
+因此两个 GRUB 模板都加了 `intel_idle.max_cstate=1`。这台机器常供电、不以省电为目标，这个参数的代价可以忽略，属于**预防性保险**，不是已验证的修复。
+
+**怎么判断你的机器是否真的受影响**（30 秒，只读）：
+
+```sh
+for d in /sys/devices/system/cpu/cpu0/cpuidle/state*; do
+  echo "$(cat "$d/name") disable=$(cat "$d/disable") usage=$(cat "$d/usage")"
+done
+```
+
+- 只有 `C1`，或者 `C6*` 的 `disable=1` / `usage` 恒为 0 → 本机从不进深 C-state，这类假死**不适用**
+- 出现 `C6*` 且 `usage` 在涨 → 机器确实在进深 C-state，保险才有意义
+
+本仓库的内核 `CONFIG_INTEL_IDLE=y` 且 **`CONFIG_ACPI_IDLE` 未启用**（空闲态由 intel_idle 提供），所以社区方案里成对的 `processor.max_cstate=1`（属于 acpi_idle）在这里没有意义，只保留 `intel_idle.max_cstate=1`。
+
+设备端自检里的「C-state」一项读的就是上面这些目录。
+
 ### 内置无线：RTL8723BS（SDIO）
 
 QM1 内置无线已实测确认为 **Realtek RTL8723BS**（SDIO 模组，AzureWave，SDIO ID `0x024c:0xb723`），不是常见资料里说的 USB 型号。这个区别决定了整条链路：
