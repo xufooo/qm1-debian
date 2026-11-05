@@ -165,7 +165,26 @@ if [ -z "$TTY" ] || [ ! -e "$TTY" ]; then
 fi
 
 echo "qm1-bt-attach: 使用 $TTY（BT_PROTOCOL=${BT_PROTOCOL:-rtk_h5}, BT_SPEED=${BT_SPEED:-115200}）"
-exec /usr/sbin/rtk_hciattach -n -s "${BT_SPEED:-115200}" "$TTY" "${BT_PROTOCOL:-rtk_h5}"
+
+# 先把厂商固件刷进芯片并初始化。注意用 -n（不摘 ldisc），
+# 这样固件下发后内核的 hci_uart 驱动能接管同一个串口。
+/usr/sbin/rtk_hciattach -n -s "${BT_SPEED:-115200}" "$TTY" "${BT_PROTOCOL:-rtk_h5}" || {
+    echo "qm1-bt-attach: rtk_hciattach 失败（固件下发未完成）" >&2
+    exit 1
+}
+
+# Debian 13 的内核 CONFIG_BT_HCIUART=m（实测 6.12.113+deb13-amd64），
+# hci_uart 是模块 bt_hciuart.ko —— 固件下发完要把它加载起来，
+# 内核才会把这个串口认成蓝牙控制器并注册 hci0。
+# 编进内核的发行版上 modprobe 会失败，忽略即可。
+modprobe bt_hciuart 2>/dev/null || true
+
+sleep 2
+if [ -d /sys/class/bluetooth/hci0 ]; then
+    echo "qm1-bt-attach: 蓝牙已就绪（hci0 已出现）"
+else
+    echo "qm1-bt-attach: 固件已下发但 hci0 没出现 —— 试 modprobe bt_hciuart，或检查 /etc/default/qm1-bluetooth 里的 BT_TTY/协议" >&2
+fi
 EOF
 chmod 0755 "$PKG/usr/local/bin/qm1-bt-attach.sh"
 

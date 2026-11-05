@@ -347,8 +347,21 @@ if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
     done
     _bt_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
     if [ -n "$_bt_kver" ] && [ -f "$TARGET/boot/config-$_bt_kver" ]; then
-        grep -qE '^CONFIG_BT_HCIUART=y$' "$TARGET/boot/config-$_bt_kver" \
-            || warn "内核没有 CONFIG_BT_HCIUART=y —— 厂商固件下发后蓝牙控制器不会被内核接管"
+        # Debian 13 的内核（6.12.113+deb13-amd64）实测：CONFIG_BT=m、
+        # CONFIG_BT_HCIUART=m —— hci_uart 是**模块**（bt_hciuart.ko），
+        # 不是编进内核。所以两种配置都要接受，=m 时要确认模块文件在镜像里。
+        if grep -qE '^CONFIG_BT_HCIUART=y$' "$TARGET/boot/config-$_bt_kver"; then
+            log "内核 btuart：编进内核（CONFIG_BT_HCIUART=y）"
+        elif grep -qE '^CONFIG_BT_HCIUART=m$' "$TARGET/boot/config-$_bt_kver"; then
+            if find "$TARGET/lib/modules/$_bt_kver" -name 'bt_hciuart.ko*' \
+                 -print -quit 2>/dev/null | grep -q .; then
+                log "内核 btuart：模块 bt_hciuart.ko（CONFIG_BT_HCIUART=m），随包加载"
+            else
+                warn "内核 CONFIG_BT_HCIUART=m，但镜像里找不到 bt_hciuart.ko —— 厂商固件下发后没人接手串口"
+            fi
+        else
+            warn "内核没有 CONFIG_BT_HCIUART —— 厂商固件下发后蓝牙控制器不会被内核接管"
+        fi
     fi
     # 开机自启（用符号链接，避免在 chroot 里跑 systemctl 的副作用）
     mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
@@ -427,7 +440,7 @@ i915|DRM_I915|Intel HD Graphics Gen7（HDMI 输出）|
 snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
-btuart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口，编进内核）|
+btuart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口，内核模块 bt_hciuart，Debian 为 =m）|
 r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，主线 staging 驱动）|
 brcmfmac|BRCMFMAC|Broadcom Wi-Fi（主线驱动）|
 iwlwifi|IWLWIFI|Intel Wi-Fi（主线驱动）|
