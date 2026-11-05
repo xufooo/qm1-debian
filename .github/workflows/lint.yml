@@ -120,6 +120,7 @@ jobs:
             overlay/etc/systemd/system/qm1-hardware-fixups.service \
             overlay/usr/local/sbin/qm1-hardware-fixups \
             overlay/etc/default/qm1-hardware \
+            overlay/etc/systemd/system/bluetooth.service.d/qm1.conf \
             scripts/grub.cfg.example \
             scripts/grub-installer.cfg.example \
             scripts/prepare-provision.sh \

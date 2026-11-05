@@ -396,6 +396,22 @@ jobs:
           done
           echo "OK   硬件修正脚本、systemd 单元与自启链接全部就位"
 
+      - name: Assert the time sync and the bluetooth stack are enabled
+        run: |
+          set -euo pipefail
+          ROOT="$RUNNER_TEMP/qm1-root"
+          for unit in systemd-timesyncd.service bluetooth.service; do
+            if [ ! -e "$ROOT/etc/systemd/system/multi-user.target.wants/$unit" ]; then
+              echo "::error::$unit 未在镜像里启用"
+              exit 1
+            fi
+          done
+          [ -e "$ROOT/etc/systemd/system/bluetooth.service.d/qm1.conf" ] \
+            || { echo "::error::缺少 bluetooth.service.d/qm1.conf（蓝牙栈要等厂商固件下发）"; exit 1; }
+          grep -q "After=qm1-bluetooth.service" "$ROOT/etc/systemd/system/bluetooth.service.d/qm1.conf" \
+            || { echo "::error::bluetooth 单元没有排在 qm1-bluetooth.service 之后"; exit 1; }
+          echo "时间同步与蓝牙栈已启用"
+
       - name: Assert the first-boot provisioning is inside the image
         run: |
           set -eu
