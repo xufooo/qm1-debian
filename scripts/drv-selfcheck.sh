@@ -39,6 +39,17 @@ row() {  # $1=状态(PASS/WARN/FAIL/INFO) $2=检查项 $3=实测值
 
 section() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 
+# 机读 JSON 里要转义一下：实测值是系统命令的输出，里面出现一个双引号
+# 或者反斜杠，整份 JSON 就不合法了 —— 而这份 JSON 正是验收时用来取结论的。
+json_escape() {  # json_escape <原文>
+    local s="$1"
+    s="${s//\\/\\\\}"
+    s="${s//\"/\\\"}"
+    s="${s//$'\n'/ }"
+    s="${s//$'\r'/ }"
+    printf '%s' "$s"
+}
+
 have() { command -v "$1" >/dev/null 2>&1; }
 mod_loaded() { grep -qw "$1" /proc/modules 2>/dev/null; }
 
@@ -928,7 +939,8 @@ if [ "$JSON" = "1" ]; then
         st="${r%%|*}"; rest="${r#*|}"; item="${rest%%|*}"; val="${rest#*|}"
         [ $first -eq 1 ] || printf ','
         first=0
-        printf '{"status":"%s","item":"%s","value":"%s"}' "$st" "$item" "$val"
+        printf '{"status":"%s","item":"%s","value":"%s"}' "$st" \
+            "$(json_escape "$item")" "$(json_escape "$val")"
     done
     printf ']}\n'
 fi
