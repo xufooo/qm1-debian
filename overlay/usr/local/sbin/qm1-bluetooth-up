@@ -68,6 +68,16 @@ if [ -z "$acpi_hid" ] && [ ! -e /etc/qm1/bluetooth-force ]; then
     # 没有 HID ⇒ 没有可绑定的串口 ⇒ 不加载 hci_uart（加载了也绑不上，
     # 只会白占一个 uart 端口）。这不是故障，是这台机本来就没有这个控制器。
     # 需要强行加载时（万一 DSDT 用了别的 HID）：touch /etc/qm1/bluetooth-force
+    #
+    # ★ 与 modules-load.d 里那两行并不矛盾，说明一下：
+    #   /etc/modules-load.d/qm1-hardware.conf 里的 hci_uart/btrtl 是
+    #   **开机早期**的加载 —— serdev 驱动必须在 ACPI 把蓝牙 UART 枚举出来
+    #   之前就注册好，否则 8250 会先把那个口抢走，hci_h5 再也绑不上。
+    #   那条早加载路径是**故意不设 HID 守卫**的（守卫在这里加，反而会在
+    #   DSDT 不规范时把蓝牙彻底关掉）。
+    #   这里守的是**晚期**路径：模块已经因为别的原因没加载上时，别再去
+    #   硬加载一个根本绑不上的驱动。两种路径的分工写在这里，免得以后
+    #   有人看到"守卫"就把早加载也一起去掉。
     log "这台机没有暴露蓝牙的 ACPI HID（OBDA8723/OBDA0623）⇒ hci_uart 没有可绑定的串口，不加载它"
     write_marker "no Bluetooth ACPI HID (OBDA8723/OBDA0623) on this machine; hci_uart was not loaded on purpose"
     exit 0
