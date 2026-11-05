@@ -29,8 +29,8 @@
 #   7) EFI 启动项：要么登记成功，要么**明确失败**并给出补救命令
 #      （不许"悄悄跳过"还报成功）；
 #   8) 镜像比目标盘大时，安装器必须拒绝并且**一字节都不写**；
-#   9) 设备侧安装器在环设备上跑通：写完的目标分区内容与源一致、
-#      文件系统撑满、e2fsck 干净（不许停在半路）。
+#   9) 设备侧安装器在环设备上跑通：目标 ESP 里的引导文件内容与源一致、
+#      根分区里有源的文件内容、文件系统撑满、e2fsck 干净（不许停在半路）。
 #
 # 需要 root（losetup）。环境不支持时以 77 退出（CI 里表示跳过）。
 set -uo pipefail
@@ -138,6 +138,23 @@ has_file() {  # $1=分区设备 $2=相对路径
         umount "$_hf_mnt" 2>/dev/null || true
     fi
     rmdir "$_hf_mnt" 2>/dev/null || true
+    return 1
+}
+
+# 取分区里某个文件的内容（用来比"内容"，而不是比整分区字节）
+file_content() {  # $1=分区设备 $2=相对路径
+    _fc_mnt="$WORK/mnt-$$-$RANDOM"
+    mkdir -p "$_fc_mnt"
+    if mount -o ro "$1" "$_fc_mnt" 2>/dev/null; then
+        if [ -f "$_fc_mnt/$2" ]; then
+            cat "$_fc_mnt/$2"
+            umount "$_fc_mnt" 2>/dev/null || true
+            rmdir "$_fc_mnt" 2>/dev/null || true
+            return 0
+        fi
+        umount "$_fc_mnt" 2>/dev/null || true
+    fi
+    rmdir "$_fc_mnt" 2>/dev/null || true
     return 1
 }
 
@@ -408,11 +425,18 @@ fi
 
 if [ -b "${LOOP_TGT_E}p1" ] && [ -b "${LOOP_TGT_E}p2" ]; then
     ok "用例 E：目标上出现了 ESP 与根分区两个分区"
-    ESP_BYTES_E="$(blockdev --getsize64 "${LOOP_SRC_E}p1")"
-    if cmp -n "$ESP_BYTES_E" "${LOOP_SRC_E}p1" "${LOOP_TGT_E}p1" 2>/dev/null; then
-        ok "用例 E：目标 ESP 内容与源一致"
+    # 目标 ESP **不能逐字节比**：安装器本来就会改它 ——
+    #   6a 步把 EFI/BOOT/grub-normal.cfg 拷成 EFI/BOOT/grub.cfg（换掉安装菜单），
+    #   6b 步把 provisioning 写进 /qm1/provision/，
+    # FAT 的簇分配、目录项、时间戳都会跟着变 ⇒ 逐字节比必然报"不一致"，
+    # 而那个"不一致"恰恰是设计要的。
+    # 该比的是**内容**：引导文件必须原封不动搬过去。
+    ESP_SRC_BIN="$(file_content "${LOOP_SRC_E}p1" "EFI/BOOT/BOOTIA32.EFI" 2>/dev/null || true)"
+    ESP_TGT_BIN="$(file_content "${LOOP_TGT_E}p1" "EFI/BOOT/BOOTIA32.EFI" 2>/dev/null || true)"
+    if [ -n "$ESP_SRC_BIN" ] && [ "$ESP_SRC_BIN" = "$ESP_TGT_BIN" ]; then
+        ok "用例 E：目标 ESP 里的引导文件与源一致"
     else
-        bad "用例 E：目标 ESP 内容与源不一致"
+        bad "用例 E：目标 ESP 里的引导文件与源不一致"
     fi
     # 根文件系统不能逐字节比：安装器会在目标里写安装记录，
     # 文件系统元数据随之变化 ⇒ 只能比"内容"。
@@ -458,11 +482,28 @@ truncate -s 512M "$TGT_F"
 LOOP_TGT_F="$(losetup --partscan --find --show "$TGT_F" 2>/dev/null)" || skip "造目标失败"
 LOOPS+=("$LOOP_TGT_F")
 
-if bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_F" \
+# **显式注入登记失败**。
+# 以前这个用例靠"CI 里没有 UEFI 固件变量，登记自然失败"来制造失败 ——
+# 但 GitHub 的 Ubuntu runner 其实**有** UEFI（/sys/firmware/efi/efivars 在），
+# 而且装了 efibootmgr，于是登记真的成功、安装器退出 0，
+# 用例反过来判"安装器居然报成功" ⇒ 红的是测试，不是被测代码。
+# 现在放一个必然失败的 efibootmgr 桩到 PATH 最前面：
+# 安装器用 `command -v efibootmgr` + 裸名调用 efibootmgr，PATH 桩对它有效。
+STUB_BIN_F="$WORK/stub-bin-f"
+mkdir -p "$STUB_BIN_F"
+cat > "$STUB_BIN_F/efibootmgr" <<'STUB_EOF'
+#!/bin/sh
+echo "stub efibootmgr: 这个用例就是要它失败" >&2
+exit 1
+STUB_EOF
+chmod +x "$STUB_BIN_F/efibootmgr"
+
+if PATH="$STUB_BIN_F:$PATH" bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_F" \
         --source-disk "$LOOP_SRC_E" --source-root "${LOOP_SRC_E}p2" --source-esp "${LOOP_SRC_E}p1" \
         --lib "$INSTALL_LIB" --no-login-account --mode media --yes \
         > "$WORK/install-f.log" 2>&1; then
     bad "用例 F：EFI 登记失败时设备侧安装器居然报成功（重开机可能开不了机）"
+    tail -30 "$WORK/install-f.log"
 else
     ok "用例 F：EFI 登记失败时设备侧安装器判失败"
 fi
