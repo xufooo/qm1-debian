@@ -199,16 +199,6 @@ jobs:
             echo "RTW88_MODULE=fallback" >> "$GITHUB_ENV"
           fi
 
-      - name: Build the Bluetooth vendor package (rtk_hciattach)
-        if: env.QM1_TARGET_ARCH == 'amd64'
-        run: |
-          set -eux
-          # 内置蓝牙是 ACPI 枚举的 UART（OBDA8723/OBDA0623），主线没有 Realtek
-          # UART HCI 驱动，要靠用户态 rtk_hciattach 下发厂商固件。
-          # 这一步不需要内核头文件，几秒钟就完。
-          bash scripts/build-bt-hciattach.sh --out-dir build/bt-hciattach
-          ls -l build/bt-hciattach/
-
       - name: Build root filesystem (mmdebstrap + hooks)
         run: |
           set -eux
@@ -222,7 +212,6 @@ jobs:
             else
               EXTRA+=(--wifi-module-deb "$(ls build/wifi-module/*.deb | head -1)")
             fi
-            EXTRA+=(--bt-hciattach-deb "$(ls build/bt-hciattach/*.deb | head -1)")
           fi
           bash scripts/build-rootfs.sh \
             --out build/rootfs \
@@ -257,6 +246,15 @@ jobs:
           done
           grep -q 'vmlinuz' build/out/esp-listing.txt || { echo "::error::ESP 缺少内核"; exit 1; }
           grep -q 'initrd' build/out/esp-listing.txt || { echo "::error::ESP 缺少 initrd"; exit 1; }
+          # ★ grub.cfg 必须真的有菜单项。
+          #   原来的 awk 用 `next` 把 menuentry 的**头**也吞掉了，生成的
+          #   grub.cfg 里一条 menuentry 都没有（只剩块体和孤立的 }）——
+          #   机器开机进 GRUB 后是个哑菜单，什么都选不了。
+          mcopy -i build/out/esp.img ::/EFI/BOOT/grub.cfg build/out/grub-from-esp.cfg
+          MENUS="$(grep -c '^menuentry ' build/out/grub-from-esp.cfg || true)"
+          [ "${MENUS:-0}" -ge 1 ] \
+            || { echo "::error::ESP 里的 grub.cfg 一条 menuentry 都没有（哑菜单）"; exit 1; }
+          echo "OK   ESP 的 grub.cfg 有 ${MENUS} 条菜单项"
 
       - name: Assert the rtw88 Wi-Fi module is inside the image
         run: |
@@ -289,12 +287,22 @@ jobs:
             || { echo "::error::镜像里没有 rtw88 固件 rtw88/rtw8723b_fw.bin"; exit 1; }
           grep -qx "$MOD" "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
             || { echo "::error::modules-load.d 里没有 $MOD"; exit 1; }
-          if grep -qx 'r8723bs' "$ROOT/etc/modules-load.d/qm1-hardware.conf"; then
-            echo "::error::modules-load.d 里还留着 staging r8723bs，会和 rtw88 抢 SDIO 设备"
+          if grep -qxE 'r8723bs(_qm1)?' "$ROOT/etc/modules-load.d/qm1-hardware.conf"; then
+            echo "::error::modules-load.d 里还留着 staging r8723bs / r8723bs_qm1，会和 rtw88 抢 SDIO 设备"
             exit 1
           fi
           grep -q 'blacklist r8723bs' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
             || { echo "::error::modprobe 配置里没有 blacklist staging 驱动"; exit 1; }
+          # ★ 隔离必须有两道：blacklist 挡 udev 的 modalias 自动加载，
+          #   install ... /bin/false 再挡一次显式 modprobe。
+          #   少了任一道，树内 r8723bs 就会抢先绑定 SDIO 卡，
+          #   于是"装了根治模块"却仍在用有永久卡死路径的老驱动 —— 而且一切看起来正常。
+          grep -qx 'install r8723bs /bin/false' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+            || { echo "::error::modprobe 配置里没有 install r8723bs /bin/false（隔离只有一道）"; exit 1; }
+          for m in rtw88_core rtw88_sdio; do
+            grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+              || { echo "::error::modprobe 配置里没有 blacklist $m（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
+          done
           # modprobe 里的 options 只能写 rtw_core 真实存在的参数，写错参数会让
           # modprobe 直接拒绝加载模块（Invalid argument）。
           for p in disable_lps_deep support_bf debug_mask; do
@@ -303,41 +311,106 @@ jobs:
           done
           echo "OK   rtw88 根治模块、固件与开机加载项全部就位"
 
-      - name: Assert the Bluetooth vendor package is inside the image
+      - name: Assert the Bluetooth stack (kernel route) is inside the image
         run: |
           set -eu
           ROOT=build/rootfs
-          [ -x "$ROOT/usr/sbin/rtk_hciattach" ] \
-            || { echo "::error::镜像里没有 /usr/sbin/rtk_hciattach（内置蓝牙无法初始化）"; exit 1; }
-          for f in rtlbt_fw rtlbt_config; do
+          # 内置蓝牙（Realtek RTL8723BS 的 BT 部分，ACPI HID OBDA8723/OBDA0623）
+          # 走**内核**路线：hci_uart（含 hci_h5 的 3WIRE 协议）+ btrtl +
+          # 发行版 firmware-realtek 的 rtl_bt/rtl8723bs_{fw.bin,config-OBDA8723.bin}。
+          # 用户态 rtk_hciattach 路线已删除（与内核抢同一个串口，两边都没有 hci0）。
+          for f in rtl8723bs_fw.bin rtl8723bs_config-OBDA8723.bin rtl8723bs_config-OBDA0623.bin; do
             [ -f "$ROOT/lib/firmware/rtl_bt/$f" ] \
-              || { echo "::error::镜像里缺少蓝牙固件 $f"; exit 1; }
+              || { echo "::error::镜像里缺少蓝牙固件 rtl_bt/$f（需要 firmware-realtek）"; exit 1; }
           done
-          [ -x "$ROOT/usr/local/bin/qm1-bt-attach.sh" ] \
-            || { echo "::error::镜像里没有 qm1-bt-attach.sh"; exit 1; }
-          [ -f "$ROOT/lib/systemd/system/qm1-bluetooth.service" ] \
+          [ -f "$ROOT/etc/systemd/system/qm1-bluetooth.service" ] \
             || { echo "::error::镜像里没有 qm1-bluetooth.service"; exit 1; }
-          [ -L "$ROOT/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service" ] \
+          # wants 链接必须能解析到真实单元（只看 -L 会被悬空链接骗过去）
+          BT_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service"
+          [ -L "$BT_LINK" ] \
             || { echo "::error::蓝牙服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
-          # 内核侧必须有 btuart（CONFIG_BT_HCIUART），否则厂商固件下发后没人接手串口。
-          # 实测 Debian 13 的 6.12.113+deb13-amd64 是 CONFIG_BT_HCIUART=m（模块 hci_uart.ko，
-          # Linux 6.x 里这个模块叫 hci_uart，早期内核才叫 bt_hciuart.ko），
-          # 不是编进内核，所以 =y 与 =m 都要接受；=m 时必须能在镜像里找到模块文件。
+          [ -e "$BT_LINK" ] \
+            || { echo "::error::qm1-bluetooth.service 的 wants 链接是悬空的：$(readlink "$BT_LINK")"; exit 1; }
+          # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
+          # Debian 13 的 6.12.113+deb13-amd64 实测：
+          #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m
+          # hci_h5 编在 hci_uart.ko 里，btrtl 是独立模块。
           KCFG=$(ls "$ROOT"/boot/config-* 2>/dev/null | head -1 || true)
-          [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件，无法确认 CONFIG_BT_HCIUART"; exit 1; }
-          if grep -qE '^CONFIG_BT_HCIUART=y$' "$KCFG"; then
-            echo "OK   CONFIG_BT_HCIUART=y（编进内核）"
-          elif grep -qE '^CONFIG_BT_HCIUART=m$' "$KCFG"; then
-            KVER=$(basename "$KCFG" | sed 's/^config-//')
-            if find "$ROOT/lib/modules/$KVER" \( -name 'hci_uart.ko*' -o -name 'bt_hciuart.ko*' \) -print -quit | grep -q .; then
-              echo "OK   CONFIG_BT_HCIUART=m，hci_uart.ko 在镜像里（随包加载）"
-            else
-              echo "::error::CONFIG_BT_HCIUART=m 但镜像里没有 hci_uart.ko"; exit 1
-            fi
-          else
-            echo "::error::内核缺少 CONFIG_BT_HCIUART（既不是 y 也不是 m）"; exit 1
-          fi
-          echo "OK   蓝牙厂商初始化包、固件、服务与开机自启全部就位"
+          [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件，无法确认 CONFIG_BT_*"; exit 1; }
+          for sym in CONFIG_BT_HCIUART CONFIG_BT_HCIUART_SERDEV CONFIG_BT_HCIUART_3WIRE CONFIG_BT_RTL; do
+            grep -qE "^${sym}=(y|m)$" "$KCFG" \
+              || { echo "::error::内核缺少 $sym —— 内核没法接管这台机的 Realtek BT UART"; exit 1; }
+          done
+          KVER=$(basename "$KCFG" | sed 's/^config-//')
+          for mod in hci_uart btrtl; do
+            find "$ROOT/lib/modules/$KVER" -name "$mod.ko*" -print -quit | grep -q . \
+              || { echo "::error::镜像里找不到内核模块 $mod.ko"; exit 1; }
+          done
+          grep -q '^hci_uart$' "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
+            || { echo "::error::modules-load.d 里没有 hci_uart"; exit 1; }
+          grep -q '^btrtl$' "$ROOT/etc/modules-load.d/qm1-hardware.conf" \
+            || { echo "::error::modules-load.d 里没有 btrtl"; exit 1; }
+          echo "OK   蓝牙内核路线就位（hci_uart + btrtl + rtl_bt 固件 + 开机自启）"
+
+      - name: Assert the boot-to-usable baseline (DNS, account, Wi-Fi unit, fstab)
+        run: |
+          set -eu
+          ROOT=build/rootfs
+
+          # 1) DNS 必须有数据源。Debian 13 的 systemd 与 systemd-resolved
+          #    两个包都**不带** /etc/resolv.conf（systemd-resolved 只带
+          #    /usr/lib/systemd/resolv.conf 这个 stub）—— 镜像里如果既没有
+          #    这个软链、又没有开 resolved，就是彻底没有 DNS：
+          #    timesyncd 的 NTP 服务器名解析不了 ⇒ 时钟停在 1970 ⇒ TLS 全废。
+          [ -L "$ROOT/etc/resolv.conf" ] \
+            || { echo "::error::镜像里 /etc/resolv.conf 不是指向 resolved stub 的软链"; exit 1; }
+          grep -qx '/usr/lib/systemd/resolv.conf' "$ROOT/etc/resolv.conf" \
+            || { echo "::error::/etc/resolv.conf 指向的不是 resolved stub：$(readlink "$ROOT/etc/resolv.conf")"; exit 1; }
+          [ -e "$ROOT/etc/resolv.conf" ] \
+            || { echo "::error::/etc/resolv.conf 是悬空软链"; exit 1; }
+          RESOLVED_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
+          [ -e "$RESOLVED_LINK" ] \
+            || { echo "::error::systemd-resolved 没有开机自启（DNS 无数据源）"; exit 1; }
+
+          # 2) 必须有一个能登进来的账号，且**镜像里不留默认口令**
+          #    （口令由安装器装机时随机生成并打印）。
+          grep -q '^qm1:' "$ROOT/etc/passwd" \
+            || { echo "::error::镜像里没有 qm1 账号 —— 装完之后没人能登进去"; exit 1; }
+          QM1_SHADOW="$(getent shadow qm1 2>/dev/null | cut -d: -f2 || echo '')"
+          case "$QM1_SHADOW" in
+            '!'*|'*'|'')
+              echo "OK   qm1 账号存在且口令已锁定（$QM1_SHADOW）" ;;
+            *)
+              echo "::error::镜像里的 qm1 账号带着可用口令 —— 公开分发的镜像不能有通用口令"; exit 1 ;;
+          esac
+
+          # 3) Wi-Fi 单元必须真的被拉起，且 wants 链接不能是悬空的
+          #    （只看 -L 会被悬空链接骗过去：单元在 /etc，链接指向 /lib 就永远起不来）。
+          WIFI_UNIT="$ROOT/etc/systemd/system/qm1-wifi@.service"
+          [ -f "$WIFI_UNIT" ] \
+            || { echo "::error::镜像里没有 qm1-wifi@.service"; exit 1; }
+          WIFI_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service"
+          [ -L "$WIFI_LINK" ] \
+            || { echo "::error::qm1-wifi@wlan0.service 没有开机自启（缺 wants 链接）"; exit 1; }
+          [ -e "$WIFI_LINK" ] \
+            || { echo "::error::qm1-wifi@wlan0.service 的 wants 链接是悬空的：$(readlink "$WIFI_LINK")"; exit 1; }
+          # 单元自己的超时必须大于它内部等 SDIO 枚举接口的 60 秒，
+          # 否则 systemd 会在接口出现之前就把单元掐掉（Wi-Fi 永远起不来且无日志）。
+          grep -qE '^TimeoutStartSec=(1[2-9][0-9]|[2-9][0-9]|[0-9]{3,})s$' "$WIFI_UNIT" \
+            || { echo "::error::qm1-wifi@.service 的 TimeoutStartSec 小于 120s（会被提前掐掉）"; exit 1; }
+
+          # 4) fstab 必须有根分区条目：只有伪文件系统的话，
+          #    systemd 不按 fstab 管理根、不跑 fsck-root。
+          grep -qE '^[^#]*[[:space:]]/[[:space:]]' "$ROOT/etc/fstab" \
+            || { echo "::error::fstab 里没有根分区（/）条目"; exit 1; }
+
+          # 5) 全局启动超时不能是 30s：qm1-wifi 的 ExecStartPre 要等 60 秒，
+          #    30s 的全局上限会直接把它杀掉（而且是在它还没报错之前）。
+          grep -q 'TimeoutStartSec=30s' "$ROOT/etc/systemd/system.conf.d/quick-boot.conf" \
+            && { echo "::error::全局 TimeoutStartSec 还是 30s —— 会掐掉慢单元"; exit 1; } || true
+          grep -q 'TimeoutStartSec=120s' "$ROOT/etc/systemd/system.conf.d/quick-boot.conf" \
+            || { echo "::error::全局 TimeoutStartSec 不是 120s"; exit 1; }
+          echo "OK   开机即用的四项前提就位（DNS / 账号 / Wi-Fi 单元 / fstab）"
 
       - name: Assert the kernel config baseline for the Bay Trail quirks
         run: |
@@ -461,7 +534,21 @@ jobs:
             || { echo "::error::安装器没有把 provisioning 写进目标（装完不会自动联网）"; exit 1; }
           grep -q 'BACKUP_DIR' "$INSTALLER" \
             || { echo "::error::安装器没有备份流程（覆盖 eMMC 前必须能整盘备份）"; exit 1; }
-          echo "OK   安装器支持非破坏性路径 + 备份 + provisioning"
+          # 覆盖 eMMC 的路径必须是"完整备份 + 逐分区校验"，
+          # 而不是只算备份文件自身的哈希（那样分区内容坏了也发现不了）。
+          grep -q 'verify_backup_partitions' "$INSTALLER" \
+            || { echo "::error::安装器没有逐分区校验备份"; exit 1; }
+          grep -q 'qm1.install.mode' "$INSTALLER" \
+            || { echo "::error::安装器不认 qm1.install.mode（GRUB 菜单无法指定装到哪）"; exit 1; }
+          grep -q 'efibootmgr' "$INSTALLER" \
+            || { echo "::error::安装器不登记 UEFI 启动项（装完可能要手动选启动设备）"; exit 1; }
+          # 分区必须按分区类型认，不能按 lsblk 输出顺序猜
+          grep -q 'PARTTYPE' "$INSTALLER" \
+            || { echo "::error::安装器没有按 PARTTYPE 识别 ESP/根分区"; exit 1; }
+          # 写盘校验失败必须中止，不能只 warn 完继续
+          grep -q '写入校验失败 —— 中止' "$INSTALLER" \
+            || { echo "::error::安装器写盘校验失败没有中止"; exit 1; }
+          echo "OK   安装器支持非破坏性路径 + 备份(含逐分区校验) + provisioning + UEFI 启动项"
 
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
@@ -623,10 +710,18 @@ jobs:
           mcopy -i build/out/esp-installer.img ::/EFI/BOOT/grub.cfg build/out/installer-grub.cfg
           grep -q 'qm1.install=1' build/out/installer-grub.cfg \
             || { echo "::error::安装菜单缺少 qm1.install=1（安装动作不会触发）"; exit 1; }
-          # 4) 设备端要能分区：sfdisk 来自 fdisk 包
+          # 非 TTY 环境（systemd 单元）里，"确认覆盖 eMMC"这步必须有 yes，
+          # 否则安装器会停在那一步 —— 从菜单选 ① 永远走不完。
+          grep -q 'qm1.install.mode=emmc' build/out/installer-grub.cfg \
+            || { echo "::error::安装菜单缺少 qm1.install.mode=emmc（目标不明确）"; exit 1; }
+          grep -q 'qm1.install.yes=1' build/out/installer-grub.cfg \
+            || { echo "::error::安装菜单缺少 qm1.install.yes=1（非交互下会停在确认步骤）"; exit 1; }
+          # 4) 设备端要能分区：sfdisk 来自 fdisk 包；要登记 UEFI 启动项：efibootmgr
           [ -x "$ROOT/usr/sbin/sfdisk" ] || [ -x "$ROOT/usr/bin/sfdisk" ] \
             || { echo "::error::镜像里没有 sfdisk（设备上无法给 eMMC 分区）"; exit 1; }
-          echo "OK   安装介质（安装菜单 + 正常菜单 + 安装脚本 + sfdisk）齐备"
+          { [ -x "$ROOT/usr/sbin/efibootmgr" ] || [ -x "$ROOT/usr/bin/efibootmgr" ]; } \
+            || { echo "::error::镜像里没有 efibootmgr（装完无法登记 UEFI 启动项）"; exit 1; }
+          echo "OK   安装介质（安装菜单 + 正常菜单 + 安装脚本 + sfdisk + efibootmgr）齐备"
           zstd -12 -T0 --long=27 -f build/out/qm1-installer.img -o build/out/qm1-installer.img.zst
           ls -lh build/out/qm1-installer.img.zst
           sha256sum build/out/qm1-installer.img.zst >> build/out/SHA256SUMS

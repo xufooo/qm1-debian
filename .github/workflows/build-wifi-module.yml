@@ -394,11 +394,16 @@ jobs:
       - name: Build the whole upstream rtw88 tree
         run: |
           set -eux
+          # 不传 --upstream-ref：脚本里已经钉死了具体的上游提交
+          # （05441d697f7f9a927264f4058cbbc6a03dfcac9d）。
+          # 用浮动分支（master）意味着构建不可复现：上游哪天把 2500ms 的
+          # TX report purge 超时改回 500ms，镜像就会静默退回"能连上但
+          # 吞吐塌陷"的老症状，而**构建不会失败**。脚本里还有一道断言：
+          # 该提交的 rtw88/tx.h 必须带着 2500ms 的 RTW_TX_PROBE_TIMEOUT_LONG。
           bash scripts/build-rtw88-8723bs-module.sh \
             --kver "${{ steps.kernel.outputs.kver }}" \
             --out-dir build/rtw88-upstream \
-            --source upstream-full \
-            --upstream-ref master
+            --source upstream-full
 
       - name: Verify the upstream rtw88 module
         run: |
@@ -418,6 +423,14 @@ jobs:
             > build/rtw88-upstream/modprobe.conf
           grep -q '^options rtw88_qm1 disable_lps_deep=y$' build/rtw88-upstream/modprobe.conf
           grep -q '^blacklist rtw88_core$' build/rtw88-upstream/modprobe.conf
+          # 源码必须是**钉死的提交**，不能是 master 这种浮动引用
+          PINNED_REF="$(sed -n 's/^UPSTREAM_REF="\([0-9a-f]\{40\}\)"/\1/p' \
+            scripts/build-rtw88-8723bs-module.sh | head -1)"
+          [ -n "$PINNED_REF" ] || { echo "::error::脚本里没有钉死的 UPSTREAM_REF"; exit 1; }
+          grep -qx "upstream_ref=$PINNED_REF" \
+            build/rtw88-upstream/qm1-rtw88-8723bs.manifest \
+            || { echo "::error::包记录的 upstream_ref 不是钉死的提交 $PINNED_REF"; exit 1; }
+          echo "上游源码已钉死：$PINNED_REF"
 
       - name: Write summary
         if: always()
