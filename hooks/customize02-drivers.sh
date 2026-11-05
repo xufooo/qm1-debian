@@ -292,6 +292,25 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
         die "rtw88 模块 deb 安装失败：$_deb_name"
     fi
     rm -f "$TARGET/tmp/$_deb_name"
+    # ★ 装完 deb 之后再数一次内核目录。
+    #   模块包的 Depends 曾经写成 "linux-image-<ABI>"（签名版），而镜像里装的是
+    #   -unsigned 变体 —— 两个变体互相 Conflicts，apt 只能三条路里挑一条：
+    #     (a) 换成签名版 → 顺带拉进 grub-efi-amd64-signed（正是本项目要避开的东西）；
+    #     (b) 退到 linux-image-amd64 元包 → 往镜像里塞进**第二个**内核；
+    #     (c) 装不上 → 构建失败。
+    #   而"镜像里只应有一个内核"的检查原本跑在装 deb **之前**，所以 (b) 那种
+    #   情况静默通过，构建照常绿。现在依赖改成优先匹配 -unsigned 变体，
+    #   并且在这里复查。
+    _kernel_dirs=""
+    for _d in "$TARGET"/lib/modules/*; do
+        [ -e "$_d" ] || continue
+        _kernel_dirs="$_kernel_dirs $(basename "$_d")"
+    done
+    _kernel_count="$(printf '%s\n' "$_kernel_dirs" | tr ' ' '\n' | sed '/^$/d' | wc -l)"
+    if [ "$_kernel_count" -ne 1 ]; then
+        die "镜像里出现了多个内核：$_kernel_dirs —— 多内核会让 initramfs/GRUB 挑错，也说明模块包的依赖把第二个内核拉进来了"
+    fi
+    log "镜像内的内核只有一个：$_kernel_dirs"
     # 刷新模块索引：树外模块装在 extra/ 下，模块名要能被 modprobe 解析出来。
     #
     # ★ 必须显式给内核版本：depmod 不带版本参数时用的是**当前运行内核**的
@@ -366,18 +385,40 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
             echo "# 把我们装好的 rtw88 模块晾在一边（现象：装了根治模块却仍在用老驱动）。"
         } > "$_iso_conf"
     fi
-    for _iso_line in \
-        "blacklist r8723bs" \
-        "install r8723bs /bin/false" \
-        "blacklist r8723bs_qm1" \
-        "install r8723bs_qm1 /bin/false" \
-        "blacklist rtw88_core" \
-        "blacklist rtw88_sdio" \
-        "blacklist rtw88_usb" \
-        "blacklist rtw88_pci" ; do
+    # 树内 rtw88 系列：与包内 conf 用同一份名单（build 脚本的 INTREE_RTW88），
+    # 免得"包里有、钩子里没有"这种两边不一致。
+    #
+    # ★ 隔离名单绝不能包含**出货模块自己**。
+    #   上游"芯片回移"模式（只编 rtw8723bs.c，复用树内 rtw88 核心）产出的
+    #   模块名就叫 rtw88_8723bs，而且它依赖树内的 rtw88_core ⇒ 这两种情况下
+    #   把树内 rtw88 拉黑 = 把出货模块自己拉死（insmod 找不到符号）。
+    #   整树回移模式（rtw88_qm1）才需要把树内 rtw88 全部挡住。
+    _iso_lines="blacklist r8723bs
+install r8723bs /bin/false
+blacklist r8723bs_qm1
+install r8723bs_qm1 /bin/false"
+    if [ "$_sdio_mod" != "rtw88_8723bs" ]; then
+        for _m in rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_usb rtw88_pci; do
+            # 绝不挡出货模块自己。
+            [ "$_m" = "$_sdio_mod" ] && continue
+            _iso_lines="$_iso_lines
+blacklist $_m
+install $_m /bin/false"
+        done
+    else
+        log "出货模块是 rtw88_8723bs（复用树内 rtw88 核心）⇒ 不隔离树内 rtw88"
+    fi
+    # ★ 用临时文件 + `while ... done < file`，不用 `printf | while`：
+    #   管道右侧的 while 跑在**子 shell** 里，子 shell 的变量改动不回传
+    #   （写文件没问题，但任何计数/状态都会丢）。`done < file` 在当前 shell 跑。
+    _iso_tmp="$(mktemp)"
+    printf '%s\n' "$_iso_lines" > "$_iso_tmp"
+    while IFS= read -r _iso_line; do
+        [ -n "$_iso_line" ] || continue
         grep -qxF "$_iso_line" "$_iso_conf" 2>/dev/null \
             || printf '%s\n' "$_iso_line" >> "$_iso_conf"
-    done
+    done < "$_iso_tmp"
+    rm -f "$_iso_tmp"
     chmod 0644 "$_iso_conf"
     log "已补齐隔离配置：$_iso_conf（挡住树内 r8723bs、树外 r8723bs_qm1 与树内 rtw88）"
 
@@ -552,6 +593,17 @@ fi
 # 用 modinfo 查会报 MISSING —— 那是误报，不是缺驱动。
 driver_state() {
     _mod="$1"; _sym="$2"
+    # ★ 树外模块先按**路径**找：kmod 的 modinfo 只查内核的标准模块目录，
+    #   查不到装在 extra/ 下的树外模块（实测在 CI 里就是因此把出货的
+    #   rtw88_qm1 误判成 absent，manifest 与同一份文件里的"出货驱动"行
+    #   自相矛盾）。所以这里先扫 extra/，再退回 modinfo。
+    if [ -n "${KVER:-}" ]; then
+        for _ko in "$TARGET/lib/modules/$KVER/extra/"*/"${_mod}.ko"; do
+            if [ -f "$_ko" ]; then
+                echo "module"; return
+            fi
+        done
+    fi
     if chroot "$TARGET" modinfo -k "$KVER" "$_mod" >/dev/null 2>&1; then
         echo "module"; return
     fi
@@ -586,6 +638,7 @@ btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
 hci_uart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口；hci_h5 的 3WIRE 协议编在此模块里）|
 btrtl|BT_RTL|Realtek 蓝牙厂商固件下发（btrtl，按 ACPI HID 取 rtl_bt/rtl8723bs_*）|
 r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，树内 staging 驱动；装了树外模块时会被 blacklist）|
+rtw88_qm1|RTW88|Realtek RTL8723BS SDIO Wi-Fi（出货路径：上游 rtw88 整树回移成树外模块，装在 extra/rtw88/ 下）|
 brcmfmac|BRCMFMAC|Broadcom Wi-Fi（主线驱动）|
 iwlwifi|IWLWIFI|Intel Wi-Fi（主线驱动）|
 rtw88|RTW88|Realtek 88xx Wi-Fi（主线驱动）|
@@ -608,7 +661,8 @@ fw_blob_summary=""
 for blob in brcmfmac4350-pcie.bin brcmfmac4356-pcie.bin brcmfmac4358-pcie.bin \
             brcmfmac4366b-pcie.bin brcmfmac4366c-pcie.bin \
             rtl8723a_fw.bin rtl8723befw.bin \
-            rtl8723bs_nic.bin mt7610u.bin mt7601u.bin; do
+            rtl8723bs_nic.bin mt7610u.bin mt7601u.bin \
+            rtw8723b_fw.bin; do
     # find -quit 会让上游管道出 SIGPIPE，这里直接取结果判断
     if [ -n "$(find "$TARGET/lib/firmware" -name "$blob" -print -quit 2>/dev/null)" ]; then
         fw_blob_summary="$fw_blob_summary $blob:ok"

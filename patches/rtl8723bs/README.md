@@ -8,9 +8,10 @@ SDIO) as shipped in Debian 13, kernel source package `linux 6.12.113-1`
   All line numbers below refer to that unmodified base tree.
 * The patches are a series: apply them **in order** with GNU patch
   (`patch --batch --forward -p1 < 0001-*.patch`, then 0002 … 0006).
-  0002 and 0003 share the context added by 0001 in `hal/rtl8723bs_xmit.c`, so
-  `git apply` in strict mode fails on 0002 (it refuses the shifted context);
-  GNU patch applies the series cleanly.
+  Every patch also applies **standalone** on the pristine tree (each was
+  dry-run individually against the base tree: all six succeed with zero fuzz,
+  zero offsets, zero rejects), so the series is order-tolerant; the order is
+  still recommended because later patches build on earlier ones' intent.
 * Source-level work only. Nothing here was compiled, built or tested on hardware:
   this machine is macOS and has no Linux build environment. The patches were
   verified by applying them to a pristine 6.12.113-1 copy of the driver and
@@ -18,6 +19,9 @@ SDIO) as shipped in Debian 13, kernel source package `linux 6.12.113-1`
   The series was re-verified against the exact Debian 6.12.113-1 files
   (`patch --dry-run --batch --strip=1` on all six: zero fuzz, zero offsets,
   zero rejects).
+* These patches are **locally authored**, not upstream commits. The mail
+  headers carry no upstream `From <sha>` because there is no upstream commit
+  to point at — do not treat the `Subject:` as an upstream reference.
 
 ## 0001 — rtl8723bs: re-kick TX worker when a pending xmitbuf is put back
 

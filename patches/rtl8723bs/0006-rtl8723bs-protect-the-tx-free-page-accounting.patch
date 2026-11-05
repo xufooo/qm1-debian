@@ -1,5 +1,4 @@
-From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
-From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Wed, 5 Nov 2026 23:30:00 +0800
 Subject: [PATCH 6/6] rtl8723bs: protect the TX free page accounting with the
  lock the driver already has

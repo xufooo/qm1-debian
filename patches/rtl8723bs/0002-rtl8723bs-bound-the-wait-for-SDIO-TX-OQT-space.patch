@@ -1,5 +1,4 @@
-From abd3b2b500866148d060cd9ec270d3f03440696b Mon Sep 17 00:00:00 2001
-From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:15:21 +0800
 Subject: [PATCH 2/6] rtl8723bs: bound the wait for SDIO TX OQT space
 

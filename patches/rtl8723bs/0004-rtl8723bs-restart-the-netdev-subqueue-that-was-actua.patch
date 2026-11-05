@@ -1,5 +1,4 @@
-From b83732a7c84918b1064490a5b7e04df281d86a6b Mon Sep 17 00:00:00 2001
-From: QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
+From: (local patch, not an upstream commit) QM1 Debian Maintainers <qm1-debian@users.noreply.github.com>
 Date: Thu, 5 Nov 2026 00:15:21 +0800
 Subject: [PATCH 4/6] rtl8723bs: restart the netdev subqueue that was actually
  stopped

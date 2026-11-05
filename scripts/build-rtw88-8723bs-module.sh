@@ -463,16 +463,33 @@ EOF
             printf '[rtw88][fail] those symbols have to be provided by the out-of-tree module itself (log: %s)\n' "$build_log" >&2
             die "the out-of-tree rtw88 module has unresolved symbols"
         fi
-        printf '[rtw88] %s\n' "rebuilding with the in-tree rtw88 export symbols blacklisted:" >&2
+        # ★ 这里原来有一次"降级重编"：加上 KBUILD_MODPOST_WARN=1 再编一遍，
+        #   打印一句"这些符号来自树内 rtw88，镜像里已经拉黑，属预期"就当成功。
+        #   那条路是自相矛盾的，本轮审查把它判成 P0 并已修掉：
+        #     * 树内 rtw88_core / rtw88_sdio 被镜像拉黑 ⇒ 运行时那些符号根本
+        #       不存在 ⇒ insmod 会报 "Unknown symbol" ⇒ 模块永远装不上 ⇒
+        #       没有 wlan0。而构建却报成功，CI 的所有断言（.ko 存在、vermagic、
+        #       alias 含 b723、固件在、conf 行在）全部满足 ⇒ "绿镜像没有 Wi-Fi"。
+        #     * 树内 rtw88_core.ko 导出的符号（rtw_core_init / rtw_register_hw /
+        #       rtw_chip_info_setup …）与上游整树**同名**，两个模块不可能同时
+        #       加载（第二个 insmod 报 "exported symbol already defined"）。
+        #       所以"复用树内导出"这条路本身就不成立。
+        #     * 真正会触发这条分支的场景 = 上游 Makefile 的对象表没解析全
+        #       （漏 CONFIG_PM 的 wow.o、漏新增文件），于是 modpost 报的未定义
+        #       符号恰好是树内 rtw88 导出的那批 —— 那是**对象表不完整**，
+        #       属于必须失败的缺陷，不是"预期"。
+        #   ⇒ 现在这里直接失败，不允许产出符号残缺的模块。
+        printf '[rtw88][fail] %s\n' "未定义符号（modpost 判定）:" >&2
         for sym in $undef_syms; do
-            printf '[rtw88]   - %s\n' "$sym" >&2
+            printf '[rtw88][fail]   - %s\n' "$sym" >&2
         done
-        printf '[rtw88] %s\n' "these symbols come from the in-tree rtw88 exports; the image blacklists the corresponding modules, so this is expected" >&2
-        make -C "$KSRC" M="$mod" -j"$JOBS" modules \
-            KBUILD_MODPOST_WARN=1 CONFIG_DEBUG_INFO_BTF_MODULES= \
-            CC="$cc_bin" LD="$ld_bin" \
-            2>&1 | tee -a "$build_log" \
-            || die "the full upstream rtw88 tree does not compile against $KVER (log: $build_log)"
+        printf '[rtw88][fail] %s\n' \
+            "其中来自树内 rtw88 导出的符号在镜像里不可用（树内 rtw88 被拉黑，符号同名冲突），" >&2
+        printf '[rtw88][fail] %s\n' \
+            "用 KBUILD_MODPOST_WARN 硬编出来的模块会在真机上 insmod 报 Unknown symbol —— 拒绝出货。" >&2
+        printf '[rtw88][fail] %s\n' \
+            "请检查上游 Makefile 的对象表解析（core_count >= 15 只是粗检查）" >&2
+        die "the out-of-tree rtw88 module has unresolved symbols (log: $build_log)"
     fi
 
     [ -f "$mod/rtw88_qm1.ko" ] || { warn "upstream build produced no module"; return 1; }
@@ -724,10 +741,37 @@ for param in $CORE_PARAMS; do
 done
 
 # The in-tree kernel ships its own rtw88 modules.  They export the same symbol
-# names as the backport, so they must never be loaded next to it.
-BLACKLIST_EXTRA=""
-if [ "$SOURCE" = "upstream-full" ]; then
-    BLACKLIST_EXTRA="rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_pci rtw88_usb"
+# names as the backport (rtw_core_init / rtw_register_hw / rtw_chip_info_setup …),
+# so the two can never be loaded at the same time — the second insmod fails with
+# "exported symbol already defined".  They must therefore be blocked in the
+# image, not just in the build hook.
+#
+# The staging driver r8723bs has to be blocked as well: it claims the very same
+# SDIO device id (0x024c:0xb723) and udev loads it by modalias, so it would
+# bind the card before the backport ever gets a chance.
+#
+# ★ 两道隔离都要（blacklist + install ... /bin/false）：
+#   blacklist 只挡自动加载（udev 的 modalias 路径），挡不住显式 modprobe；
+#   install ... /bin/false 才挡显式加载。少一道就等于没隔离。
+#   ★ 这些行**写在包自带的 conf 里**，不只写在构建钩子里：
+#     这个包将来完全可能通过 apt 直接安装（不经本项目的 hook），那时
+#     钩子补的那几行就不在了 ⇒ 树内驱动照样抢先绑定，出货模块永远拿不到设备，
+#     而"装上了根治模块"这件事在日志和清单里看起来一切正常。
+INTREE_RTW88="rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_pci rtw88_usb"
+
+# ★ 隔离名单必须与**我们自己编出来的模块**不冲突，否则会把出货模块自己拉黑。
+#   三种构建来源的模块名各不相同：
+#     upstream-full → rtw88_qm1（整树一个模块）⇒ 与树内名字都不冲突。
+#     vendor        → rtw_core / rtw_sdio / rtw_8723b / rtw_8723bs（vendor 树
+#                     的旧命名）⇒ 与树内 rtw88_* 不重名，但导出的是**同名符号**
+#                     （rtw_core_init …），所以树内 rtw88_core 仍然必须挡住。
+#     upstream      → rtw88_8723b / rtw88_8723bs（只有芯片文件，复用树内核心）
+#                     ⇒ 名字与树内**完全相同**，而且依赖树内 rtw88_core ⇒
+#                       这两种情况下一个都不能挡（挡了等于把出货模块自己挡死）。
+_own_mods="$(printf '%s\n' $MOD_NAMES | sed 's/\.ko$//' | tr '\n' ' ')"
+_block_tree_rtw88=1
+if [ "$SOURCE" = "upstream" ]; then
+    _block_tree_rtw88=0
 fi
 
 {
@@ -735,9 +779,23 @@ fi
     echo "# The staging parameters (rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode /"
     echo "# rtw_bw_mode) belong to r8723bs only; the rtw88 driver exposes the ones below."
     echo "blacklist r8723bs"
-    for m in $BLACKLIST_EXTRA; do
-        echo "blacklist $m"
-    done
+    echo "install r8723bs /bin/false"
+    # The patched out-of-tree staging module carries the same SDIO device id,
+    # so it has to be blocked as well — it is the old driver under a new name.
+    echo "blacklist r8723bs_qm1"
+    echo "install r8723bs_qm1 /bin/false"
+    if [ "$_block_tree_rtw88" = "1" ]; then
+        for m in $INTREE_RTW88; do
+            # 绝不挡我们自己编出来的模块。
+            case " $_own_mods " in
+                *" $m "*) continue ;;
+            esac
+            echo "blacklist $m"
+            echo "install $m /bin/false"
+        done
+    else
+        echo "# $SOURCE 模式复用树内 rtw88 核心（模块名与树内相同）⇒ 不隔离树内 rtw88。"
+    fi
     echo "options ${CORE_MODULE} disable_lps_deep=y"
     echo "options ${CORE_MODULE} support_bf=y"
     echo "options ${CORE_MODULE} debug_mask=0"
@@ -774,7 +832,7 @@ Version: $PKG_VERSION
 Section: kernel
 Priority: optional
 Architecture: amd64
-Depends: linux-image-$KVER | linux-image-amd64
+Depends: linux-image-${KVER}-unsigned | linux-image-${KVER} | linux-image-amd64
 Maintainer: QM1 image build
 Description: Out-of-tree rtw88 driver for the Realtek RTL8723BS SDIO Wi-Fi chip
  The upstream RTL8723B and RTL8723BS support that was merged into the rtw88
@@ -806,9 +864,15 @@ set -e
 _kvers=""
 for _d in /lib/modules/*/extra/rtw88; do
     [ -d "$_d" ] || continue
-    _kvers="$_kvers ${_d%/extra/rtw88}"
+    # 取出内核版本号（basename），不是目录路径 ——
+    # depmod -a 收的是版本号；给它 "/lib/modules/<ver>" 会去找
+    # /lib/modules//lib/modules/<ver> 然后失败（CI 里那条
+    # "depmod -a /lib/modules/6.12.113+deb13-amd64 失败" 就是这么来的）。
+    _kv="${_d%/extra/rtw88}"
+    _kv="${_kv#/lib/modules/}"
+    [ -n "$_kv" ] || continue
+    _kvers="$_kvers $_kv"
 done
-_kvers="${_kvers#/lib/modules/}"
 
 if [ -z "$_kvers" ]; then
     echo "qm1-rtw88-8723bs: 找不到本包装下的模块目录，模块索引没刷新" >&2
