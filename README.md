@@ -272,7 +272,10 @@ Debian 13 的 `firmware-realtek` 里也没有 `rtw88/rtw8723b_fw.bin`（sid 才�
 | `scripts/fetch-rtw8723b-firmware.sh` | 从 Debian sid 的 `firmware-realtek` 里只取 `rtw88/rtw8723b_fw.bin`（用 sid 包索引里的 SHA256 校验 .deb 本身） |
 
 打好的 deb 里包含：模块（`/lib/modules/<abi>/extra/rtw88/`）、固件（`/lib/firmware/rtw88/`）、
-`/etc/modprobe.d/qm1-rtw88-8723bs.conf`（`blacklist r8723bs` + 关省电、限 20MHz 的参数）、
+`/etc/modprobe.d/qm1-rtw88-8723bs.conf`（`blacklist r8723bs` + rtw88 核心自己的参数
+`disable_lps_deep=y` / `support_bf=y` / `debug_mask=0`；注意 `rtw_power_mgnt` /
+`rtw_smart_ps` / `rtw_ips_mode` / `rtw_bw_mode` 是 **staging 驱动**的参数，rtw88 没有，
+写上去会让 modprobe 直接拒绝加载模块 —— CI 会逐个参数核对 `modinfo -p`）、
 以及 `qm1-rtw88-8723bs.service`（先 rmmod 树内 staging 驱动，再 modprobe 回移模块）。
 
 **装进镜像**：
