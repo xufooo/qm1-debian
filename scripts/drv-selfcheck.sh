@@ -128,6 +128,32 @@ for m in vfat ext4; do
     if [ -d "/sys/module/$m" ]; then row PASS "文件系统 $m" "已加载"; else row WARN "文件系统 $m" "未加载"; fi
 done
 
+# 整机到得了 multi-user.target 吗？
+#
+# 这是"开机即用"的底线：多用户目标到不了 ⇒ SSH 起不来 ⇒ 看起来像砖了。
+# 之前就栽在这上面 —— Wi-Fi 单元的 ExecStartPre 在等 SDIO 枚举 wlan0，
+# 它的 start job 永不完成，而 multi-user.target 会对 Wants= 的成员
+# 隐式补 After=，于是整机永远停在那儿。
+# is-system-running 在 degraded 时也会返回非零，所以要兜住。
+_state="$(systemctl is-system-running 2>/dev/null || true)"
+case "$_state" in
+    running)  row PASS "系统状态" "running —— 已到 multi-user.target" ;;
+    degraded) row WARN "系统状态" "degraded —— 已到 multi-user.target，但有单元失败（看下面的 FAIL 行）" ;;
+    *)        row FAIL "系统状态" "${_state:-未知} —— 没到 multi-user.target，SSH 可能根本没起来" ;;
+esac
+
+# 只有一套内核？
+#
+# 曾经出过"签名内核与 -unsigned 内核互 Conflicts ⇒ apt 把内核换掉"的坑。
+# 两套内核并存时，模块的 vermagic 会对不上 ⇒ 驱动装上了也不认。
+_kvers="$(ls -1 /lib/modules 2>/dev/null | tr '\n' ' ')"
+_kcount="$(ls -1 /lib/modules 2>/dev/null | wc -l | tr -d ' ')"
+if [ "${_kcount:-0}" -le 1 ]; then
+    row PASS "内核套数" "${_kcount:-0} 套（${_kvers:-无}）"
+else
+    row FAIL "内核套数" "${_kcount} 套内核并存：${_kvers} —— 模块 vermagic 会对不上，删掉多余的那套"
+fi
+
 # ---------------- 2. 外设 ----------------
 section "外设"
 if [ -d /sys/class/drm ]; then
@@ -347,6 +373,41 @@ if [ -z "$bt_state" ]; then
         row INFO "蓝牙线索" "$_btlog"
         row INFO "蓝牙排查" "内核没绑定 OBDA8723 时，多半是 DSDT 把这个 ACPI 设备暴露成了普通 16550 串口（8250 抢先绑定）—— 需要 DSDT 覆盖"
     fi
+fi
+
+# 蓝牙的 ACPI HID：这台机的 BT UART 是靠它暴露的（上游 hci_h5 的
+# h5_acpi_match[] 认的就是 OBDA8723 / OBDA0623）。
+#
+# 镜像里的 qm1-bluetooth-up **只有看到这个 HID 才会 modprobe hci_uart**：
+# 没有 HID 就加载 hci_uart 没有可绑定的串口，纯属白占一个 uart 端口
+# （在 CI 的 QEMU 里它还把串口控制台搅黄了 —— 整机到不了 multi-user.target）。
+# 所以这里既要看 HID 在不在，也要看它被谁认领：8250 抢先绑定 ⇒ 内核绑不上。
+_bt_hid=""
+_bt_owner=""
+for _d in /sys/bus/acpi/devices/*; do
+    [ -e "$_d" ] || continue
+    _hid="$(cat "$_d/hid" 2>/dev/null || true)"
+    case "$(printf '%s' "$_hid" | tr 'a-z' 'A-Z')" in
+        OBDA8723|OBDA0623)
+            _bt_hid="$_hid"
+            _bt_owner="$(basename "$(readlink -f "$_d/driver" 2>/dev/null || echo unknown)" 2>/dev/null || echo unknown)"
+            ;;
+    esac
+done
+if [ -n "$_bt_hid" ]; then
+    if [ -d /sys/class/bluetooth/hci0 ]; then
+        row PASS "蓝牙 ACPI" "HID=$_bt_hid 已被 ${_bt_owner:-未知} 认领，hci0 已出现"
+    else
+        row FAIL "蓝牙 ACPI" "HID=$_bt_hid 存在（认领者=${_bt_owner:-未知}）却没有 hci0 —— 8250 抢占了那条串口，需要 DSDT 覆盖"
+    fi
+else
+    row WARN "蓝牙 ACPI" "没有 OBDA8723/OBDA0623 ⇒ DSDT 没把蓝牙 UART 暴露出来，镜像因此**故意没有**加载 hci_uart"
+fi
+# 没加载也要留痕：原因写在标记文件里，别让它悄悄消失
+if [ -f /run/qm1-bluetooth.failed ]; then
+    row INFO "蓝牙失败标记" "$(tr '\n' ' ' < /run/qm1-bluetooth.failed)"
+else
+    row INFO "蓝牙失败标记" "没有 /run/qm1-bluetooth.failed（蓝牙这一项没有失败记录）"
 fi
 
 if [ -d /sys/class/rtc ]; then
