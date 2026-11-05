@@ -54,6 +54,13 @@ fi
 
 # 稳定性取证采集器：周期快照（整机卡死 / eMMC 掉卡 / Wi-Fi 断流的判据）。
 # 没有计数器就无法判断某个缓解到底有没有用，所以它是第一优先级的组件。
+if [ -f "$TARGET/etc/systemd/system/qm1-hardware-fixups.service" ]; then
+    chroot "$TARGET" systemctl enable qm1-hardware-fixups.service >/dev/null 2>&1 \
+        || ln -sf /lib/systemd/system/qm1-hardware-fixups.service \
+               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-hardware-fixups.service"
+    echo "[hook03] 已启用 qm1-hardware-fixups.service（eMMC runtime PM / 调频 / HDMI 音频 / 蓝牙绑定）"
+fi
+
 if [ -f "$TARGET/etc/systemd/system/qm1-health-collect.timer" ]; then
     mkdir -p "$TARGET/var/log/qm1-health"
     chroot "$TARGET" systemctl enable qm1-health-collect.timer >/dev/null 2>&1 \

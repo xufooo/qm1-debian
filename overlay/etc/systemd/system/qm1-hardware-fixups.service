@@ -1,0 +1,16 @@
+[Unit]
+Description=QM1 hardware fixups (eMMC runtime PM, cpufreq, HDMI audio, Bluetooth)
+Documentation=https://github.com/xufooo/qm1-debian
+After=systemd-modules-load.service sysinit.target
+Before=network-pre.target systemd-networkd.service
+Wants=systemd-modules-load.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qm1-hardware-fixups
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

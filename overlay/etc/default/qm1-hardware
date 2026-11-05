@@ -1,0 +1,10 @@
+# Knobs for /usr/local/sbin/qm1-hardware-fixups
+
+# Cap the intel_pstate frequency (percent of the top step, 1..100).
+# Empty = no cap.  The QM1 case has no active cooling and the CPU throttles
+# at 85 C, so a cap around 80 keeps it cool at the cost of some speed.
+Qm1_MAX_FREQ_PERC=""
+
+# "off" keeps the eMMC SD host out of runtime suspend.  A Bay Trail SD host
+# that suspends mid-transfer leaves the card with a half finished reset.
+Qm1_EMMC_RUNTIME_PM="off"
