@@ -148,6 +148,7 @@ export QM1_ARCH="$ARCH"
 export QM1_PROFILE="$PROFILE"
 export QM1_OVERLAY_DIR="$REPO_ROOT/overlay"
 export QM1_SELFCHECK_SRC="$SCRIPT_DIR/drv-selfcheck.sh"
+export QM1_LIB_DIR="$SCRIPT_DIR/lib"
 export QM1_PROVISION_SRC="$SCRIPT_DIR/provision-agent.sh"
 # hook 需要知道用哪个发行版/镜像源，才能拼出 <suite>-proposed-updates 的临时 apt 源
 export QM1_SUITE="$SUITE"

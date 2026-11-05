@@ -48,6 +48,28 @@ check_attr() {
     fi
 }
 
+# 目录权限检查：镜像里某个目录下的普通文件不允许"组可写"或"其他人可写"。
+# 为什么要在镜像侧查，而不是信任构建机：git 只记录有没有执行位，
+# checkout 时按当前 umask 重算权限，同一个提交在不同构建机上落出来的
+# 权限不一样（CI 上 /usr/local/sbin/qm1-wifi-start 就落成过 0775）。
+# root 拥有的脚本若对组可写，等于给组里 anyone 留了一条改写系统的路。
+check_no_group_writable() {
+    local dir="$1" desc="$2"
+    local out bad
+    out="$(debugfs -R "ls -l $dir" "$IMG" 2>/dev/null || true)"
+    # ls -l 的权限串在第一列：位置 1 是类型，2-4 属主，5-7 属组，8-10 其他人。
+    # 组可写 = 位置 6；其他人可写 = 位置 9。
+    bad="$(printf '%s\n' "$out" | awk '$1 ~ /^-/ { p=$1
+              if (substr(p,6,1) == "w" || substr(p,9,1) == "w") print $0 }')"
+    if [ -z "$bad" ]; then
+        printf '  OK   %-46s (%s)\n' "$dir" "$desc"
+    else
+        printf '  FAIL %-46s (%s)\n' "$dir" "$desc"
+        printf '%s\n' "$bad" | sed 's/^/         /' >&2
+        fail=$((fail + 1))
+    fi
+}
+
 # 内容检查：debugfs -R "cat <path>"，在镜像内取文件正文
 check_content() {
     local path="$1" regex="$2" desc="$3"
@@ -335,7 +357,14 @@ check_content /etc/systemd/system/qm1-wifi@.service '^ExecStart=/usr/local/sbin/
 check_absent_content /etc/systemd/system/qm1-wifi@.service '^ExecStartPre=.*ip link show' \
     "Wi-Fi 单元不能有等接口的 ExecStartPre（它会拖住 multi-user.target）"
 check_exists /usr/local/sbin/qm1-wifi-start "等无线接口出现的包装脚本"
-check_attr /usr/local/sbin/qm1-wifi-start 'Mode: *0755' "qm1-wifi-start 可执行"
+# 判"可执行且别人写不了"，而不是死抠 0755 这个具体位组合。
+# 位组合不稳：git 只记有没有执行位，checkout 会按构建机的 umask 重算，
+# 于是同一个提交在不同构建机上落出 0755 / 0775，精确匹配就成了一颗随机炸弹
+# （CI 上就是这么翻的车）。真正要保证的是：属主能执行，且组/其他人不能写。
+check_attr /usr/local/sbin/qm1-wifi-start 'Mode: *0[57][0-45][0-45]' \
+    "qm1-wifi-start 可执行且组/其他人不可写"
+check_no_group_writable /usr/local/sbin "overlay 带来的脚本没有组/其他人可写的"
+check_no_group_writable /usr/local/bin "overlay 带来的脚本没有组/其他人可写的"
 check_content /etc/systemd/system.conf.d/quick-boot.conf '^TimeoutStartSec=120' \
     "全局单元超时 120s（30s 会在接口出现前把 Wi-Fi 单元掐掉）"
 check_content /etc/systemd/journald.conf.d/qm1.conf '^Storage=persistent' \

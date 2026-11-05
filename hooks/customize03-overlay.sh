@@ -14,6 +14,15 @@ TARGET="${1:?usage: mmdebstrap hook requires the chroot directory as \$1}"
 if [ -n "${QM1_OVERLAY_DIR:-}" ] && [ -d "$QM1_OVERLAY_DIR" ]; then
     echo "[hook03] 应用 overlay：$QM1_OVERLAY_DIR"
     cp -a "$QM1_OVERLAY_DIR/." "$TARGET/"
+
+    # 权限规范化：镜像里的权限必须由仓库说了算，不能由构建机的 umask 说了算。
+    # 规则与理由见 scripts/lib/overlay-modes.sh（那里还带着单测）。
+    if [ -n "${QM1_LIB_DIR:-}" ] && [ -f "$QM1_LIB_DIR/overlay-modes.sh" ]; then
+        . "$QM1_LIB_DIR/overlay-modes.sh"
+        qm1_normalize_overlay_modes "$QM1_OVERLAY_DIR" "$TARGET"
+    else
+        echo "[hook03][warn] 没有 QM1_LIB_DIR，overlay 权限保持构建机原样（可能带上组可写）"
+    fi
 else
     echo "[hook03][warn] 未提供 QM1_OVERLAY_DIR，跳过 overlay"
 fi
