@@ -142,6 +142,12 @@ check_exists /etc/initramfs-tools/modules          "initramfs 关键模块清单
 check_exists /usr/local/share/qm1/driver-manifest.txt "驱动清单"
 check_exists /usr/local/lib/qm1/drv-selfcheck.sh    "设备端自检脚本"
 check_exists /etc/wpa_supplicant/wpa_supplicant.conf "Wi-Fi 配置"
+# 发行版那个全局的 wpa_supplicant.service 必须屏蔽掉：它和我们的
+# qm1-wifi@wlan0.service 会同时对同一个 wlan0 起 wpa_supplicant，
+# 争的是同一个控制套接字 —— 现象是"wlan0 有、SSID 扫得到、就是连不上"，
+# 日志里还不报错。屏蔽它，Wi-Fi 只留一条路。
+check_link /etc/systemd/system/wpa_supplicant.service /dev/null \
+    "发行版 wpa_supplicant.service 已屏蔽（Wi-Fi 由 qm1-wifi@.service 独占）"
 # 这份是**回退**参数（发行版树内 staging r8723bs），不是出货配置。
 # 出货配置是 qm1-rtw88-8723bs.conf（在下面的 rtw88 段里按内容校验）。
 # 留着这份是为了"rtw88 起不来、需要临时回退"时不用重踩省电的坑。

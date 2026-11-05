@@ -34,6 +34,23 @@ if [ -d "$TARGET/etc/systemd/system" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# 屏蔽发行版自带的 wpa_supplicant.service
+#
+# 这台机器的 Wi-Fi 只有一条路：qm1-wifi@wlan0.service（按接口实例化，
+# 进程内等接口出现，见 /usr/local/sbin/qm1-wifi-start）。
+#
+# 发行版的 wpa_supplicant.service 是全局单元、不知道自己管哪个接口，
+# 它会被发行版的默认配置带起来（CI 的控制台里能看到它和我们的单元
+# 同时 "Started"）。两个 wpa_supplicant 争同一个 wlan0 ⇒ 控制套接字
+# 抢锁、关联互相踢 —— 现场表现就是"wlan0 在、能看到 SSID，就是连不上"，
+# 而日志里没有任何报错，极难查。
+#
+# 所以明确屏蔽：Wi-Fi 由我们自己的单元独占。
+# ---------------------------------------------------------------------------
+mkdir -p "$TARGET/etc/systemd/system"
+ln -sf /dev/null "$TARGET/etc/systemd/system/wpa_supplicant.service"
+
+# ---------------------------------------------------------------------------
 # overlay 单元的 wants 链接
 #
 # 之前的写法有个致命错位：overlay 的单元是用 cp -a 落在 **/etc/systemd/system**
