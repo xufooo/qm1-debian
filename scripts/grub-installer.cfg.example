@@ -1,0 +1,44 @@
+# grub.cfg 模板（安装介质专用）—— 部署到 FAT32 ESP 的 /EFI/BOOT/grub.cfg
+#
+# 与 grub.cfg.example（装好之后的正常菜单）的区别：
+#   正常菜单  = 直接启动已安装的系统
+#   安装菜单  = 多两个入口：把系统装到 eMMC / 先试用再决定
+#
+# 占位符由 make-esp.sh 替换：
+#   @ROOT_UUID@     64 位根分区 UUID（ext4）
+#   @ROOT32_UUID@  32 位根分区 UUID（本项目已取消 32 位系统，一般为空）
+#   @SUITE_AMD64@  64 位系统发行版名（如 Debian 13）
+#   @SUITE_I386@   32 位系统发行版名
+#
+# 内核参数：
+#   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道
+#   fsck.repair=yes         eMMC 突然掉电后开机自修复
+#   qm1.install=1           触发 qm1-install.service（把系统写进 eMMC）
+#
+# 安装动作由 systemd 单元 qm1-install.service 执行
+# （ConditionKernelCommandLine=qm1.install=1，所以正常启动不会误触发）。
+
+set timeout=8
+set default=0
+
+search --label QM1ESP --set=root
+
+# ① 安装到 eMMC：备份 → 写分区 → 校验 → 换成正常菜单
+menuentry "① 安装 QM1 @SUITE_AMD64@ 到 eMMC（备份 → 写入 → 校验）" {
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes qm1.install=1
+    initrd /initrd.img
+}
+
+# ② 试用：只启动，不碰 eMMC（先跑 qm1-selftest 看驱动）
+menuentry "② 试用系统（不写盘，可先跑驱动自检）" {
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes
+    initrd /initrd.img
+}
+
+# ③ 救援：GRUB 命令行
+menuentry "③ GRUB 命令行（救援）" {
+    echo "手动引导示例："
+    echo "  set root=UUID=<root_uuid>"
+    echo "  linux  /vmlinuz root=UUID=<root_uuid> ro console=tty0 console=ttyS0,115200n8"
+    echo "  initrd /initrd.img"
+}

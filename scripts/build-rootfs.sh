@@ -95,7 +95,9 @@ BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sud
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
-kmod,initramfs-tools,zstd,apt-transport-https"
+kmod,initramfs-tools,zstd,apt-transport-https,fdisk"
+# fdisk 提供 sfdisk：安装介质在设备上给 eMMC 分区时要用
+# （util-linux 是 Debian 的 Essential 包，lsblk/findmnt/mount 随它来）。
 
 # 运行时（Hermes CLI + headless Chrome）
 # 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），

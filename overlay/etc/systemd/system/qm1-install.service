@@ -1,0 +1,18 @@
+[Unit]
+Description=Install QM1 Debian to the eMMC (triggered by the kernel argument qm1.install=1)
+Documentation=file:/usr/local/sbin/qm1-install-to-emmc
+ConditionKernelCommandLine=qm1.install=1
+After=local-fs.target systemd-udevd.service
+RequiresMountsFor=/
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qm1-install-to-emmc
+StandardOutput=journal+console
+StandardError=journal+console
+# 整盘备份 + 6 GiB 拷贝 + 两遍 sha256，在 1.3 GHz 的 Atom 上可能要十几分钟
+TimeoutStartSec=0
+
+[Install]
+WantedBy=multi-user.target

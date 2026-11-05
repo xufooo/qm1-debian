@@ -1,0 +1,213 @@
+#!/bin/bash
+# qm1-install-to-emmc — 把当前从 U 盘启动的系统装进 eMMC
+#
+# 触发方式：GRUB 菜单第 ① 项（内核参数 qm1.install=1）→ systemd 单元
+#           qm1-install.service → 本脚本。
+#
+# 原理：安装介质本身就是「ESP + 根文件系统」两个分区，
+#       所以"安装"= 把这两个分区原样搬到 eMMC，再把根分区撑到整盘容量，
+#       最后把 ESP 里的 grub.cfg 换回正常菜单（装好之后拔 U 盘即可自启动）。
+#
+# 安全设计：
+#   * 目标设备默认 /dev/mmcblk0，可用 QM1_INSTALL_TARGET 覆盖；
+#   * 当前系统如果就是从 eMMC 启动的 → 直接拒绝（说明已经装好了）；
+#   * 写盘前一定先做备份：
+#       - QM1_BACKUP_DIR 指定了目录 → 整盘备份（空间不够就中止，不硬来）；
+#       - 安装介质剩余空间够整盘 → 自动整盘备份；
+#       - 都不够 → 只备份分区表与前 16 MiB（GPT + OEM 分区头），
+#         并明确警告"原系统内容没有完整备份"。
+#   * 写完逐分区比对 sha256。
+set -euo pipefail
+
+log()  { printf '[qm1-install] %s\n' "$*"; }
+warn() { printf '[qm1-install][warn] %s\n' "$*" >&2; }
+die()  { printf '[qm1-install][fail] %s\n' "$*" >&2; exit 1; }
+
+[ "$(id -u)" -eq 0 ] || die "需要 root 权限"
+
+TARGET="${QM1_INSTALL_TARGET:-/dev/mmcblk0}"
+[ -b "$TARGET" ] || die "找不到 eMMC 设备 $TARGET（QM1 的 eMMC 应该是 /dev/mmcblk0）"
+
+for c in findmnt lsblk sfdisk dd sha256sum e2fsck resize2fs mount; do
+    command -v "$c" >/dev/null 2>&1 || die "缺少命令 $c（镜像里应装有 util-linux / fdisk / e2fsprogs）"
+done
+
+# ---------- 源：当前系统所在的整盘 ----------
+SRC_ROOT="$(findmnt -no SOURCE / 2>/dev/null || true)"
+[ -n "$SRC_ROOT" ] || die "找不到当前根文件系统挂载点"
+SRC_PART="${SRC_ROOT#/dev/}"
+SRC_PK="$(lsblk -no PKNAME "/dev/$SRC_PART" 2>/dev/null | head -1 || true)"
+[ -n "$SRC_PK" ] || die "无法定位源分区所属磁盘（当前根在 $SRC_ROOT）"
+SRC_DISK="/dev/$SRC_PK"
+
+log "当前系统根分区：$SRC_ROOT（磁盘 $SRC_DISK）"
+log "目标 eMMC：$TARGET"
+
+[ "$SRC_DISK" != "$TARGET" ] \
+    || die "当前系统就是从 $TARGET 启动的 —— 已经装好了，不要再装一遍"
+
+# 源盘上的 ESP（第 1 个分区）与根分区
+SRC_ESP=""
+for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
+    [ "$p" = "$(basename "$SRC_PART")" ] && continue
+    if lsblk -no FSTYPE "/dev/$p" 2>/dev/null | grep -qi vfat; then
+        SRC_ESP="/dev/$p"
+        break
+    fi
+done
+[ -n "$SRC_ESP" ] || die "在 $SRC_DISK 上找不到 FAT32 的 ESP 分区"
+
+log "源 ESP：$SRC_ESP   源根分区：$SRC_ROOT"
+
+# ---------- 备份 ----------
+TARGET_BYTES="$(blockdev --getsize64 "$TARGET")"
+TARGET_MIB=$(( TARGET_BYTES / 1048576 ))
+STAMP="$(date +%Y%m%d-%H%M%S)"
+BACKUP_DIR="${QM1_BACKUP_DIR:-}"
+BACKUP_FILE=""
+
+avail_bytes() { df -PB1 --output=avail "$1" 2>/dev/null | tail -1 | tr -dc '0-9'; }
+
+if [ -n "$BACKUP_DIR" ]; then
+    mkdir -p "$BACKUP_DIR" || die "无法创建备份目录 $BACKUP_DIR"
+    need="$(avail_bytes "$BACKUP_DIR")"
+    [ "${need:-0}" -ge "$TARGET_BYTES" ] \
+        || die "备份目录空间不足：需要 ${TARGET_BYTES} 字节，只有 ${need:-0} 字节（请换更大的介质或改用整盘备份）"
+    BACKUP_FILE="$BACKUP_DIR/qm1-emmc-preinstall-$STAMP.img"
+    log "整盘备份 → $BACKUP_FILE（${TARGET_MIB} MiB，请耐心）"
+    dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
+    sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
+    log "整盘备份完成：$(cat "$BACKUP_FILE.sha256")"
+else
+    AVAIL="$(avail_bytes /var/tmp || echo 0)"
+    if [ "${AVAIL:-0}" -ge "$TARGET_BYTES" ]; then
+        BACKUP_FILE="/var/tmp/qm1-emmc-preinstall-$STAMP.img"
+        log "安装介质空间足够，做整盘备份 → $BACKUP_FILE"
+        dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
+        sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
+        log "整盘备份完成：$(cat "$BACKUP_FILE.sha256")"
+    else
+        warn "安装介质剩余空间（${AVAIL:-0} 字节）装不下 ${TARGET_BYTES} 字节的整盘备份"
+        warn "改为只备份分区表与前 16 MiB —— 原系统内容不会被完整保留"
+        warn "如需完整备份，请先在别处做（dd if=$TARGET of=backup.img），再回来安装"
+        BACKUP_FILE="/var/tmp/qm1-emmc-metadata-$STAMP.img"
+        dd if="$TARGET" of="$BACKUP_FILE" bs=1M count=16 conv=fsync status=none
+        sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
+        log "分区表备份完成：$BACKUP_FILE（$(cat "$BACKUP_FILE.sha256")）"
+    fi
+fi
+
+# ---------- 写分区表 ----------
+ESP_MIB="$(lsblk -bno SIZE "$SRC_ESP" 2>/dev/null | head -1)"
+ESP_MIB=$(( ESP_MIB / 1048576 ))
+[ "$ESP_MIB" -gt 0 ] || die "无法读取源 ESP 大小"
+ROOT_START_MIB=$(( 1 + ESP_MIB ))
+ROOT_MIB=$(( TARGET_MIB - ROOT_START_MIB - 1 ))
+[ "$ROOT_MIB" -gt 0 ] || die "目标盘太小：${TARGET_MIB} MiB"
+
+log "在 $TARGET 上写分区表：p1 ESP ${ESP_MIB} MiB（EFI System），p2 根分区 ${ROOT_MIB} MiB（Linux）"
+SPEC="$(mktemp)"
+trap 'rm -f "$SPEC"' EXIT
+{
+    echo "label: gpt"
+    echo "start=1MiB, size=${ESP_MIB}MiB, type=C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+    echo "start=${ROOT_START_MIB}MiB, size=${ROOT_MIB}MiB, type=0FC63DAF-8483-4772-8E79-3D69D8477DE4"
+} > "$SPEC"
+LC_ALL=C sfdisk "$TARGET" < "$SPEC" >/dev/null
+
+PART1="${TARGET}p1"
+PART2="${TARGET}p2"
+[ -b "$PART1" ] && [ -b "$PART2" ] || die "分区设备没出现：$PART1 / $PART2"
+
+# ---------- 复制内容 ----------
+# 根分区当前是挂载状态：先改只读，避免复制过程中有写入导致内容不一致
+mount -o remount,ro / 2>/dev/null || warn "根文件系统改只读失败（继续，可能有轻微不一致）"
+
+log "复制 ESP：$SRC_ESP → $PART1"
+dd if="$SRC_ESP" of="$PART1" bs=4M conv=fsync status=progress
+log "复制根文件系统：$SRC_ROOT → $PART2"
+dd if="$SRC_ROOT" of="$PART2" bs=4M conv=fsync status=progress
+
+# 复制完了，把源根分区改回可写（后面要写 /etc/qm1-installed-to-emmc 记录）
+mount -o remount,rw / 2>/dev/null || warn "根文件系统改回可写失败（继续）"
+
+# ---------- 校验（必须在"撑大分区"和"换菜单"之前做） ----------
+# 顺序有讲究：
+#   * resize2fs 之后目标根分区比源大，sha256 必然不同 → 比对会误报失败；
+#   * 换回正常菜单之后目标 ESP 的 grub.cfg 也必然不同 → 同样会误报。
+# 所以先对"刚写完、还没做任何有意改动"的状态做逐字节校验，再做那两步改动。
+log "校验：逐分区比对 sha256（刚写入、未做后续改动的状态）"
+SRC_ESP_HASH="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
+DST_ESP_HASH="$(sha256sum "$PART1" | awk '{print $1}')"
+SRC_ROOT_HASH="$(sha256sum "$SRC_ROOT" | awk '{print $1}')"
+DST_ROOT_HASH="$(sha256sum "$PART2" | awk '{print $1}')"
+
+rc=0
+if [ "$SRC_ESP_HASH" = "$DST_ESP_HASH" ]; then
+    log "ESP 写入校验通过：$DST_ESP_HASH"
+else
+    warn "ESP 写入校验失败：源 $SRC_ESP_HASH / 目标 $DST_ESP_HASH"
+    rc=1
+fi
+if [ "$SRC_ROOT_HASH" = "$DST_ROOT_HASH" ]; then
+    log "根文件系统写入校验通过：$DST_ROOT_HASH"
+else
+    warn "根文件系统写入校验失败：源 $SRC_ROOT_HASH / 目标 $DST_ROOT_HASH"
+    rc=1
+fi
+
+# ---------- 换回正常菜单 ----------
+# 安装介质 ESP 里的 grub.cfg 是"安装菜单"；装好之后要换成正常菜单，
+# 否则以后从 eMMC 启动还会看到"安装到 eMMC"这一项。
+SRC_ESP_MNT="$(mktemp -d)"
+DST_ESP_MNT="$(mktemp -d)"
+if mount "$SRC_ESP" "$SRC_ESP_MNT" 2>/dev/null \
+   && [ -f "$SRC_ESP_MNT/EFI/BOOT/grub-normal.cfg" ]; then
+    mount "$PART1" "$DST_ESP_MNT"
+    cp "$SRC_ESP_MNT/EFI/BOOT/grub-normal.cfg" "$DST_ESP_MNT/EFI/BOOT/grub.cfg"
+    sync
+    umount "$DST_ESP_MNT"
+    log "目标 ESP 的 grub.cfg 已换成正常菜单"
+else
+    warn "源 ESP 里没有 grub-normal.cfg —— 目标 ESP 保留安装菜单（能启动，但会多出安装项）"
+fi
+umount "$SRC_ESP_MNT" 2>/dev/null || true
+rmdir "$SRC_ESP_MNT" "$DST_ESP_MNT" 2>/dev/null || true
+
+# ---------- 把根分区撑满整盘 ----------
+log "把根分区撑满整个分区（${ROOT_MIB} MiB）"
+e2fsck -fp "$PART2" >/dev/null 2>&1 || e2fsck -f "$PART2" || true
+resize2fs "$PART2" >/dev/null
+if e2fsck -fn "$PART2" >/dev/null 2>&1; then
+    log "撑大后的文件系统检查通过（e2fsck -fn 无错误）"
+else
+    warn "撑大后的文件系统检查有告警（e2fsck -fn）——建议手动再跑一次 fsck"
+    rc=1
+fi
+
+{
+    echo "installed_at=$(date -Is)"
+    echo "target=$TARGET"
+    echo "source=$SRC_DISK"
+    echo "esp_sha256_at_write=$DST_ESP_HASH"
+    echo "rootfs_sha256_at_write=$DST_ROOT_HASH"
+    echo "backup=${BACKUP_FILE:-none}"
+} > /etc/qm1-installed-to-emmc 2>/dev/null || true
+
+echo
+echo "================================================================"
+if [ "$rc" -eq 0 ]; then
+    echo " 安装完成 ✅"
+else
+    echo " 安装结束，但校验有失败项 ⚠️（见上面的 sha256 对比）"
+fi
+echo " 目标设备 : $TARGET"
+echo " 根分区   : $PART2（$(lsblk -bno SIZE "$PART2" 2>/dev/null || echo '?') 字节）"
+echo " 备份     : ${BACKUP_FILE:-none}"
+echo
+echo " 接下来："
+echo "   1. 拔掉安装 U 盘"
+echo "   2. 重新开机，在 BIOS 里选 eMMC（内部存储）启动"
+echo "   3. 首次开机后跑：sudo /usr/local/bin/qm1-selftest"
+echo "================================================================"
+exit "$rc"

@@ -33,4 +33,13 @@ if [ -d "$TARGET/etc/systemd/system" ]; then
     chroot "$TARGET" systemctl daemon-reload >/dev/null 2>&1 || true
 fi
 
+# 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
+# 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
+if [ -f "$TARGET/etc/systemd/system/qm1-install.service" ]; then
+    mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
+    ln -sf /lib/systemd/system/qm1-install.service \
+        "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-install.service"
+    echo "[hook03] 已启用安装单元 qm1-install.service（仅 qm1.install=1 时触发）"
+fi
+
 echo "[hook03] 完成"

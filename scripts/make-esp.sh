@@ -43,6 +43,8 @@ ROOT_UUID=""
 ROOT64_UUID=""
 ROOT32_UUID=""
 CONFIG_TEMPLATE="$SCRIPT_DIR/grub.cfg.example"
+EXTRA_GRUB=""      # 额外拷进 ESP 的文件（安装介质里放正常菜单 grub-normal.cfg）
+WRITE_CONFIG=""    # 把生成出来的 grub.cfg 另存一份（构建安装介质时用）
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -63,6 +65,8 @@ while [ $# -gt 0 ]; do
         --root64-uuid) ROOT64_UUID="$2"; shift 2 ;;
         --root32-uuid) ROOT32_UUID="$2"; shift 2 ;;
         --config) CONFIG_TEMPLATE="$2"; shift 2 ;;
+        --extra-grub) EXTRA_GRUB="$2"; shift 2 ;;
+        --write-config) WRITE_CONFIG="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -140,6 +144,21 @@ awk -v have64="$have64" -v have32="$have32" '
 ' "$CFG" > "$CFG.tmp" && mv "$CFG.tmp" "$CFG"
 
 mcopy -i "$OUT" "$CFG" ::/EFI/BOOT/grub.cfg
+
+# 安装介质用：把"正常菜单"另存一份进 ESP（安装时由 qm1-install-to-emmc
+# 拷回目标 ESP，装好之后就不会再看到"安装到 eMMC"这一项）。
+if [ -n "$EXTRA_GRUB" ]; then
+    [ -f "$EXTRA_GRUB" ] || die "缺少 --extra-grub 指定的文件：$EXTRA_GRUB"
+    mcopy -i "$OUT" "$EXTRA_GRUB" ::/EFI/BOOT/grub-normal.cfg
+    log "额外写入正常菜单：::/EFI/BOOT/grub-normal.cfg"
+fi
+
+# 把生成出来的 grub.cfg 另存一份（构建安装介质时要拿它当 --extra-grub 的输入）
+if [ -n "$WRITE_CONFIG" ]; then
+    mkdir -p "$(dirname "$WRITE_CONFIG")"
+    cp "$CFG" "$WRITE_CONFIG"
+    log "grub.cfg 另存：$WRITE_CONFIG"
+fi
 
 log "校验镜像内容"
 mdir -/ -i "$OUT" ::/EFI/BOOT >&2

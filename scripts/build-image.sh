@@ -27,6 +27,8 @@ ROOT_SIZE_GIB=6
 BOOTLOADERS=""
 KERNEL32=""
 INITRD32=""
+INSTALLER=0
+DISK_SIZE_GIB=30
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -39,6 +41,8 @@ while [ $# -gt 0 ]; do
         --bootloaders) BOOTLOADERS="$2"; shift 2 ;;
         --kernel32) KERNEL32="$2"; shift 2 ;;
         --initrd32) INITRD32="$2"; shift 2 ;;
+        --installer) INSTALLER=1; shift ;;
+        --disk-size-gib) DISK_SIZE_GIB="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -88,6 +92,7 @@ esac
 
 # ---------- 4. ESP ----------
 ESP_IMG="$OUT_DIR/esp.img"
+NORMAL_CFG="$OUT_DIR/grub-normal.cfg"
 log "组装 ESP（arch=$ARCH suite=$SUITE_LABEL）"
 bash "$SCRIPT_DIR/make-esp.sh" \
     --out "$ESP_IMG" \
@@ -100,7 +105,27 @@ bash "$SCRIPT_DIR/make-esp.sh" \
     ${KERNEL32:+--kernel32 "$KERNEL32"} \
     ${INITRD32:+--initrd32 "$INITRD32"} \
     --root-uuid "$ROOT_UUID" \
-    ${ROOT32_UUID:+--root32-uuid "$ROOT32_UUID"}
+    ${ROOT32_UUID:+--root32-uuid "$ROOT32_UUID"} \
+    --write-config "$NORMAL_CFG"
+
+# 4b. 安装介质用的 ESP：菜单多两项（装到 eMMC / 试用），
+#     并把上面的正常菜单一起塞进去（安装脚本装完会把它拷回目标 ESP）。
+INSTALLER_ESP_IMG=""
+if [ "$INSTALLER" = 1 ]; then
+    INSTALLER_ESP_IMG="$OUT_DIR/esp-installer.img"
+    log "组装安装介质 ESP（菜单：安装到 eMMC / 试用 / 救援）"
+    bash "$SCRIPT_DIR/make-esp.sh" \
+        --out "$INSTALLER_ESP_IMG" \
+        --size-mib "$ESP_SIZE_MIB" \
+        --bootloaders "$BOOTLOADERS" \
+        --arch "$ARCH" \
+        --suite-amd64 "Debian 13" \
+        --kernel "$KERNEL" \
+        --initrd "$INITRD" \
+        --root-uuid "$ROOT_UUID" \
+        --config "$SCRIPT_DIR/grub-installer.cfg.example" \
+        --extra-grub "$NORMAL_CFG"
+fi
 
 # ---------- 5. 根文件系统 ----------
 ROOT_IMG="$OUT_DIR/rootfs.img"
@@ -133,7 +158,21 @@ truncate -s "${TARGET_KB}K" "$ROOT_IMG"
 mkfs.ext4 -q -F -L "$QM1_ROOT_LABEL" -U "$ROOT_UUID" -d "$ROOTFS" "$ROOT_IMG" \
     || die "mkfs.ext4 -d 失败（目标尺寸可能小于内容）"
 
-# ---------- 6. 清单 ----------
+# ---------- 6. 安装介质整盘镜像（可选） ----------
+# 安装介质 = 同一套 ESP（菜单换成"安装到 eMMC"）+ 同一套根文件系统。
+# 写进 U 盘、开机、选第 ① 项，就能把系统装到 eMMC（备份 → 写入 → 校验）。
+INSTALLER_DISK_IMG=""
+if [ "$INSTALLER" = 1 ] && [ -n "$INSTALLER_ESP_IMG" ]; then
+    INSTALLER_DISK_IMG="$OUT_DIR/qm1-installer.img"
+    log "合成安装介质整盘镜像：$INSTALLER_DISK_IMG"
+    bash "$SCRIPT_DIR/assemble-disk.sh" \
+        --esp "$INSTALLER_ESP_IMG" \
+        --root "$ROOT_IMG" \
+        --out "$INSTALLER_DISK_IMG" \
+        --size-gib "$DISK_SIZE_GIB"
+fi
+
+# ---------- 7. 清单 ----------
 MANIFEST="$OUT_DIR/manifest.txt"
 {
     echo "# QM1-Debian image manifest"
@@ -143,6 +182,10 @@ MANIFEST="$OUT_DIR/manifest.txt"
     [ -n "$ROOT32_UUID" ] && echo "root32_uuid=$ROOT32_UUID"
     echo "esp_bytes=$(stat -c%s "$ESP_IMG")"
     echo "rootfs_bytes=$(stat -c%s "$ROOT_IMG")"
+    if [ -n "$INSTALLER_DISK_IMG" ]; then
+        echo "installer_disk=$INSTALLER_DISK_IMG"
+        echo "installer_disk_bytes=$(stat -c%s "$INSTALLER_DISK_IMG")"
+    fi
     echo "--- sha256 ---"
     ( cd "$OUT_DIR" && sha256sum esp.img rootfs.img )
 } > "$MANIFEST"
