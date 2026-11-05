@@ -190,6 +190,43 @@ else
     ok "两份证据都没有首启痕迹时应当挂（首启那一步确实没跑）"
 fi
 
+# ---------- fixture ⑨：SIGPIPE 假失败（命中位置靠前 + 文本超过管道缓冲）----------
+#   本轮 CI 红在"systemd-resolved 没起来"，而日志里明明有
+#       [  OK  ] Started systemd-resolved.service - Network Name Resolution.
+#   真正的原因：断言写成 `printf '%s' "$OUT" | grep -qF -- "…"`，
+#   grep -q 一命中就退出 ⇒ 上游 printf 还在写（控制台文本 > 64KB 管道缓冲）
+#   ⇒ printf 被 SIGPIPE 打死（141）⇒ set -o pipefail 把 141 变成管道失败码
+#   ⇒ 明明命中却报"不过"。命中位置越靠前越容易踩：resolved 开机很早就
+#   Started（早 ⇒ grep 立刻退出），ssh 永远在很晚（从没踩到）。
+#   这个 fixture 把命中行放在**最前面**并把日志灌到 > 64KB，
+#   用旧的管道写法必挂、用 herestring 写法必须过。
+{
+    printf '[%s[0;32m  OK  %s[0m] Started %s[0;1;39msystemd-resolved.service%s[0m - Network Name Resolution.\n' \
+        "$ESC" "$ESC" "$ESC" "$ESC"
+    # 灌一堆噪声，把总量推到远大于管道的默认缓冲（64KB）
+    i=0
+    while [ "$i" -lt 1200 ]; do
+        printf 'noise line %04d: %s\n' "$i" "$(printf 'x%.0s' $(seq 1 60))"
+        i=$((i + 1))
+    done
+    printf '[%s[0;32m  OK  %s[0m] Reached target %s[0;1;39mmulti-user.target%s[0m - Multi-User System.\n' \
+        "$ESC" "$ESC" "$ESC" "$ESC"
+    printf '[%s[0;32m  OK  %s[0m] Started %s[0;1;39mssh.service%s[0m - OpenBSD Secure Shell server.\n' \
+        "$ESC" "$ESC" "$ESC" "$ESC"
+    printf '[%s[0;32m  OK  %s[0m] Finished %s[0;1;39mqm1-firstboot.service%s[0m - QM1 first boot provisioning.\n' \
+        "$ESC" "$ESC" "$ESC" "$ESC"
+    printf '[%s[0;32m  OK  %s[0m] Started %s[0;1;39mqm1-wifi@wlan0.service%s[0m - QM1 internal Wi-Fi managed by wpa_supplicant.\n' \
+        "$ESC" "$ESC" "$ESC" "$ESC"
+} > "$WORK/big.log"
+if [ "$(wc -c < "$WORK/big.log")" -lt 65536 ]; then
+    bad "fixture ⑨ 没造够数据（$(wc -c < "$WORK/big.log") 字节），测不到 SIGPIPE"
+elif bash "$ASSERT" --console "$WORK/big.log" >/dev/null 2>&1; then
+    ok "命中行靠前且日志超过 64KB 时仍然判过（没有 SIGPIPE 假失败）"
+else
+    bad "命中行靠前且日志超过 64KB 时被判不过 —— 又踩了 grep -q 的 SIGPIPE"
+    bash "$ASSERT" --console "$WORK/big.log" 2>&1 | tail -5
+fi
+
 if [ "$FAIL" -ne 0 ]; then
     echo "自测失败：$FAIL 项不对" >&2
     exit 1

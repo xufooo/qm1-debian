@@ -43,7 +43,7 @@ source "$SCRIPT_DIR/lib/img-check.sh"
 rc=0
 OUT="$TMP/out"
 expect() {   # expect <说明> <期望输出片段> <实际输出>
-    if printf '%s' "$3" | grep -qF "$2"; then
+    if grep -qF "$2" <<<"$3"; then
         printf '  [ OK ] %s\n' "$1"
     else
         printf '  [FAIL] %s —— 期望输出里有「%s」，实际是：%s\n' "$1" "$2" "$3"

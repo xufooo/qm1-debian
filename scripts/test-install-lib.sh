@@ -302,7 +302,7 @@ fi
 #   shell 的严格模式吃掉。
 plan_bad_out="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1)" && plan_bad_rc=0 || plan_bad_rc=$?
 if [ "$plan_bad_rc" -ne 0 ] \
-   && printf '%s' "$plan_bad_out" | grep -qE '不一致|没有 EFI System 分区|不是从 1 MiB 开始|拒绝按另一种布局'; then
+   && grep -qE '不一致|没有 EFI System 分区|不是从 1 MiB 开始|拒绝按另一种布局' <<<"$plan_bad_out"; then
     ok "拒绝了与约定布局不符的镜像（根分区不在 ESP 之后）"
 else
     bad "非约定布局的镜像没有被拒绝（rc=${plan_bad_rc}）：'$plan_bad_out'"

@@ -89,10 +89,10 @@ fail() {
 MILESTONE_RE='Reached target .*multi-user\.target'
 
 assert_console() {
-    printf '%s' "$OUT" | grep -qF -- "$1" || fail "$2"
+    grep -qF -- "$1" <<<"$OUT" || fail "$2"
 }
 assert_console_re() {
-    printf '%s' "$OUT" | grep -qE -- "$1" || fail "$2"
+    grep -qE -- "$1" <<<"$OUT" || fail "$2"
 }
 
 # ---------- 先查"起失败"，再查"没跑完" ----------
@@ -103,11 +103,11 @@ assert_console_re() {
 #   一旦它真的起失败，报出来的就是"起失败"，附带单元事件流。
 for unit in ssh.service systemd-resolved.service systemd-networkd.service \
             qm1-firstboot.service qm1-hardware-fixups.service; do
-    if printf '%s' "$OUT" | grep -qF "Failed to start $unit"; then
+    if grep -qF "Failed to start $unit" <<<"$OUT"; then
         fail "$unit 起失败了"
     fi
     # 超时被杀也算起失败（systemd 打的是 "Failed with result 'timeout'"）
-    if printf '%s' "$OUT" | grep -qF "$unit: Failed with result"; then
+    if grep -qF "$unit: Failed with result" <<<"$OUT"; then
         fail "$unit 起失败了（超时或被杀掉）"
     fi
 done
@@ -116,8 +116,8 @@ done
 # QEMU 里没有 SDIO 卡，但模块本身照样能加载成功（modprobe 只做符号解析和
 # 注册驱动，没有设备是正常的）⇒ 这条在 QEMU 里也成立，而且正好能挡住
 # 「模块索引没刷新 ⇒ modprobe 报 not found ⇒ 驱动永远加载不上」这类问题。
-if printf '%s' "$OUT" | grep -qF "qm1-rtw88-8723bs.service"; then
-    if printf '%s' "$OUT" | grep -qF "Failed to start qm1-rtw88-8723bs.service"; then
+if grep -qF "qm1-rtw88-8723bs.service" <<<"$OUT"; then
+    if grep -qF "Failed to start qm1-rtw88-8723bs.service" <<<"$OUT"; then
         fail "Wi-Fi 驱动单元 qm1-rtw88-8723bs.service 起失败（最常见原因：镜像的 modules.dep 里没有这个模块，modprobe 找不到它）"
     fi
 fi
@@ -132,11 +132,11 @@ assert_console "Started systemd-resolved.service" "systemd-resolved 没起来（
 #   为什么放宽：控制台是串口，systemd 打的状态行可能被截断或丢失；
 #   而脚本自己的输出（journal 里的 [qm1-firstboot]）是它确实执行的直接证据。
 #   两份证据都没有 ⇒ 它确实没跑（被条件跳过、或压根没被拉起）。
-if ! printf '%s' "$OUT" | grep -qF "Finished qm1-firstboot.service" \
-   && ! printf '%s' "$JOURNAL_TEXT" | grep -q "\[qm1-firstboot\]"; then
+if ! grep -qF "Finished qm1-firstboot.service" <<<"$OUT" \
+   && ! grep -q "\[qm1-firstboot\]" <<<"$JOURNAL_TEXT"; then
     fail "qm1-firstboot.service 没跑（开机即用的配置那一步）：控制台没有它的 Finished 行，journal 里也没有它的输出"
 fi
-if ! printf '%s' "$OUT" | grep -qF "Finished qm1-firstboot.service"; then
+if ! grep -qF "Finished qm1-firstboot.service" <<<"$OUT"; then
     echo "BOOT-SMOKE-ASSERT: 注意：控制台没有 qm1-firstboot.service 的 Finished 行（journal 里有它的输出，判为已执行）" >&2
 fi
 
@@ -156,13 +156,13 @@ assert_console "Started qm1-wifi@wlan0.service" \
 # journal 断言（可选）：只在拿到 journal 文本时才查。
 if [ -n "$JOURNAL_TEXT" ]; then
     assert_journal() {
-        printf '%s' "$JOURNAL_TEXT" | grep -q -- "$1" || fail "（journal）$2"
+        grep -q -- "$1" <<<"$JOURNAL_TEXT" || fail "（journal）$2"
     }
     assert_journal "Startup finished" "journal 里没有 systemd 的启动收尾记录（journal 可能是坏的）"
     assert_journal "\[qm1-firstboot\]" "journal 里没有 qm1-firstboot 的输出（开机即用的配置那一步没跑）"
     # 自检脚本的输出格式（QM1 硬件自检 … PASS=n WARN=n FAIL=n）——
     # 自检本身是手工工具（不进开机流程），所以这里只确认它可执行、格式没坏。
-    if printf '%s' "$JOURNAL_TEXT" | grep -q "qm1-selftest.service"; then
+    if grep -q "qm1-selftest.service" <<<"$JOURNAL_TEXT"; then
         echo "BOOT-SMOKE-ASSERT: 客户机自检（qm1-selftest）的输出摘录："
         printf '%s' "$JOURNAL_TEXT" \
             | grep -A2 "qm1-selftest.service" \
