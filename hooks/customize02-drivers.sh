@@ -281,16 +281,30 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
         die "rtw88 模块 deb 安装失败：$_deb_name"
     fi
     rm -f "$TARGET/tmp/$_deb_name"
-    # 模块名有两种：上游回移是 rtw88_8723bs，vendor 树是 rtw_8723bs
+    # 刷新模块索引：树外模块装在 extra/ 下，模块名要能被 modprobe 解析出来。
+    chroot "$TARGET" depmod -a || warn "depmod -a 失败，模块索引可能不完整"
+    # 模块名有两种：上游回移是 rtw88_8723bs，vendor 树是 rtw_8723bs。
+    #
+    # 注意：这里不能用 `chroot ... modinfo -k <ver> <名字>` 来找模块 ——
+    # kmod 的 modinfo 只查内核的标准模块目录，查不到我们放在 extra/ 下的
+    # 树外模块（实测在 CI 里就是因此误判成「模块没装上」）。
+    # 所以按文件路径找，模块名取文件名；vermagic 直接从 .ko 里读。
     _sdio_mod=""
+    _sdio_ko=""
     for _cand in rtw88_8723bs rtw_8723bs; do
-        if chroot "$TARGET" modinfo -k "$_img_kver" "$_cand" >/dev/null 2>&1; then
+        if [ -f "$TARGET/lib/modules/$_img_kver/extra/rtw88/$_cand.ko" ]; then
             _sdio_mod="$_cand"
+            _sdio_ko="$TARGET/lib/modules/$_img_kver/extra/rtw88/$_cand.ko"
             break
         fi
     done
     [ -n "$_sdio_mod" ] || die "装完 deb 但镜像里没有 rtw88_8723bs / rtw_8723bs 模块"
-    _vm="$(chroot "$TARGET" modinfo -k "$_img_kver" -F vermagic "$_sdio_mod" 2>/dev/null | awk '{print $1}')"
+    _vm="$(modinfo -F vermagic "$_sdio_ko" 2>/dev/null | awk '{print $1}')"
+    if [ -z "$_vm" ]; then
+        # 兜底：直接从 .ko 的 .modinfo 段里读
+        _vm="$(grep -ao 'vermagic=[^ ]*' "$_sdio_ko" 2>/dev/null | head -1 | cut -d= -f2)"
+    fi
+    [ -n "$_vm" ] || die "读不到 rtw88 模块的 vermagic（$_sdio_ko）"
     case "$_vm" in
         "$_img_kver"*) : ;;
         *) die "rtw88 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
