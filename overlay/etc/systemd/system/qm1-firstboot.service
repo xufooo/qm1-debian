@@ -1,0 +1,16 @@
+[Unit]
+Description=QM1 first-boot provisioning (Wi-Fi, SSH, hostname)
+Documentation=man:wpa_supplicant(8)
+After=local-fs.target systemd-remount-fs.service
+Before=network-online.target qm1-wifi@wlan0.service
+Wants=network-pre.target
+ConditionPathExists=!/var/lib/qm1/firstboot-done
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/qm1-firstboot
+TimeoutStartSec=180
+
+[Install]
+WantedBy=multi-user.target

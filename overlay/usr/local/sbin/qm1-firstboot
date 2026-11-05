@@ -1,0 +1,152 @@
+#!/bin/bash
+# qm1-firstboot — 首次开机时读取 provisioning 文件，自动完成 Wi-Fi / SSH / 主机名配置
+#
+# 目的：这台机器没有 RJ45，唯一联网链路是内置 Wi-Fi（RTL8723BS）。
+#       如果每次装完系统还要"插显示器 + 键盘 + 手动敲 wpa_supplicant"，
+#       装机就变成一件很麻烦的事。所以照 Raspberry Pi 的做法：
+#       把配置文件放进**启动分区**，系统开机自己读。
+#
+# provisioning 文件来源（按顺序）：
+#   1) /etc/qm1/provision/       —— 安装时随根文件系统一起写入（最可靠）
+#   2) ESP 上的 /qm1/provision/  —— 引导分区里的文件（可直接往 U 盘/卡里放，
+#                                  不重刷镜像也能改）
+#
+# 认得的文件：
+#   wpa_supplicant.conf   Wi-Fi 配置；存在即写入系统并启用 qm1-wifi@wlan0
+#   ssh                   存在即启用 SSH 服务（内容随意，通常为空）
+#   authorized_keys       可选：SSH 公钥（装到 ssh 用户与 root）
+#   hostname              可选：主机名
+#
+# 幂等：成功后写标记 /var/lib/qm1/firstboot-done，再次运行会跳过。
+set -euo pipefail
+
+PROV_DIR="/etc/qm1/provision"
+MARKER="/var/lib/qm1/firstboot-done"
+ESP_LABEL="QM1ESP"
+ESP_MOUNT="/run/qm1/firstboot-esp"
+
+log()  { printf '[qm1-firstboot] %s\n' "$*"; }
+warn() { printf '[qm1-firstboot][warn] %s\n' "$*" >&2; }
+
+[ "$(id -u)" -eq 0 ] || { echo "需要 root 权限" >&2; exit 1; }
+
+if [ -f "$MARKER" ]; then
+    log "已完成过首启配置（$MARKER），跳过"
+    exit 0
+fi
+
+# ---------- 1. 找到 provisioning 目录 ----------
+SRC=""
+if [ -d "$PROV_DIR" ] && [ -n "$(ls -A "$PROV_DIR" 2>/dev/null || true)" ]; then
+    SRC="$PROV_DIR"
+    log "使用根文件系统内的配置：$SRC"
+else
+    # 尝试从启动分区（ESP）读：按卷标找，再找 /qm1/provision
+    esp_dev=""
+    if command -v lsblk >/dev/null 2>&1; then
+        esp_dev="$(lsblk -no LABEL,PATH 2>/dev/null | awk -v l="$ESP_LABEL" '$1==l{print $2; exit}' || true)"
+    fi
+    if [ -n "$esp_dev" ]; then
+        mkdir -p "$ESP_MOUNT"
+        if mount -o ro "$esp_dev" "$ESP_MOUNT" 2>/dev/null; then
+            if [ -d "$ESP_MOUNT/qm1/provision" ]; then
+                SRC="$ESP_MOUNT/qm1/provision"
+                log "使用启动分区内的配置：$SRC"
+            fi
+        else
+            warn "挂载启动分区 $esp_dev 失败"
+        fi
+    else
+        warn "没找到卷标为 $ESP_LABEL 的启动分区"
+    fi
+fi
+
+if [ -z "$SRC" ]; then
+    log "没有发现 provisioning 文件 —— 跳过自动配置"
+    log "  之后可以这样配："
+    log "    sudo nmcli dev wifi list && nmcli dev wifi connect <SSID> password <密码>"
+    log "    sudo systemctl enable --now qm1-wifi@wlan0"
+    log "    sudo systemctl enable --now ssh"
+    exit 0
+fi
+
+CHANGED=0
+
+# ---------- 2. Wi-Fi ----------
+if [ -f "$SRC/wpa_supplicant.conf" ]; then
+    install -d -m 0755 /etc/wpa_supplicant
+    install -m 0600 "$SRC/wpa_supplicant.conf" /etc/wpa_supplicant/wpa_supplicant.conf
+    log "已写入 Wi-Fi 配置：/etc/wpa_supplicant/wpa_supplicant.conf"
+    systemctl enable qm1-wifi@wlan0 >/dev/null 2>&1 \
+        || ln -sf /lib/systemd/system/qm1-wifi@.service \
+               /etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service
+    systemctl restart qm1-wifi@wlan0 >/dev/null 2>&1 \
+        || warn "Wi-Fi 服务重启失败（接口可能还没出现，稍后会自动重试）"
+    CHANGED=1
+else
+    log "没有 wpa_supplicant.conf —— 不动 Wi-Fi 配置"
+fi
+
+# ---------- 3. SSH ----------
+if [ -f "$SRC/ssh" ]; then
+    if systemctl enable ssh >/dev/null 2>&1; then
+        log "已启用 SSH 服务"
+    else
+        warn "启用 SSH 失败（可能没装 openssh-server）"
+    fi
+    CHANGED=1
+else
+    log "没有 ssh 标记文件 —— 不启用 SSH"
+fi
+
+# ---------- 4. SSH 公钥 ----------
+if [ -f "$SRC/authorized_keys" ]; then
+    KEYFILE="/root/.ssh/authorized_keys"
+    install -d -m 0700 /root/.ssh
+    touch "$KEYFILE"
+    chmod 0600 "$KEYFILE"
+    if ! grep -qFf "$SRC/authorized_keys" "$KEYFILE" 2>/dev/null; then
+        cat "$SRC/authorized_keys" >> "$KEYFILE"
+        log "已把公钥写入 $KEYFILE"
+    else
+        log "公钥已在 $KEYFILE 里，跳过"
+    fi
+    SSH_USER=""
+    [ -f "$SRC/ssh_user" ] && SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
+    if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
+        UHOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
+        [ -n "$UHOME" ] || UHOME="/home/$SSH_USER"
+        install -d -m 0700 "$UHOME/.ssh"
+        touch "$UHOME/.ssh/authorized_keys"
+        chmod 0600 "$UHOME/.ssh/authorized_keys"
+        if ! grep -qFf "$SRC/authorized_keys" "$UHOME/.ssh/authorized_keys" 2>/dev/null; then
+            cat "$SRC/authorized_keys" >> "$UHOME/.ssh/authorized_keys"
+            log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 $SSH_USER）"
+        fi
+    fi
+    CHANGED=1
+fi
+
+# ---------- 5. 主机名 ----------
+if [ -f "$SRC/hostname" ]; then
+    HN="$(tr -d '[:space:]' < "$SRC/hostname")"
+    if [ -n "$HN" ]; then
+        hostnamectl set-hostname "$HN" 2>/dev/null || echo "$HN" > /etc/hostname
+        log "已设置主机名：$HN"
+        CHANGED=1
+    fi
+fi
+
+# ---------- 6. 收尾 ----------
+mkdir -p "$(dirname "$MARKER")"
+{
+    echo "applied_at=$(date -Is)"
+    echo "source=$SRC"
+    echo "changed=$CHANGED"
+} > "$MARKER"
+log "首启配置完成（标记：$MARKER）"
+
+if [ "$CHANGED" = 1 ]; then
+    log "提示：Wi-Fi 关联可能需要几十秒，可用 'ip addr' / 'iw dev wlan0 link' 查看"
+fi
+exit 0

@@ -290,6 +290,60 @@ else
     row PASS "存储 I/O 错误" "无"
 fi
 
+# ---------------- 5. 首启配置与网络 ----------------
+section "首启配置与网络"
+
+if [ -f /var/lib/qm1/firstboot-done ]; then
+    row PASS "首启配置" "已完成（$(cat /var/lib/qm1/firstboot-done | tr '\n' ' ' | cut -c1-120)）"
+else
+    row WARN "首启配置" "尚未执行（没有 /var/lib/qm1/firstboot-done）"
+fi
+
+prov_dir=""
+if [ -d /etc/qm1/provision ]; then
+    prov_dir="/etc/qm1/provision"
+fi
+if [ -n "$prov_dir" ]; then
+    row PASS "provisioning 文件" "$prov_dir（$(ls -1 "$prov_dir" 2>/dev/null | tr '\n' ' ')）"
+else
+    row WARN "provisioning 文件" "没有 /etc/qm1/provision（可放到启动分区 /qm1/provision/）"
+fi
+
+if systemctl is-active --quiet systemd-networkd; then
+    row PASS "networkd" "运行中"
+else
+    row FAIL "networkd" "没在运行 —— 不会有 DHCP/默认路由"
+fi
+
+if systemctl is-enabled --quiet qm1-firstboot.service 2>/dev/null; then
+    row PASS "qm1-firstboot" "已启用"
+else
+    row WARN "qm1-firstboot" "未启用"
+fi
+
+if pgrep -x wpa_supplicant >/dev/null 2>&1; then
+    row PASS "wpa_supplicant" "运行中"
+else
+    row WARN "wpa_supplicant" "没在运行 —— Wi-Fi 不会关联"
+fi
+
+if ip -br addr show wlan0 2>/dev/null | grep -q 'wlan0'; then
+    wlan_addr="$(ip -br addr show wlan0 2>/dev/null | awk '{print $3}')"
+    if [ -n "$wlan_addr" ]; then
+        row PASS "wlan0 地址" "$wlan_addr"
+    else
+        row WARN "wlan0 地址" "没有地址（未关联或 DHCP 没拿到）"
+    fi
+else
+    row WARN "wlan0" "接口不存在"
+fi
+
+if systemctl is-enabled --quiet ssh 2>/dev/null; then
+    row PASS "SSH" "已启用"
+else
+    row WARN "SSH" "未启用（远程登录不了）"
+fi
+
 # ---------------- 汇总 ----------------
 printf '\n\033[1m== 汇总 ==\033[0m\n'
 printf '  PASS=%d  WARN=%d  FAIL=%d\n' "$PASS" "$WARN" "$FAIL"

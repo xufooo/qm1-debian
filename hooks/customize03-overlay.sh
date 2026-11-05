@@ -42,6 +42,16 @@ if [ -f "$TARGET/etc/systemd/system/qm1-wifi@.service" ]; then
     echo "[hook03] 已启用 qm1-wifi@wlan0（内置 Wi-Fi 主链路）"
 fi
 
+# 首启自动配置（Wi-Fi / SSH / 主机名）：开机自启，读取启动分区或根文件系统里的
+# provisioning 文件 —— 装完就能联网、能 SSH，不用接显示器手动敲配置。
+if [ -f "$TARGET/etc/systemd/system/qm1-firstboot.service" ]; then
+    mkdir -p "$TARGET/var/lib/qm1"
+    chroot "$TARGET" systemctl enable qm1-firstboot.service >/dev/null 2>&1 \
+        || ln -sf /lib/systemd/system/qm1-firstboot.service \
+               "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-firstboot.service"
+    echo "[hook03] 已启用 qm1-firstboot.service（首启自动配置 Wi-Fi/SSH）"
+fi
+
 # 安装单元开机自启（平时被 ConditionKernelCommandLine=qm1.install=1 挡住，
 # 只有从安装介质选"安装到 eMMC"那条菜单项时才会真的执行）。
 if [ -f "$TARGET/etc/systemd/system/qm1-install.service" ]; then

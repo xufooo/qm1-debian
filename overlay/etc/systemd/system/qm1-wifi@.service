@@ -1,7 +1,7 @@
 [Unit]
 Description=QM1 internal Wi-Fi (%i) managed by wpa_supplicant
-After=systemd-modules-load.service network.target
-Wants=systemd-modules-load.service
+After=systemd-modules-load.service network.target qm1-firstboot.service
+Wants=systemd-modules-load.service qm1-firstboot.service
 ConditionPathExists=/etc/wpa_supplicant/wpa_supplicant.conf
 
 [Service]

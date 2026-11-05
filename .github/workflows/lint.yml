@@ -109,8 +109,13 @@ jobs:
             overlay/etc/systemd/network/10-ethernet.network \
             overlay/etc/systemd/network/30-wifi.network \
             overlay/etc/systemd/system/qm1-wifi@.service \
+            overlay/etc/systemd/system/qm1-firstboot.service \
+            overlay/usr/local/sbin/qm1-firstboot \
+            overlay/usr/local/sbin/qm1-install-to-emmc \
             overlay/usr/local/bin/qm1-selftest \
             scripts/grub.cfg.example \
+            scripts/grub-installer.cfg.example \
+            scripts/prepare-provision.sh \
             scripts/drv-selfcheck.sh ; do
             [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
           done

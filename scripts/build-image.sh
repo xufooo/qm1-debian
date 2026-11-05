@@ -29,6 +29,7 @@ KERNEL32=""
 INITRD32=""
 INSTALLER=0
 DISK_SIZE_GIB=30
+PROVISION_DIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -43,6 +44,7 @@ while [ $# -gt 0 ]; do
         --initrd32) INITRD32="$2"; shift 2 ;;
         --installer) INSTALLER=1; shift ;;
         --disk-size-gib) DISK_SIZE_GIB="$2"; shift 2 ;;
+        --provision-dir) PROVISION_DIR="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -106,6 +108,7 @@ bash "$SCRIPT_DIR/make-esp.sh" \
     ${INITRD32:+--initrd32 "$INITRD32"} \
     --root-uuid "$ROOT_UUID" \
     ${ROOT32_UUID:+--root32-uuid "$ROOT32_UUID"} \
+    ${PROVISION_DIR:+--provision-dir "$PROVISION_DIR"} \
     --write-config "$NORMAL_CFG"
 
 # 4b. 安装介质用的 ESP：菜单多两项（装到 eMMC / 试用），
@@ -124,6 +127,7 @@ if [ "$INSTALLER" = 1 ]; then
         --initrd "$INITRD" \
         --root-uuid "$ROOT_UUID" \
         --config "$SCRIPT_DIR/grub-installer.cfg.example" \
+        ${PROVISION_DIR:+--provision-dir "$PROVISION_DIR"} \
         --extra-grub "$NORMAL_CFG"
 fi
 

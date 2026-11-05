@@ -45,6 +45,7 @@ ROOT32_UUID=""
 CONFIG_TEMPLATE="$SCRIPT_DIR/grub.cfg.example"
 EXTRA_GRUB=""      # 额外拷进 ESP 的文件（安装介质里放正常菜单 grub-normal.cfg）
 WRITE_CONFIG=""    # 把生成出来的 grub.cfg 另存一份（构建安装介质时用）
+PROVISION_DIR=""   # 开机即联网的 provisioning 目录（拷进 ESP 的 /qm1/provision/）
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -67,6 +68,7 @@ while [ $# -gt 0 ]; do
         --config) CONFIG_TEMPLATE="$2"; shift 2 ;;
         --extra-grub) EXTRA_GRUB="$2"; shift 2 ;;
         --write-config) WRITE_CONFIG="$2"; shift 2 ;;
+        --provision-dir) PROVISION_DIR="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -151,6 +153,22 @@ if [ -n "$EXTRA_GRUB" ]; then
     [ -f "$EXTRA_GRUB" ] || die "缺少 --extra-grub 指定的文件：$EXTRA_GRUB"
     mcopy -i "$OUT" "$EXTRA_GRUB" ::/EFI/BOOT/grub-normal.cfg
     log "额外写入正常菜单：::/EFI/BOOT/grub-normal.cfg"
+fi
+
+# 开机即联网的 provisioning 文件：拷进 ESP 的 /qm1/provision/，
+# 首次开机时 overlay 的 qm1-firstboot 会自动读取（不需要登录进去再配）。
+if [ -n "$PROVISION_DIR" ]; then
+    [ -d "$PROVISION_DIR" ] || die "找不到 --provision-dir 指定的目录：$PROVISION_DIR"
+    mmd -i "$OUT" ::/qm1 >/dev/null 2>&1 || true
+    mmd -i "$OUT" ::/qm1/provision >/dev/null 2>&1 || true
+    n=0
+    for f in "$PROVISION_DIR"/*; do
+        [ -f "$f" ] || continue
+        mcopy -i "$OUT" "$f" "::/qm1/provision/$(basename "$f")"
+        n=$(( n + 1 ))
+    done
+    [ "$n" -gt 0 ] || die "provisioning 目录里没有文件：$PROVISION_DIR"
+    log "已写入 provisioning 文件（$n 个）→ ::/qm1/provision/"
 fi
 
 # 把生成出来的 grub.cfg 另存一份（构建安装介质时要拿它当 --extra-grub 的输入）

@@ -329,6 +329,24 @@ jobs:
           fi
           echo "OK   蓝牙厂商初始化包、固件、服务与开机自启全部就位"
 
+      - name: Assert the first-boot provisioning is inside the image
+        run: |
+          set -eu
+          ROOT=build/rootfs
+          # 「开机即联网」的能力：首启时自动读 provisioning 文件，配好 Wi-Fi 与 SSH。
+          # 少了它，装完系统还得接显示器键盘手动敲 wpa_supplicant —— 这正是要避免的。
+          [ -x "$ROOT/usr/local/sbin/qm1-firstboot" ] \
+            || { echo "::error::镜像里没有 /usr/local/sbin/qm1-firstboot"; exit 1; }
+          [ -f "$ROOT/etc/systemd/system/qm1-firstboot.service" ] \
+            || { echo "::error::镜像里没有 qm1-firstboot.service"; exit 1; }
+          [ -L "$ROOT/etc/systemd/system/multi-user.target.wants/qm1-firstboot.service" ] \
+            || { echo "::error::首启配置单元没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
+          [ -f "$ROOT/etc/systemd/system/qm1-wifi@.service" ] \
+            || { echo "::error::镜像里没有 qm1-wifi@.service"; exit 1; }
+          grep -q 'qm1-firstboot.service' "$ROOT/etc/systemd/system/qm1-wifi@.service" \
+            || { echo "::error::Wi-Fi 单元没有排在首启配置之后（会先于 provisioning 启动）"; exit 1; }
+          echo "OK   首启自动配置（Wi-Fi/SSH）就位"
+
       - name: Assert QM1 hardware driver & firmware coverage
         run: |
           set -eu
