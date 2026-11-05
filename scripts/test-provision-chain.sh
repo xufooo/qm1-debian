@@ -52,12 +52,16 @@ PROV="$WORK/provision"
 dd if=/dev/zero of="$ESP" bs=1M count="$ESP_MIB" status=none
 mkfs.vfat -F 32 -n QM1ESP "$ESP" >/dev/null
 
-# GPT：ESP 从 LBA 2048 开始（1 MiB 对齐），类型 GUID = EFI System
-sfdisk --quiet "$DISK" >/dev/null <<EOF
+# GPT：ESP 从 1 MiB 开始（LBA 2048，与 assemble-disk.sh 的真实布局一致），
+# 类型 GUID = EFI System。
+# 两个要点：
+#   * 文件要先建出来（truncate）—— sfdisk 只往已存在的文件里写分区表；
+#   * 每条分区都要写死 size —— 写成默认 size 会让分区超出盘尾而失败。
+truncate -s 512M "$DISK"
+sfdisk "$DISK" >/dev/null <<'SPEC'
 label: gpt
-size=512MiB
-start=2048, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b, name=QM1ESP
-EOF
+start=1MiB, size=64MiB, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b, name=QM1ESP
+SPEC
 dd if="$ESP" of="$DISK" bs=1M seek=1 conv=notrunc status=none
 
 # ---------------------------------------------------------------- 生成凭据

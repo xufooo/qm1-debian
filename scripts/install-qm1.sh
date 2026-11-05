@@ -1,22 +1,34 @@
 #!/usr/bin/env bash
-# install-qm1.sh — 把 QM1 整机镜像安装到设备的 eMMC
+# install-qm1.sh — 把 QM1 整机镜像安装到设备的 eMMC（从 Linux 主机侧执行）
 #
 # 这是"安装"环节的落地脚本：不是 dd 的裸封装，而是一套带前置检查、
-# 强制备份、写入校验与救援提示的流程。任何破坏性动作前都要求显式确认。
+# 强制备份、写入校验、EFI 启动项登记与救援提示的流程。任何破坏性动作前
+# 都要求显式确认。
+#
+# ⚠️ QM1 上的设备编号是反直觉的，别照抄别的板子的写法：
+#      /dev/mmcblk0  = 内置 Wi-Fi 的 SDIO 卡（0x024c:0xb723）
+#      /dev/mmcblk1  = eMMC（ACPI 80860F14:00，SanDisk S10032，28.5 GiB）
+#    写错目标 = 把系统盖在 Wi-Fi 卡上。本脚本会按 MMC 的 type 字段
+#    拦掉 SDIO 卡与 SD 卡，但**不要**因此就省略 --target 的核对。
 #
 # 用法：
 #   # 1) 先看看会做什么（不写盘）
-#   sudo bash scripts/install-qm1.sh --image build/qm1-debian13-amd64.img \
-#        --target /dev/mmcblk0 --dry-run
+#   sudo bash scripts/install-qm1.sh --image build/qm1-disk.img \
+#        --target /dev/mmcblk1 --dry-run
 #
 #   # 2) 真正安装（会先整盘备份到备份目录）
-#   sudo bash scripts/install-qm1.sh --image build/qm1-debian13-amd64.img \
-#        --target /dev/mmcblk0 --backup-dir /mnt/usb/qm1-backup --yes
+#   sudo bash scripts/install-qm1.sh --image build/qm1-disk.img \
+#        --target /dev/mmcblk1 --backup-dir /mnt/usb/qm1-backup --yes
 #
 # 关键约束：
 #   * 镜像自带 ESP（引导器 + 内核 + initrd + grub.cfg），写完即可脱离 U 盘自启动；
-#   * 固件若不扫描内部存储的 \EFI\BOOT，仍需保留 U 盘跳板（见 --rescue-stick 说明）；
+#   * 写完会用 efibootmgr 登记 \EFI\BOOT\BOOTX64.EFI（固件不扫内部存储
+#     的 \EFI\BOOT 时仍需保留 U 盘跳板，见 README 的救援一节）；
 #   * 备份与 sha256 校验是硬前置，不可跳过（--no-backup 仅用于已确认无数据的盘）。
+#
+# 另一条安装路径：从 U 盘启动安装介质，选菜单 ①「安装到 eMMC」。
+# 那条路径（设备内的 qm1-install-to-emmc）会自动选对目标、自动备份、
+# 自动登记 EFI 启动项，并会生成登录口令 —— 不想在本机折腾就用它。
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -31,9 +43,11 @@ DO_VERIFY=1
 DO_DISCARD=1
 ASSUME_YES=0
 DRY_RUN=0
+ALLOW_SD=0
+FORCE_KIND=0
 
 usage() {
-    sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,33p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -44,6 +58,8 @@ while [ $# -gt 0 ]; do
         --no-backup)  NO_BACKUP=1; shift ;;
         --no-verify)  DO_VERIFY=0; shift ;;
         --no-discard) DO_DISCARD=0; shift ;;
+        --allow-sd)   ALLOW_SD=1; shift ;;
+        --force-kind) FORCE_KIND=1; shift ;;
         --yes)        ASSUME_YES=1; shift ;;
         --dry-run)    DRY_RUN=1; shift ;;
         -h|--help)    usage; exit 0 ;;
@@ -60,6 +76,44 @@ need_cmd blockdev
 
 # ---------- 1. 目标设备检查 ----------
 [ -b "$TARGET" ] || die "目标不是块设备：$TARGET"
+
+# 目标是什么类型的介质？必须先分清：
+#   MMC  = eMMC（本机要写的那个）
+#   SD   = SD 卡
+#   SDIO = 内置 Wi-Fi 的卡（写它等于毁掉无线模块）
+# 之前的用法示例里写的是 /dev/mmcblk0 —— 在这台机器上那是 Wi-Fi 的卡。
+_target_name="$(basename "$TARGET")"
+_target_type=""
+if [ -r "/sys/block/${_target_name}/device/type" ]; then
+    _target_type="$(cat "/sys/block/${_target_name}/device/type" 2>/dev/null || true)"
+fi
+case "$_target_type" in
+    MMC)
+        log "目标类型：MMC（eMMC）"
+        ;;
+    SDIO)
+        die "目标是 SDIO 卡（${_target_name}）—— 在 QM1 上那是内置 Wi-Fi 的卡，不是 eMMC！拒绝写入。
+     eMMC 通常是 /dev/mmcblk1（ACPI 80860F14:00）。先用 'lsblk -o NAME,TYPE,MODEL,SIZE' 确认。"
+        ;;
+    SD)
+        if [ "$ALLOW_SD" -eq 1 ]; then
+            warn "目标是 SD 卡（--allow-sd 放行）"
+        else
+            die "目标是 SD 卡（${_target_name}）。确认要写 SD 卡请加 --allow-sd。"
+        fi
+        ;;
+    "")
+        if [ "$FORCE_KIND" -eq 1 ]; then
+            warn "读不出目标类型（--force-kind 放行）"
+        else
+            die "读不出 ${_target_name} 的介质类型（/sys/block/${_target_name}/device/type 不存在）。
+     这通常意味着它不是 MMC 设备。确认无误再加 --force-kind。"
+        fi
+        ;;
+    *)
+        warn "目标类型未知：$_target_type"
+        ;;
+esac
 
 # 已挂载的盘绝不允许直接写
 if findmnt -rn -S "$TARGET" >/dev/null 2>&1; then
@@ -141,7 +195,37 @@ if [ "$DO_VERIFY" -eq 1 ]; then
     fi
 fi
 
-# ---------- 6. 后续步骤 ----------
+# ---------- 6. 登记 UEFI 启动项 ----------
+# 写完盘还不够：这台机器的固件不一定扫描内部存储的 \EFI\BOOT，
+# 登记一条 UEFI 启动项才稳。找不到 ESP 就明说，别让人以为装好了。
+ESP_NO=""
+ESP_TYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
+while read -r _part _ptype _pno; do
+    [ -n "${_ptype:-}" ] || continue
+    case "$_ptype" in
+        "$ESP_TYPE"|"${ESP_TYPE^^}") ESP_NO="$_pno"; break ;;
+    esac
+done < <(lsblk -nro NAME,PARTTYPE,PARTN "$TARGET" 2>/dev/null || true)
+
+if [ -z "$ESP_NO" ]; then
+    warn "在 $TARGET 上找不到 EFI System 分区（PARTTYPE $ESP_TYPE）—— 跳过 EFI 启动项登记。"
+    warn "如果开机后找不到系统，请用 U 盘跳板引导，或手工执行："
+    warn "  efibootmgr -c -d $TARGET -p <ESP分区号> -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+elif ! command -v efibootmgr >/dev/null 2>&1; then
+    warn "没有 efibootmgr（apt install efibootmgr）—— 跳过 EFI 启动项登记。"
+    warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+elif [ ! -d /sys/firmware/efi/efivars ]; then
+    warn "当前不是以 UEFI 方式启动（没有 /sys/firmware/efi/efivars）—— 跳过 EFI 启动项登记。"
+else
+    if efibootmgr -c -d "$TARGET" -p "$ESP_NO" -L "QM1 Debian" -l '\EFI\BOOT\BOOTX64.EFI'; then
+        log "已登记 UEFI 启动项：QM1 Debian → \\EFI\\BOOT\\BOOTX64.EFI"
+    else
+        warn "efibootmgr 登记失败 —— 请手工执行："
+        warn "  efibootmgr -c -d $TARGET -p $ESP_NO -L 'QM1 Debian' -l '\\EFI\\BOOT\\BOOTX64.EFI'"
+    fi
+fi
+
+# ---------- 7. 后续步骤 ----------
 cat <<EOF
 
 安装完成。接下来：

@@ -269,6 +269,7 @@ jobs:
         run: |
           set -eu
           ROOT=build/rootfs
+          source scripts/lib/ci-link-ok.sh
           KABI="${QM1_KERNEL_ABI}"
           # 根治模块必须真的进到镜像里。之前的 bug：GITHUB_ENV 里用了带短横线的
           # 变量名（rtw88-module），bash 里 "${rtw88-module:-fallback}" 展开成
@@ -329,8 +330,8 @@ jobs:
           U="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-rtw88-8723bs.service"
           [ -L "$U" ] \
             || { echo "::error::qm1-rtw88-8723bs.service 没有被启用（运行时兜底是空的）"; exit 1; }
-          [ -e "$U" ] \
-            || { echo "::error::qm1-rtw88-8723bs.service 的 wants 链接是悬空的"; exit 1; }
+          link_ok "$U" \
+            || { echo "::error::qm1-rtw88-8723bs.service 的 wants 链接是悬空的：$(link_target "$U")"; exit 1; }
           # modprobe 里的 options 只能写 rtw_core 真实存在的参数，写错参数会让
           # modprobe 直接拒绝加载模块（Invalid argument）。
           for p in disable_lps_deep support_bf debug_mask; do
@@ -343,6 +344,7 @@ jobs:
         run: |
           set -eu
           ROOT=build/rootfs
+          source scripts/lib/ci-link-ok.sh
           # 内置蓝牙（Realtek RTL8723BS 的 BT 部分，ACPI HID OBDA8723/OBDA0623）
           # 走**内核**路线：hci_uart（含 hci_h5 的 3WIRE 协议）+ btrtl +
           # 发行版 firmware-realtek 的 rtl_bt/rtl8723bs_{fw.bin,config-OBDA8723.bin}。
@@ -357,8 +359,8 @@ jobs:
           BT_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service"
           [ -L "$BT_LINK" ] \
             || { echo "::error::蓝牙服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
-          [ -e "$BT_LINK" ] \
-            || { echo "::error::qm1-bluetooth.service 的 wants 链接是悬空的：$(readlink "$BT_LINK")"; exit 1; }
+          link_ok "$BT_LINK" \
+            || { echo "::error::qm1-bluetooth.service 的 wants 链接是悬空的：$(link_target "$BT_LINK")"; exit 1; }
           # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
           # Debian 13 的 6.12.113+deb13-amd64 实测：
           #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m
@@ -384,6 +386,7 @@ jobs:
         run: |
           set -eu
           ROOT=build/rootfs
+          source scripts/lib/ci-link-ok.sh
 
           # 1) DNS 必须有数据源。Debian 13 的 systemd 与 systemd-resolved
           #    两个包都**不带** /etc/resolv.conf（systemd-resolved 只带
@@ -394,11 +397,11 @@ jobs:
             || { echo "::error::镜像里 /etc/resolv.conf 不是指向 resolved stub 的软链"; exit 1; }
           grep -qx '/usr/lib/systemd/resolv.conf' "$ROOT/etc/resolv.conf" \
             || { echo "::error::/etc/resolv.conf 指向的不是 resolved stub：$(readlink "$ROOT/etc/resolv.conf")"; exit 1; }
-          [ -e "$ROOT/etc/resolv.conf" ] \
-            || { echo "::error::/etc/resolv.conf 是悬空软链"; exit 1; }
+          link_ok "$ROOT/etc/resolv.conf" \
+            || { echo "::error::/etc/resolv.conf 是悬空软链：$(link_target "$ROOT/etc/resolv.conf")"; exit 1; }
           RESOLVED_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/systemd-resolved.service"
-          [ -e "$RESOLVED_LINK" ] \
-            || { echo "::error::systemd-resolved 没有开机自启（DNS 无数据源）"; exit 1; }
+          link_ok "$RESOLVED_LINK" \
+            || { echo "::error::systemd-resolved 没有开机自启（DNS 无数据源）：$(link_target "$RESOLVED_LINK")"; exit 1; }
 
           # 2) 必须有一个能登进来的账号，且**镜像里不留默认口令**
           #    （口令由安装器装机时随机生成并打印）。
@@ -420,8 +423,8 @@ jobs:
           WIFI_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-wifi@wlan0.service"
           [ -L "$WIFI_LINK" ] \
             || { echo "::error::qm1-wifi@wlan0.service 没有开机自启（缺 wants 链接）"; exit 1; }
-          [ -e "$WIFI_LINK" ] \
-            || { echo "::error::qm1-wifi@wlan0.service 的 wants 链接是悬空的：$(readlink "$WIFI_LINK")"; exit 1; }
+          link_ok "$WIFI_LINK" \
+            || { echo "::error::qm1-wifi@wlan0.service 的 wants 链接是悬空的：$(link_target "$WIFI_LINK")"; exit 1; }
           # 单元自己的超时必须大于它内部等 SDIO 枚举接口的 60 秒，
           # 否则 systemd 会在接口出现之前就把单元掐掉（Wi-Fi 永远起不来且无日志）。
           grep -qE '^TimeoutStartSec=(1[2-9][0-9]|[2-9][0-9]|[0-9]{3,})s$' "$WIFI_UNIT" \
