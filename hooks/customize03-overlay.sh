@@ -43,6 +43,33 @@ if [ -d "$TARGET/etc/systemd/system" ]; then
 fi
 
 # ---------------------------------------------------------------------------
+# ★ initramfs 必须重建一次 —— 因为 overlay 里那条 eMMC 防掉卡规则是
+#   **开机早期**才管用的：
+#
+#     /etc/udev/rules.d/60-qm1-emmc-power.rules
+#       → 把 eMMC 主控（ACPI 80860F14:00）的 runtime PM 关掉
+#         （power/control=on、autosuspend_delay_ms=-1）
+#
+#   这台机器的 eMMC 曾经掉卡：掉卡的时点恰好是开机第一次访问根盘，
+#   也就是**根文件系统挂载之前** —— 那时 overlay 的规则还没生效
+#   （overlay 是构建期落在根文件系统里的，initramfs 阶段根本看不到）。
+#   所以规则必须进 initramfs，而不是只留在根文件系统里。
+#
+#   hook02 已经生成过一次 initramfs，但那是在 overlay 落地**之前**，
+#   所以那次生成里没有这条规则 ⇒ 这里必须重建。
+# ---------------------------------------------------------------------------
+if [ -f "$TARGET/etc/udev/rules.d/60-qm1-emmc-power.rules" ] \
+   && { [ -x "$TARGET/usr/sbin/update-initramfs" ] || [ -x "$TARGET/sbin/update-initramfs" ]; }; then
+    echo "[hook03] 重建 initramfs（让 eMMC 防掉卡规则进到 initramfs 里）"
+    if chroot "$TARGET" update-initramfs -u -k all >/dev/null 2>&1; then
+        echo "[hook03] initramfs 已重建"
+    else
+        echo "[hook03][fail] initramfs 重建失败 —— eMMC 可能在开机时掉卡" >&2
+        exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
 # 屏蔽发行版自带的 wpa_supplicant.service
 #
 # 这台机器的 Wi-Fi 只有一条路：qm1-wifi@wlan0.service（按接口实例化，

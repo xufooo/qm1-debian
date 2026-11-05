@@ -166,6 +166,17 @@ if [ -f "$SRC/authorized_keys" ]; then
         if [ -f "$SRC/ssh_user" ]; then
             SSH_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
         fi
+        # 没指定就落到镜像里那个能登录的普通账号 qm1 ——
+        # sshd 明确禁掉了 root 登录（sshd_config.d/qm1.conf: PermitRootLogin no），
+        # 公钥只装到 /root/.ssh 的话，谁也登不进来（"装完了但连不上"的经典原因）。
+        if [ -z "$SSH_USER" ]; then
+            if id qm1 >/dev/null 2>&1; then
+                SSH_USER=qm1
+                log "provision 里没写 ssh_user —— 公钥改装到默认登录账号 qm1"
+            else
+                warn "provision 里没写 ssh_user，镜像里也没有 qm1 账号 —— 公钥只装到 root，登不进来"
+            fi
+        fi
         if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
             UHOME="$(getent passwd "$SSH_USER" | cut -d: -f6)"
             [ -n "$UHOME" ] || UHOME="/home/$SSH_USER"

@@ -41,6 +41,7 @@ fail=0
 source "$SCRIPT_DIR/lib/img-check.sh"
 
 rc=0
+OUT="$TMP/out"
 expect() {   # expect <说明> <期望输出片段> <实际输出>
     if printf '%s' "$3" | grep -qF "$2"; then
         printf '  [ OK ] %s\n' "$1"
@@ -48,6 +49,16 @@ expect() {   # expect <说明> <期望输出片段> <实际输出>
         printf '  [FAIL] %s —— 期望输出里有「%s」，实际是：%s\n' "$1" "$2" "$3"
         rc=1
     fi
+}
+
+# ★ 调 helper 时**不能**用 $(...) 捕获输出 ——
+#   命令替换是子 shell，里面 fail=$((fail + 1)) 改的是子 shell 的计数，
+#   父进程的 fail 纹丝不动 ⇒ 计数断言永远失败（这个坑本仓库踩过好几次：
+#   printf | while 也是同一类 —— 子 shell 里丢状态）。
+#   所以输出重定向到文件，函数在当前 shell 里跑。
+call() {   # call <helper> <参数…>；输出在 $OUT，计数在 $fail
+    : > "$OUT"
+    "$@" > "$OUT"
 }
 
 echo "== 先把 debugfs 的行为说清楚（这是整件事的根因） =="
@@ -64,26 +75,25 @@ fi
 
 echo "== check_exists / check_absent 的语义 =="
 before="$fail"
-out="$(check_exists /hello.txt "文件在镜像里")"
-expect "存在的文件 ⇒ OK" "OK" "$out"
-expect "存在的文件不该计失败" "" "$out"
+call check_exists /hello.txt "文件在镜像里"
+expect "存在的文件 ⇒ OK" "OK" "$(cat "$OUT")"
 [ "$fail" = "$before" ] || { echo "  [FAIL] 存在的文件不该让失败计数增加"; rc=1; }
 
-out="$(check_exists /definitely-not-here "文件不在镜像里")"
-expect "不存在的文件 ⇒ FAIL" "FAIL" "$out"
+call check_exists /definitely-not-here "文件不在镜像里"
+expect "不存在的文件 ⇒ FAIL" "FAIL" "$(cat "$OUT")"
 [ "$fail" -eq $((before + 1)) ] || { echo "  [FAIL] 不存在的文件必须计一次失败"; rc=1; }
 
 before="$fail"
-out="$(check_absent /definitely-not-here "文件不在镜像里")"
-expect "不存在的文件 ⇒ check_absent 说 OK" "OK" "$out"
+call check_absent /definitely-not-here "文件不在镜像里"
+expect "不存在的文件 ⇒ check_absent 说 OK" "OK" "$(cat "$OUT")"
 [ "$fail" = "$before" ] || { echo "  [FAIL] check_absent 不该计失败"; rc=1; }
 
-out="$(check_absent /hello.txt "文件在镜像里")"
-expect "存在的文件 ⇒ check_absent 说 FAIL" "FAIL" "$out"
+call check_absent /hello.txt "文件在镜像里"
+expect "存在的文件 ⇒ check_absent 说 FAIL" "FAIL" "$(cat "$OUT")"
 [ "$fail" -eq $((before + 1)) ] || { echo "  [FAIL] check_absent 必须计一次失败"; rc=1; }
 
-out="$(check_absent /dir "目录")"
-expect "目录也能认出来（不是只认普通文件）" "FAIL" "$out"
+call check_absent /dir "目录"
+expect "目录也能认出来（不是只认普通文件）" "FAIL" "$(cat "$OUT")"
 
 if [ "$rc" -eq 0 ]; then
     echo "镜像存在性判断的语义测试全部通过"

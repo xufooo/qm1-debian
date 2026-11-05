@@ -1029,8 +1029,12 @@ jobs:
           # 上面那次只测了根文件系统那一层（直接 -kernel 起）⇒ ESP 里的引导器、
           # grub.cfg 的 search 行、根 UUID、内核 handover 这一整段没人验过。
           # GRUB 菜单有 5 秒超时，会自动选第 ① 项（正常启动那条）⇒ 不需要交互。
-          sudo apt-get update -qq
-          sudo apt-get install -y --no-install-recommends ovmf
+          # 这个作业跑在容器里（debian:trixie-slim），容器内是 root、
+          # 而且**没有 sudo 这个命令** ⇒ 这里不能写 sudo（写了自己就报
+          # "sudo: command not found"，exit 127，整个步骤挂掉）。
+          # 同一作业里其它安装步骤都是直接 apt-get，就是这个原因。
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ovmf
           rc=0
           bash scripts/boot-smoke.sh \
             --disk build/out/qm1-disk.img \

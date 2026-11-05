@@ -34,10 +34,16 @@ log() {
     printf '%s\n' "$*" >&2 || true
 }
 
-if [ ! -f "$CONF" ]; then
-    log "没有 $CONF —— 无线配置不存在，退出（单元由 ConditionPathExists 守着，这里只是兜底）"
-    exit 0
-fi
+# 配置里必须有能连的网络块。出厂配置里的 network 块是**注释掉的**，
+# 真正的凭据由 qm1-firstboot 在首启时写进来（从 provisioning 载荷里取）。
+#
+# 如果配置里一个 network 块都没有，wpa_supplicant 照样能起来、wlan0 照样在、
+# SSID 也扫得到 —— 但它什么也不连。现场表现就是"能看见 SSID 就是连不上"，
+# 而日志里一句错都没有（最难查的一类）。所以这里显式等，并说清在等什么。
+conf_has_network() {
+    [ -f "$CONF" ] || return 1
+    grep -q '^[[:space:]]*network[[:space:]]*=' "$CONF" 2>/dev/null
+}
 
 # "接口没出现"有好几种，得分清楚 —— 它们要修的地方完全不同，日志里必须点名：
 #
@@ -111,7 +117,23 @@ while ! ip link show "$IFACE" >/dev/null 2>&1; do
     sleep 1
 done
 
-log "$IFACE 已出现，启动 wpa_supplicant（配置 $CONF）"
+log "$IFACE 已出现"
+
+# 等一份"能连"的配置
+while ! conf_has_network; do
+    if [ ! -f "$CONF" ]; then
+        _why="还没有 $CONF（首启脚本会写它）"
+    else
+        _why="$CONF 里没有 network 块 —— 没有可连的 Wi-Fi（首启脚本会写凭据进来）"
+    fi
+    if [ $((waited % LOG_EVERY)) -eq 0 ]; then
+        log "等一份能连的配置：$_why"
+    fi
+    waited=$((waited + 1))
+    sleep 1
+done
+
+log "$IFACE 已出现且配置里有网络块，启动 wpa_supplicant（配置 $CONF）"
 # exec：让 wpa_supplicant 接管这个进程，systemd 就能看着它、
 # 它退出时也能被 Restart= 正常拉起。
 exec /usr/sbin/wpa_supplicant -i "$IFACE" -c "$CONF"

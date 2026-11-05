@@ -372,7 +372,55 @@ check_content /etc/systemd/journald.conf.d/qm1.conf '^Storage=persistent' \
     "journal 落盘持久化（默认 auto 写 /run，重启即失，现场没法翻日志）"
 check_exists /etc/systemd/system/qm1-firstboot.service "首启脚本单元"
 check_exists /etc/udev/rules.d/60-qm1-emmc-power.rules "eMMC runtime suspend 的 udev 规则（initramfs 阶段就要生效）"
+# ★★ 那条规则必须**在 initramfs 里**才有用。
+#   这台机器的 eMMC 掉卡时点恰好是开机第一次访问根盘 —— 也就是根文件系统
+#   挂载**之前**，那时 overlay 的规则还没生效（overlay 是构建期落在根文件
+#   系统里的）。所以 hook03 在 overlay 落地之后重建了一次 initramfs，
+#   这里就查那件事到底做没做到：initrd 里必须能翻出这个文件名。
+#   （cpio 的 newc 格式里文件名是明文，直接在解压后的字节里搜就够。）
+if [ -n "$KVER" ]; then
+    _initrd="$(mktemp)"
+    if debugfs -R "cat /boot/initrd.img-$KVER" "$IMG" > "$_initrd" 2>/dev/null; then
+        _found=0
+        if command -v lsinitramfs >/dev/null 2>&1; then
+            # lsinitramfs 自己认得各种压缩格式，最省事。
+            # ★ 先把清单取到变量里再 grep：管道里 grep -q 提前退出会给上游发
+            #   SIGPIPE，本脚本开了 pipefail，管道返回 141 会被误判成"没找到"。
+            _listing="$(lsinitramfs "$_initrd" 2>/dev/null || true)"
+            grep -q '60-qm1-emmc-power.rules' <<<"$_listing" && _found=1
+        else
+            _raw="$(mktemp)"
+            if command -v zstd >/dev/null 2>&1 && zstd -dc "$_initrd" > "$_raw" 2>/dev/null; then
+                :
+            elif command -v gzip >/dev/null 2>&1 && gzip -dc "$_initrd" > "$_raw" 2>/dev/null; then
+                :
+            else
+                cat "$_initrd" > "$_raw"
+            fi
+            grep -aq '60-qm1-emmc-power.rules' "$_raw" && _found=1
+            rm -f "$_raw"
+        fi
+        rm -f "$_initrd"
+        if [ "$_found" = "1" ]; then
+            printf '  OK   %-46s (%s)\n' "initramfs 里的 eMMC 规则" \
+                "60-qm1-emmc-power.rules 在 initramfs 里（开机首访根盘不掉卡）"
+        else
+            printf '  FAIL %-46s (%s)\n' "initramfs 里的 eMMC 规则" \
+                "initramfs 里没有 60-qm1-emmc-power.rules —— eMMC 可能在开机时掉卡"
+            fail=$((fail + 1))
+        fi
+    else
+        printf '  FAIL %-46s (%s)\n' "initramfs 里的 eMMC 规则" \
+            "读不出 /boot/initrd.img-$KVER，没法确认规则在不在里面"
+        fail=$((fail + 1))
+    fi
+fi
 check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
+# ★ sshd 没有主机密钥就起不来 ⇒ "SSH 可登"这条交付口径直接断。
+#   Debian 的 openssh-server postinst 会 ssh-keygen -A 生成，但那是
+#   "正常情况下"——这里显式查一次，缺了当场红，别等到刷完机才发现。
+check_exists /etc/ssh/ssh_host_ed25519_key "SSH 主机密钥（缺了 sshd 起不来）"
+check_exists /etc/ssh/sshd_config.d/qm1.conf "sshd 的 QM1 定制片段（PermitRootLogin no 等）"
 check_exists /usr/local/sbin/qm1-bluetooth-up "蓝牙初始化辅助脚本（失败要留痕）"
 check_exists /usr/local/lib/qm1/install-lib.sh "安装器共用的磁盘/凭据函数库"
 check_exists /usr/local/sbin/qm1-provision "首启运行时部署的包装脚本（跑 provision-agent.sh）"

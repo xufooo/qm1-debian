@@ -147,12 +147,16 @@ wait_for_dns() {
     done
     return 1
 }
-if [ -n "$WIFI_SSID" ]; then
-    if ! wait_for_dns; then
-        # 没有 DNS 就没法 apt、没法拉官方安装器、连时钟都对不上 ⇒ 这一步失败
-        # 后面每一步都会失败，如实记下来（最后非零退出 ⇒ 下次开机重试）。
-        fail_hard "DNS 仍未就绪 —— 下面的 apt/安装步骤必然失败（检查 Wi-Fi 是否关联成功）"
-    fi
+if ! wait_for_dns; then
+    # 网络没就绪，后面每一步都会失败（apt 要 DNS，官方安装器要 HTTPS）。
+    # 但这里不判死刑：判死刑交给后面的 apt-get update —— 它报的错更贴近现场
+    # （"还没联网？"），而这里只能说出"DNS 不通"这种没法定位的话。
+    #
+    # 注意这段**无条件**等：以前只在传了 Wi-Fi 凭据时才等，可自动路径
+    # （qm1-provision.service）恰恰不带凭据 —— 凭据是 qm1-firstboot 写进
+    # wpa_supplicant.conf 的，provision-agent 自己并不知道 ⇒ 于是 DNS 等待
+    # 被整段跳过，后面直接撞在时钟等待上，错误信息完全指不到病根。
+    warn "DNS 仍未就绪 —— 下面的 apt 与官方安装器大概率会失败（检查 Wi-Fi 是否关联成功）"
 fi
 
 # ---------- 3. 时钟 ----------
@@ -267,6 +271,32 @@ WantedBy=default.target
 EOF
     HERMES_GATEWAY_UNIT="hermes-gateway.service"
     warn "已写入兜底网关单元 —— 它没有官方单元的 RestartPreventExitStatus 等保护，联网后建议重跑 hermes gateway install --force 换成官方单元"
+fi
+
+# ---- 6b-bis 给网关单元加内存限额（官方单元不带）----
+#
+# 官方 `hermes gateway install` 写出来的单元没有 MemoryHigh/MemoryMax ⇒
+# 在这台 2 GiB 的机器上它可以一直涨到把 sshd 挤死：systemd-oomd 盯的是
+# system.slice 与 user.slice（oomd.conf.d/qm1.conf），user.slice 的压力
+# 最终会以"杀 system.slice 里最大的进程"收场 ⇒ 倒霉的常常是 sshd，
+# 也就是"SSH 可登"这条交付口径。
+#
+# 用 drop-in 加限额，而不是改单元本体：官方 CLI 每次启动都会
+# refresh_systemd_unit_if_needed() 重写单元本体，我们改的内容会被冲掉；
+# drop-in 是它不碰的地方。
+if [ -n "$HERMES_GATEWAY_UNIT" ] \
+   && [ -f "$RUN_HOME/.config/systemd/user/$HERMES_GATEWAY_UNIT" ]; then
+    _ddir="$RUN_HOME/.config/systemd/user/$HERMES_GATEWAY_UNIT.d"
+    mkdir -p "$_ddir"
+    cat > "$_ddir/qm1-limits.conf" <<'EOF'
+[Service]
+# 2 GiB 的机器上网关必须限额：不设上限它会把 sshd 挤死，
+# 而 systemd-oomd 盯的 system.slice 里最大的进程常常就是 sshd。
+MemoryHigh=280M
+MemoryMax=350M
+EOF
+    chown -R "$RUN_AS" "$_ddir" 2>/dev/null || true
+    log "已给网关单元加内存限额 drop-in（MemoryHigh=280M / MemoryMax=350M）"
 fi
 
 # ---- 6c 浏览器会话（我们自己管，上游不碰它）----
