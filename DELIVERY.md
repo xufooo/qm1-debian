@@ -93,6 +93,30 @@ mdir -i qm1-installer.img@@$((2048*512)) ::/qm1/provision
 
 ## 3. 写 U 盘
 
+**同一支 U 盘既是启动盘，也是 eMMC 的整盘备份盘**：安装器会把 eMMC 的整
+盘备份写在 U 盘尾部那段未分区空间里（安装器自动挑这个位置）。所以 U 盘
+不能太小 —— 镜像约 6.3 GiB，eMMC 备份约 28.5 GiB，**建议 64 GiB 以上的
+U 盘**。
+
+用仓库里的脚本写，它会替你把容易出事的地方都堵上：
+
+```sh
+bash scripts/prepare-usb-media.sh \
+     --image build/out/qm1-installer.img \
+     --target /dev/sdX \
+     --backup-gib 30
+```
+
+它做的事：
+
+- 确认 `/dev/sdX` 确实是块设备、是不是可移动设备（不是的话要 `--force`）、
+  上面的分区有没有正被挂着；
+- 算容量：镜像 + 备份 + 16 MiB 余量不够就直接拒绝，**不会**让你插着
+  U 盘到机器前面才发现备份放不下；
+- 写入之后回读校验，并读出分区表，确认尾部未分区空间确实够放备份。
+
+想手工来也可以，但要照着它的检查做：
+
 ```sh
 # 整盘写入（会清空 U 盘）
 dd if=qm1-installer.img of=/dev/sdX bs=4M status=progress conv=fsync
@@ -260,12 +284,20 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 `qm1-selftest`（`/usr/local/bin/qm1-selftest`）在机器上跑一遍，除了上面
 四条，还查这些：
 
+> **它不用你手动跑**：开机两分钟后 `qm1-selftest.timer` 会自动跑一遍，
+> 表格进 journal（`journalctl -u qm1-selftest.service`），机读 JSON 落在
+> `/var/lib/qm1/selftest-last.json`。自检由定时器触发而不是挂在
+> `multi-user.target` 上 —— 挂在 target 上等于"整机开机必须等自检跑完"，
+> 自检卡住整机就卡住（这个坑踩过两次）。报告里有 FAIL 行**不算**单元失败，
+> 否则整机会变成 degraded，真故障会被噪声淹没。
+
 | 检查 | 判据 |
 |---|---|
 | 系统状态 | `systemctl is-system-running` 必须是 running（degraded 只警告） |
 | 内核套数 | `/lib/modules` 下只允许有一套内核（签名版和 `-unsigned` 互 Conflicts，多一套就会让模块 vermagic 对不上） |
-| Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c*v024CB723*`，且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
-| 出货模块 | `modinfo` 的 alias 必须认领 `v024CB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
+| Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c*v024CdB723*`（注意 vendor 是 `024C`、device 是 `B723`，中间那个 `d` 是**小写**），且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
+| 出货模块 | `modinfo` 的 alias 必须认领 `v024CdB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
+| Wi-Fi 信道宽度 | `iw dev wlan0 link` 的 width 必须是 **20 MHz** —— 出货模块带的是"把芯片能力收窄到 20 MHz"那条策略补丁（`patches/rtw88-upstream/0006`），40 MHz 在这个芯片变体上不支持，且是社区里"随机断连"的来源 |
 | 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` ⇒ 8250 抢占了那条串口（要 DSDT 覆盖）；没有 HID ⇒ 镜像**故意**没加载 `hci_uart`（`/run/qm1-bluetooth.failed` 里写着原因） |
 
 > 为什么"网络没连上"不许拖住开机：发行版的 `systemd-networkd-wait-online`
