@@ -344,17 +344,27 @@ ACPI\VEN_OBDA&DEV_8723
 ACPI\VEN_OBDA&DEV_0623
 ```
 
-对应驱动 `RtkUart.sys`（用户态服务）。**Linux 主线没有 Realtek UART HCI 驱动**
-（linux-firmware 的提交说明里直接写明：这些固件名来自 Realtek 驱动，内核侧无对应驱动），
-所以内核只需要 `CONFIG_BT_HCIUART`（Debian 已内置 `btuart`），缺的是「把厂商固件刷进芯片
-并初始化」这一步 —— 那由用户态 `rtk_hciattach` 完成，之后内核 `btuart` 接手同一个串口。
+对应驱动 `RtkUart.sys`（用户态服务）。
+
+**实测更正（2026-11-05）**：早先写「Linux 主线没有 Realtek UART HCI 驱动」**过于绝对**。
+把 Debian 13 内核里的 `hci_uart.ko` 抽出来 `modinfo` 一看，它的 ACPI alias 里**明确带着这两个 ID**：
+
+```
+alias: acpi*:OBDA8723:*
+alias: acpi*:OBDA0623:*
+```
+
+也就是说**主线驱动认得这个口**，只是它不会替 Realtek 芯片做「厂商固件下发 + 初始化」——
+那一步必须由用户态 `rtk_hciattach` 完成，之后内核 `hci_uart` 接手同一个串口。
+另外要注意模块名：Linux 6.x 里这个模块叫 **`hci_uart.ko`**（早期内核才叫 `bt_hciuart.ko`），
+Debian 13 的 6.12.113+deb13-amd64 是 `CONFIG_BT_HCIUART=m`（**模块**，不是编进内核）。
 
 | 环节 | 本仓库的做法 |
 |------|--------------|
 | 用户态工具 | 上游 [lwfinger/rtl8723bs_bt](https://github.com/lwfinger/rtl8723bs_bt)（钉死提交 `09eb91f5`）的 `rtk_hciattach`：BlueZ hciattach 的 Realtek 衍生版，负责下发固件并做厂商初始化 |
 | 固件 | 上游自带的 `rtlbt_fw` / `rtlbt_config` / `rtlbt_fw_new`（**不是** Windows 那份未打补丁的 blob，见下） |
 | 串口探测 | `/etc/default/qm1-bluetooth` 里的 `BT_TTY` 优先；否则按 ACPI HID（`OBDA8723` / `OBDA0623`）在 sysfs 里反查 tty；再否则退回 dmesg 里的第一个 MMIO 串口 |
-| 开机自启 | `qm1-bluetooth.service` → `qm1-bt-attach.sh` → `rtk_hciattach -n -s 115200 <tty> rtk_h5`（`-n` = 不摘 ldisc，让内核接管；`rtk_h5` = 3 线 UART，需内核 ≥ 3.12） |
+| 开机自启 | `qm1-bluetooth.service` → `qm1-bt-attach.sh` → 先 `rtk_hciattach -n -s 115200 <tty> rtk_h5`（`-n` = 不摘 ldisc，让内核接管）下发固件并初始化，再 `modprobe hci_uart` 让内核把该串口认成蓝牙控制器，最后检查 `/sys/class/bluetooth/hci0` |
 
 **固件谱系（取证结论，别混用）**：ASUS Win8.1 蓝牙包里的
 `rtl8723b_mp_bt40_fw_asic_rom`（50504 B）与 Debian `firmware-realtek` 的
@@ -374,7 +384,8 @@ bash scripts/build-rootfs.sh --out build/rootfs --profile runtime \
      --bt-hciattach-deb build/bt-hciattach/qm1-rtl8723bs-bt_*.deb
 ```
 
-hook 会核对 `rtk_hciattach` 可执行、固件在位、内核 `CONFIG_BT_HCIUART=y`，并建立开机自启链接；
+hook 会核对 `rtk_hciattach` 可执行、固件在位、内核 `CONFIG_BT_HCIUART`（`=y` 或 `=m`；
+Debian 是 `=m`，此时额外确认镜像里存在 `hci_uart.ko`），并建立开机自启链接；
 CI 里有一条硬断言（`Assert the Bluetooth vendor package is inside the image`），少了任何一项就红。
 
 **兜底**：如果某个内核上 `rtk_hciattach` 起不来（串口探测不到、或 H5 协议不通），
