@@ -305,8 +305,11 @@ jobs:
               [ -f "$KO_DIR/$f" ] \
                 || { echo "::error::镜像里缺少 rtw88 模块 $f"; exit 1; }
             done
+          elif [ -f "$KO_DIR/rtw88_8723bs.ko" ]; then
+            # 上游"芯片回移"模式：只编 rtw8723bs.c，复用树内 rtw88 核心。
+            MOD=rtw88_8723bs
           else
-            echo "::error::镜像里没有 rtw88 模块（rtw88_qm1.ko / rtw_8723bs.ko）"; exit 1
+            echo "::error::镜像里没有 rtw88 模块（rtw88_qm1.ko / rtw_8723bs.ko / rtw88_8723bs.ko）"; exit 1
           fi
           [ -f "$ROOT/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
             || { echo "::error::镜像里没有 rtw88 固件 rtw88/rtw8723b_fw.bin"; exit 1; }
@@ -324,10 +327,25 @@ jobs:
           #   于是"装了根治模块"却仍在用有永久卡死路径的老驱动 —— 而且一切看起来正常。
           grep -qx 'install r8723bs /bin/false' "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
             || { echo "::error::modprobe 配置里没有 install r8723bs /bin/false（隔离只有一道）"; exit 1; }
-          for m in rtw88_core rtw88_sdio; do
-            grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-              || { echo "::error::modprobe 配置里没有 blacklist $m（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
-          done
+          # ★ 树内 rtw88 也要"安装屏蔽"，不能只有 blacklist。
+          #   blacklist 只挡 udev 的 modalias 自动加载；显式 modprobe rtw88_sdio
+          #   仍会把树内模块塞进去 —— 树内 rtw88_core 导出的是**同名**符号
+          #   （rtw_core_init / rtw_register_hw / rtw_chip_info_setup …），
+          #   与树外 rtw88_qm1 撞车，于是树外模块再也装不上去
+          #   （insmod 报 Unknown symbol），现场表现是"驱动装上了却没 wlan0"。
+          #   名单与 build 脚本的 INTREE_RTW88、verify-image.sh 的断言三处一致。
+          # ★ 但绝不能要求"拉黑出货模块自己"：芯片回移模式（MOD=rtw88_8723bs）
+          #   复用树内 rtw88 核心，把树内 rtw88 拉黑等于把出货模块拉死。
+          if [ "$MOD" != "rtw88_8723bs" ]; then
+            for m in rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs \
+                     rtw88_usb rtw88_pci; do
+              [ "$m" = "$MOD" ] && continue
+              grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+                || { echo "::error::modprobe 配置里没有 blacklist $m（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
+              grep -qx "install $m /bin/false" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
+                || { echo "::error::modprobe 配置里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
+            done
+          fi
           # ★ 打了 P1–P5 补丁的树外 staging 模块 r8723bs_qm1 也要挡：
           #   它带的是**同一个** SDIO device id（0x024c:0xb723），udev 照样会
           #   按 modalias 抢先加载它 —— 那就等于换了个名字的老驱动，
@@ -378,15 +396,31 @@ jobs:
             || { echo "::error::qm1-bluetooth.service 的 wants 链接是悬空的：$(link_target "$BT_LINK")"; exit 1; }
           # 运行时部署单元：没有它，刷完机不会自动铺 Hermes/Chrome
           # （DELIVERY.md 承诺的是"开机即用"，不是"装完系统手工敲一行"）。
+          #
+          # ★ 部署由 **timer** 触发，服务本身不挂在 multi-user.target 上。
+          #   target 会给 Wants= 成员隐式补 After=（systemd.unit(5)），
+          #   服务若挂在 multi-user.target 上又要等 network-online，
+          #   就等于"整机开机必须等网络就绪"—— 这台机器没有 RJ45，
+          #   内置 Wi-Fi 没起来时整机到不了 multi-user.target，
+          #   没有 SSH、看起来像砖了。
           [ -f "$ROOT/etc/systemd/system/qm1-provision.service" ] \
             || { echo "::error::镜像里没有 qm1-provision.service"; exit 1; }
+          [ -f "$ROOT/etc/systemd/system/qm1-provision.timer" ] \
+            || { echo "::error::镜像里没有 qm1-provision.timer"; exit 1; }
           [ -x "$ROOT/usr/local/sbin/qm1-provision" ] \
             || { echo "::error::镜像里缺少可执行的 /usr/local/sbin/qm1-provision"; exit 1; }
-          PROV_LINK="$ROOT/etc/systemd/system/multi-user.target.wants/qm1-provision.service"
+          PROV_LINK="$ROOT/etc/systemd/system/timers.target.wants/qm1-provision.timer"
           [ -L "$PROV_LINK" ] \
-            || { echo "::error::运行时部署服务没有开机自启（缺 multi-user.target.wants 链接）"; exit 1; }
+            || { echo "::error::运行时部署定时器没有开机自启（缺 timers.target.wants 链接）"; exit 1; }
           link_ok "$PROV_LINK" \
-            || { echo "::error::qm1-provision.service 的 wants 链接是悬空的：$(link_target "$PROV_LINK")"; exit 1; }
+            || { echo "::error::qm1-provision.timer 的 wants 链接是悬空的：$(link_target "$PROV_LINK")"; exit 1; }
+          grep -q '^Unit=qm1-provision.service' "$ROOT/etc/systemd/system/qm1-provision.timer" \
+            || { echo "::error::qm1-provision.timer 没有指向 qm1-provision.service"; exit 1; }
+          # 服务本身绝不能再 After=multi-user.target：那会和 target 的隐式 After=
+          # 撞成排序环，systemd 只能任意断一条边，结果不可预期。
+          if grep -qE '^After=.*multi-user\.target' "$ROOT/etc/systemd/system/qm1-provision.service"; then
+            echo "::error::qm1-provision.service 还 After=multi-user.target —— 会和 target 的隐式 After= 撞排序环"; exit 1
+          fi
           # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
           # Debian 13 的 6.12.113+deb13-amd64 实测：
           #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m
@@ -456,18 +490,29 @@ jobs:
             || { echo "::error::qm1-wifi@wlan0.service 没有开机自启（缺 wants 链接）"; exit 1; }
           link_ok "$WIFI_LINK" \
             || { echo "::error::qm1-wifi@wlan0.service 的 wants 链接是悬空的：$(link_target "$WIFI_LINK")"; exit 1; }
-          # 单元自己的超时必须大于它内部等 SDIO 枚举接口的 60 秒，
-          # 否则 systemd 会在接口出现之前就把单元掐掉（Wi-Fi 永远起不来且无日志）。
+          # 单元自己的超时必须够进程 fork 出来，
+          # 否则 systemd 会在单元还没起来前就掐掉（Wi-Fi 永远起不来且无日志）。
           grep -qE '^TimeoutStartSec=(1[2-9][0-9]|[2-9][0-9]|[0-9]{3,})s$' "$WIFI_UNIT" \
             || { echo "::error::qm1-wifi@.service 的 TimeoutStartSec 小于 120s（会被提前掐掉）"; exit 1; }
+          # ★ 等无线接口出现必须在 ExecStart 进程内部做，不能用 ExecStartPre。
+          #   ExecStartPre 属于本单元的 start job，而 multi-user.target 因为
+          #   Wants= 挂着本单元会被 systemd 隐式补上 After= ⇒ start job 不完成，
+          #   multi-user.target 就到不了 ⇒ 整机没有 SSH、看起来像砖了。
+          grep -q '^ExecStart=/usr/local/sbin/qm1-wifi-start' "$WIFI_UNIT" \
+            || { echo "::error::qm1-wifi@.service 没有用 qm1-wifi-start 包装（等接口会在 start job 里拖住开机）"; exit 1; }
+          if grep -qE '^ExecStartPre=.*ip link show' "$WIFI_UNIT"; then
+            echo "::error::qm1-wifi@.service 还在 ExecStartPre 里等接口 —— 会拖住 multi-user.target"; exit 1
+          fi
+          [ -x "$ROOT/usr/local/sbin/qm1-wifi-start" ] \
+            || { echo "::error::镜像里缺少可执行的 /usr/local/sbin/qm1-wifi-start"; exit 1; }
 
           # 4) fstab 必须有根分区条目：只有伪文件系统的话，
           #    systemd 不按 fstab 管理根、不跑 fsck-root。
           grep -qE '^[^#]*[[:space:]]/[[:space:]]' "$ROOT/etc/fstab" \
             || { echo "::error::fstab 里没有根分区（/）条目"; exit 1; }
 
-          # 5) 全局启动超时不能是 30s：qm1-wifi 的 ExecStartPre 要等 60 秒，
-          #    30s 的全局上限会直接把它杀掉（而且是在它还没报错之前）。
+          # 5) 全局启动超时不能是 30s：慢单元（Wi-Fi 进程 fork、蓝牙 hci0 出现）
+          #    会被 30s 的全局上限直接杀掉（而且是在它还没报错之前）。
           grep -q 'TimeoutStartSec=30s' "$ROOT/etc/systemd/system.conf.d/quick-boot.conf" \
             && { echo "::error::全局 TimeoutStartSec 还是 30s —— 会掐掉慢单元"; exit 1; } || true
           grep -q 'TimeoutStartSec=120s' "$ROOT/etc/systemd/system.conf.d/quick-boot.conf" \
@@ -648,6 +693,133 @@ jobs:
           grep -q 'install-lib.sh' "$INSTALLER" \
             || { echo "::error::安装器没有引用 install-lib.sh"; exit 1; }
           echo "OK   安装器支持非破坏性路径 + 备份(含逐分区校验) + provisioning + UEFI 启动项"
+
+      - name: Assert the installers cannot silently claim success
+        run: |
+          set -eu
+          # 这一组断言针对**装不上 / 装一半却报成功**这一类缺陷。
+          # 它们历史上都真实发生过：
+          #   * stat 对块设备返回 0 ⇒ "源大小 > 0"的断言在两次 dd 之后才炸，
+          #     eMMC 留在写了一半的状态；
+          #   * 源哈希在 remount rw 之后才算 ⇒ 源在 dd 期间被写过 ⇒
+          #     一次成功的安装被判成失败；
+          #   * 写完盘不重读分区表 ⇒ 找不到 ESP ⇒ EFI 启动项没登记却报成功；
+          #   * EFI 启动项登记失败只 warn ⇒ 机器开不了机，报告却说装好了。
+          # 这些只能靠"真跑一遍"彻底验证（scripts/test-installer-e2e.sh，
+          # lint.yml 里以 root 跑），这里守的是**代码里不许再退回旧写法**。
+          DEV=overlay/usr/local/sbin/qm1-install-to-emmc
+          HOST=scripts/install-qm1.sh
+          LIB=overlay/usr/local/lib/qm1/install-lib.sh
+
+          # --- 设备侧安装器 ---
+          # 块设备的大小必须用 blockdev --getsize64（stat 对块设备返回 0）
+          grep -q 'blockdev --getsize64 "\$SRC_ESP"' "$DEV" \
+            || { echo "::error::设备侧安装器没有用 blockdev --getsize64 读源 ESP 大小"; exit 1; }
+          grep -q 'blockdev --getsize64 "\$SRC_ROOT"' "$DEV" \
+            || { echo "::error::设备侧安装器没有用 blockdev --getsize64 读源根分区大小"; exit 1; }
+          if grep -n 'stat -c%s' "$DEV" | grep -Eq 'SRC_(ESP|ROOT)'; then
+            echo "::error::设备侧安装器又用 stat -c%s 读块设备大小了（对块设备恒为 0）"; exit 1
+          fi
+          # 源哈希必须在 dd **之前**算（remount rw 之后算 ⇒ 源在 dd 期间被写过 ⇒ 误判失败）
+          hash_line="$(grep -n 'SRC_ROOT_HASH="' "$DEV" | head -1 | cut -d: -f1)"
+          dd_line="$(grep -n 'dd if="\$SRC_ROOT"' "$DEV" | head -1 | cut -d: -f1)"
+          [ -n "$hash_line" ] && [ -n "$dd_line" ] \
+            || { echo "::error::设备侧安装器里找不到源哈希或 dd 的位置"; exit 1; }
+          [ "$hash_line" -lt "$dd_line" ] \
+            || { echo "::error::设备侧安装器在 dd 之后才算源哈希（源在复制期间被写过 ⇒ 会误判失败）"; exit 1; }
+          # 校验失败必须能区分"源在变"和"真写坏了"
+          grep -q 'esp_has_boot_files' "$DEV" \
+            || { echo "::error::设备侧安装器没有目标侧引导文件检查（源漂移时无法定论）"; exit 1; }
+          grep -q 'e2fsck -fn' "$DEV" \
+            || { echo "::error::设备侧安装器没有对目标根分区做只读文件系统检查"; exit 1; }
+          # useradd / chpasswd 失败必须致命（以前只 warn ⇒ 装完没有可登录账号）
+          grep -q 'die "镜像里没有 useradd' "$DEV" \
+            || { echo "::error::设备侧安装器缺少 useradd 时没有中止（镜像里没有 passwd 包）"; exit 1; }
+          grep -q 'die "镜像里没有 chpasswd' "$DEV" \
+            || { echo "::error::设备侧安装器缺少 chpasswd 时没有中止（镜像里没有 passwd 包）"; exit 1; }
+          # 源与目标必须能由参数给定（CI 里没有真的 SDIO 卡 / ACPI eMMC）
+          for opt in --source-root --source-esp --source-disk --lib --no-login-account; do
+            grep -q -- "$opt" "$DEV" \
+              || { echo "::error::设备侧安装器缺少参数 $opt（没法在环设备上验证）"; exit 1; }
+          done
+          # EFI 登记结果必须**有明确交代**（登记成功或明说没登记），
+          # 而且登记不上时不能报成功 —— 固件里没有启动项，机器就开不了机。
+          grep -q 'UEFI 启动项 : 未登记' "$DEV" \
+            || { echo "::error::设备侧安装器没有交代 EFI 启动项的结果"; exit 1; }
+          grep -q -- '--skip-efi-entry' "$DEV" \
+            || { echo "::error::设备侧安装器没有显式跳过 EFI 登记的开关（只能悄悄跳过是不行的）"; exit 1; }
+          grep -q 'EFI 启动项没有登记成功' "$DEV" \
+            || { echo "::error::设备侧安装器 EFI 登记失败时没有判失败"; exit 1; }
+
+          # --- 主机侧安装器 ---
+          grep -q 'qm1_verify_backup' "$HOST" \
+            || { echo "::error::主机侧安装器没有逐分区校验备份"; exit 1; }
+          grep -q 'qm1_rescan_partitions' "$HOST" \
+            || { echo "::error::主机侧安装器写完盘没有重读分区表（会找不到 ESP）"; exit 1; }
+          grep -q 'qm1_plan_target_layout' "$HOST" \
+            || { echo "::error::主机侧安装器没有按目标真实容量规划分区表"; exit 1; }
+          grep -q 'qm1_write_target_layout' "$HOST" \
+            || { echo "::error::主机侧安装器没有重建分区表"; exit 1; }
+          grep -q 'resize2fs' "$HOST" \
+            || { echo "::error::主机侧安装器没有把根文件系统撑到盘尾"; exit 1; }
+          grep -q '目标盘上还有分区挂着' "$HOST" \
+            || { echo "::error::主机侧安装器没有拒绝写入还挂着的目标分区"; exit 1; }
+          # EFI 启动项登记失败必须判失败，不能 warn 完继续
+          grep -q 'die "efibootmgr 登记启动项失败' "$HOST" \
+            || { echo "::error::主机侧安装器 efibootmgr 失败时没有判失败"; exit 1; }
+          grep -q 'die "当前不是以 UEFI 方式启动' "$HOST" \
+            || { echo "::error::主机侧安装器在非 UEFI 环境下没有判失败"; exit 1; }
+          grep -q 'die "没有 efibootmgr' "$HOST" \
+            || { echo "::error::主机侧安装器缺少 efibootmgr 时没有判失败"; exit 1; }
+          grep -q -- '--skip-efi-entry' "$HOST" \
+            || { echo "::error::主机侧安装器没有显式跳过 EFI 登记的开关（只能悄悄跳过是不行的）"; exit 1; }
+
+          # --- 两份磁盘库实现必须同名同在 ---
+          # 构建链（scripts/lib/common.sh）与镜像内（install-lib.sh）各有一份，
+          # 谁走样了，"CI 验过的备份校验"就不是真机上跑的那份了。
+          for fn in qm1_hash_range qm1_partitions qm1_find_partition \
+                    qm1_find_partition_by_type qm1_used_end_bytes qm1_verify_backup; do
+            grep -q "^${fn}()" scripts/lib/common.sh \
+              || { echo "::error::scripts/lib/common.sh 缺少 $fn"; exit 1; }
+            grep -q "^${fn}()" "$LIB" \
+              || { echo "::error::$LIB 缺少 $fn"; exit 1; }
+          done
+
+          # --- 镜像里必须有 passwd 包 ---
+          # useradd/chpasswd 来自 passwd 包；缺了它安装器会在 [3/6] 中止。
+          # 这里按"包列表里的独立一项"来匹配，避免被 chpasswd 之类的字符串蒙混过去。
+          # BASE_PKGS 是多行续行写的，先把续行接起来再取值。
+          pkg_line="$(sed -n '/^BASE_PKGS=/,/[^\\]$/p' scripts/build-rootfs.sh | tr -d '\n' | sed 's/\\//g')"
+          pkg_list="${pkg_line#*=}"
+          pkg_list="${pkg_list%\"}"
+          pkg_list="${pkg_list#\"}"
+          case ",${pkg_list}," in
+            *,passwd,*) ;;
+            *) echo "::error::scripts/build-rootfs.sh 的 BASE_PKGS 里没有 passwd 包"; exit 1 ;;
+          esac
+
+          # --- 中文标点不能直接跟在变量名后面 ---
+          # 在 zh_CN.UTF-8 这类多字节 locale 下，bash 会把紧跟变量名的中文标点
+          # 一起吃进变量名（"$TARGET（" 被当成变量 "TARGET（"）⇒ set -u 直接
+          # 报 unbound variable 把脚本打断 —— 而且往往正好打断在装机流程中间。
+          # 一律写成 "${TARGET}（"。
+          python3 - "$DEV" "$HOST" scripts/lib/common.sh scripts/test-install-lib.sh \
+                    scripts/test-installer-e2e.sh <<'PY'
+          import re, sys
+          pat = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]')
+          bad = []
+          for f in sys.argv[1:]:
+              for i, line in enumerate(open(f, encoding='utf-8'), 1):
+                  if line.lstrip().startswith('#'):
+                      continue
+                  for m in pat.finditer(line):
+                      bad.append("%s:%d: %s" % (f, i, m.group(0)))
+          if bad:
+              print("::error::变量名后面直接跟了中文标点（bash 会把标点吃进变量名）：")
+              print("\n".join(bad))
+              sys.exit(1)
+          PY
+          echo "OK   两个安装器都不会悄悄跳过：EFI 登记失败即失败、写盘校验用目标侧证据"
 
       - name: Assert QM1 hardware driver & firmware coverage
         run: |

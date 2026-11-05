@@ -190,9 +190,13 @@ sudo bash install-qm1.sh --image qm1-disk.img --target /dev/mmcblk1 \
   替你猜）；
 - **不会**生成随机登录口令（整机镜像里的 `qm1` 账号是锁着的，
   需要你用 `passwd` 设一个，或走 §5 的方式）；
-- 备份是整盘 `dd` + 一个 sha256 文件（路径 A 是逐分区比对原件）；
-- EFI 启动项登记用 `efibootmgr`（找不到 ESP 或非 UEFI 启动时只警告并
-  打印手工命令）。
+- 备份是整盘 `dd`，并且**逐分区与写盘前的原盘比对**（不一致就中止）；
+- EFI 启动项登记用 `efibootmgr`，登记不上 = 装机失败（机器开不了机却
+  报成功是最坏的结果）。只有明确加 `--skip-efi-entry` 才允许跳过；
+- 写盘后会按目标真实容量**重建分区表**（ESP 保持 1 MiB 偏移、根分区
+  撑到盘尾留 1 MiB 给备份 GPT），清掉旧盘尾部的残留与旧备份 GPT，
+  再 `resize2fs` 把根分区撑满 —— 不会在 28.5 GiB 的 eMMC 上留下
+  22 GiB 的旧系统残渣和两套 GPT。
 
 ---
 
@@ -216,11 +220,12 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 流水线现在会在 QEMU 里**真的把出厂镜像启动一次**
 （`scripts/boot-smoke.sh`），并在启动日志上做断言：
 
-- 串口控制台里必须出现 `Reached target Multi-User System`
+- 串口控制台里必须出现 `Reached target multi-user.target`
   （⇒ 内核起来了、initrd 找到了根、systemd 走完了开机流程）；
-- `Started OpenBSD Secure Shell server`、`Started systemd-resolved.service`、
-  `Finished qm1-firstboot.service` 三条必须出现
-  （⇒ sshd / DNS 数据源 / 首启配置这三样都挂上了）；
+- `Started ssh.service`、`Started systemd-resolved.service`、
+  `Finished qm1-firstboot.service`、`Started qm1-wifi@wlan0.service`
+  四条必须出现
+  （⇒ sshd / DNS 数据源 / 首启配置 / Wi-Fi 单元都挂上了）；
 - `ssh.service`、`systemd-resolved.service`、`systemd-networkd.service`、
   `qm1-firstboot.service`、`qm1-hardware-fixups.service`
   **一个都不许出现 "Failed to start"**；
@@ -235,6 +240,14 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 > **口令登录**才给 shell —— 而出厂镜像里没有可登录账号（口令是安装时
 > 才生成的），自动化根本进不去。上面这套是纯日志断言，不需要交互。
 
+> 断言串为什么写成"单元名"而不是"描述"：systemd 从 v255 起改了控制台
+> 状态行的格式 —— 单元名被插到描述前面并用 ANSI 高亮包住，描述还会按
+> 终端宽度截断（`Q…rovisioning`）。拿描述去匹配，匹配不到时在 CI 上和
+> "启动失败"长得一模一样，只能真跑一次 QEMU 才知道自己写错了。
+> `scripts/boot-smoke-assert.sh` 把断言逻辑拆成独立脚本，
+> `scripts/test-boot-smoke-assert.sh` 用带 ANSI 的 fixture 离线验证它：
+> 正例必须过、反例必须挂。断言串腐化了当场发现，不用烧一轮 CI。
+
 但 QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，所以：
 
 - 第 3 条（Wi-Fi 真连上）、蓝牙、eMMC 掉卡 —— **只能真机验**；
@@ -246,9 +259,15 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 
 ## 6. 装完之后（可选）
 
-Hermes CLI 与 headless Chrome 由 `qm1-provision.service` 在首次启动时
-安装（需要网络 —— 它等 `network-online.target`，也就是等 wlan0 拿到
-地址）。它只在成功一次之后才会跳过（标记 `/var/lib/qm1/provision-done`），
+Hermes CLI 与 headless Chrome 由 `qm1-provision.timer` 在开机 60 秒后
+拉起 `qm1-provision.service` 安装（需要网络 —— 它等
+`network-online.target`，也就是等 wlan0 拿到地址）。
+
+**为什么是 timer 而不是直接挂 multi-user.target**：服务本身要等网络就绪，
+而 multi-user.target 会对它 Wants= 的成员隐式补 After= —— 直接挂上去等于
+"整机开机必须等网络"，Wi-Fi 一有问题整台机器就到不了 multi-user.target，
+表现为没有 SSH、像砖了。改成 timer 之后，机器先正常起来，安装在后台跑。
+它只在成功一次之后才会跳过（标记 `/var/lib/qm1/provision-done`），
 失败则下次开机自动重试。装完：
 
 ```sh

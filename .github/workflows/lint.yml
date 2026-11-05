@@ -152,6 +152,17 @@ jobs:
           sudo apt-get install -y -qq mtools dosfstools util-linux
           bash scripts/test-provision-chain.sh
 
+      - name: Boot smoke assertion logic (fixtures)
+        run: |
+          set -euo pipefail
+          # 冒烟测试的断言串是整套出货链里最脆的一环：systemd 从 v255 起
+          # 改了控制台状态行的格式（单元名插到描述前面 + ANSI 高亮 + 描述
+          # 按宽度截断），一改断言就全盘匹配不到 —— 而"匹配不到"在 CI 上
+          # 和"启动失败"长得一模一样，只能等真跑一次 QEMU 才知道写错了。
+          # 这里用带 ANSI 的 fixture 离线验证同一套断言逻辑：正例必须过、
+          # 反例必须挂。断言串腐化了当场就发现，不用烧一轮 CI。
+          bash scripts/test-boot-smoke-assert.sh
+
       - name: Overlay sanity (required files present)
         run: |
           set -euo pipefail
@@ -180,12 +191,17 @@ jobs:
             overlay/usr/local/sbin/qm1-hardware-survey \
             overlay/usr/local/sbin/qm1-provision \
             overlay/etc/systemd/system/qm1-provision.service \
+            overlay/etc/systemd/system/qm1-provision.timer \
+            overlay/usr/local/sbin/qm1-wifi-start \
             overlay/usr/local/lib/qm1/install-lib.sh \
             overlay/etc/udev/rules.d/60-qm1-emmc-power.rules \
             scripts/grub.cfg.example \
             scripts/grub-installer.cfg.example \
             scripts/prepare-provision.sh \
-            scripts/drv-selfcheck.sh ; do
+            scripts/drv-selfcheck.sh \
+            scripts/boot-smoke.sh \
+            scripts/boot-smoke-assert.sh \
+            scripts/test-boot-smoke-assert.sh ; do
             [ -f "$f" ] || { echo "::error::缺少 $f"; exit 1; }
           done
           echo "overlay ok"
