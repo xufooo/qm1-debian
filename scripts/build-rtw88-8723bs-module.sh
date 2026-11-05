@@ -235,9 +235,21 @@ build_upstream_full() {
             sdio.c|pci.c|usb.c) continue ;;
             rtw[0-9]*.c) continue ;;
         esac
-        core_files="$core_files $(basename "$f")"
+        # kernel builds want object names, not source names
+        core_files="$core_files $(basename "$f" .c).o"
     done
     [ -n "$core_files" ] || { warn "no core sources found in the upstream tree"; return 1; }
+
+    # struct sdio_driver.shutdown only exists in newer kernels; the upstream
+    # 8723BS driver uses it.  Drop the callback when the target kernel does
+    # not have the member -- otherwise the build stops here.
+    if ! grep -A25 'struct sdio_driver {' "$KSRC/include/linux/mmc/card.h" 2>/dev/null \
+            | grep -q 'shutdown'; then
+        if grep -q '\.shutdown *= *rtw_sdio_shutdown' "$mod/rtw8723bs.c"; then
+            log "target kernel has no sdio_driver.shutdown; dropping the callback"
+            sed -i '/\.shutdown *= *rtw_sdio_shutdown,/d' "$mod/rtw8723bs.c"
+        fi
+    fi
 
     cat > "$mod/Makefile" <<EOF
 # Out-of-tree build of the complete upstream rtw88 tree.
