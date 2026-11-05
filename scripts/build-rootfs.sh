@@ -97,11 +97,13 @@ BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sud
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
-kmod,initramfs-tools,zstd,apt-transport-https,fdisk,efibootmgr"
+kmod,initramfs-tools,zstd,apt-transport-https,fdisk,efibootmgr,passwd"
 # fdisk 提供 sfdisk：安装介质在设备上给 eMMC 分区时要用
 # （util-linux 是 Debian 的 Essential 包，lsblk/findmnt/mount 随它来）。
 # efibootmgr：安装器要在写完 eMMC 后登记 UEFI 启动项
 # （安装环境就是这套根文件系统 —— U 盘里的 ext4 分区直接被引导）。
+# passwd：提供 useradd / chpasswd。设备侧安装器要用它们建登录账号，
+# 少了这个包装机会在 [3/6] 直接中止（这是故意的：不能"装完却没人能登录"）。
 
 # 运行时（Hermes CLI + headless Chrome）
 # 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），
@@ -123,7 +125,7 @@ if [ -n "$KERNEL_VERSION" ]; then
     # /lib/modules 出现两个版本，initramfs 与 GRUB 都要挑，容易装错版本。
     # 固定版本改由 hooks/customize02-drivers.sh 精确安装，镜像里只留一个内核。
     KERNEL_PKGS=""
-    log "固定内核版本：$KERNEL_VERSION（ABI 名 $KERNEL_ABI）—— 跳过元包，由 hook 精确安装"
+    log "固定内核版本：${KERNEL_VERSION}（ABI 名 ${KERNEL_ABI}）—— 跳过元包，由 hook 精确安装"
 fi
 
 PKGS="$BASE_PKGS"
@@ -260,5 +262,5 @@ MANIFEST="$OUT/../rootfs-manifest.txt"
     echo "--- 已装包 ---"
     chroot "$OUT" dpkg-query -W -f='${Package}\n' 2>/dev/null | sort || true
 } > "$MANIFEST"
-log "清单：$MANIFEST（$(grep -c '' "$MANIFEST") 行）"
+log "清单：${MANIFEST}（$(grep -c '' "$MANIFEST") 行）"
 log "完成：$OUT"

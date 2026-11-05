@@ -37,7 +37,12 @@
 #   qm1.install.mode=emmc       安装模式（emmc | media）
 #   qm1.install.yes=1           非交互模式下也确认破坏性操作
 #   qm1.install.target=/dev/xxx 指定目标设备
-set -euo pipefail
+set -eu
+# pipefail 不是 POSIX 选项，但这个脚本实际由 bash 执行（/bin/bash），
+# 带上它才能发现"管道里前一段失败、后一段成功"这种静默错误。
+# 用子 shell 试一次：不是 bash 就跳过，不影响其余逻辑。
+# shellcheck disable=SC3040
+(set -o pipefail) 2>/dev/null && set -o pipefail || true
 
 log()  { printf '[qm1-install] %s\n' "$*"; }
 warn() { printf '[qm1-install][warn] %s\n' "$*" >&2; }
@@ -46,7 +51,10 @@ step() { printf '\n[qm1-install] ===== %s =====\n' "$*"; }
 
 ask() {
     # ask <提示> <默认值> → 结果写到 REPLY
-    local prompt="$1" default="${2:-}"
+    # POSIX sh 没有 local，这里用带前缀的全局变量代替，
+    # 避免和调用方的同名变量串味。
+    _ask_prompt="$1"
+    _ask_default="${2:-}"
     if [ ! -t 0 ]; then
         # 非交互（systemd 单元 / 无人值守）：不能像原来那样默默用默认值。
         #
@@ -61,16 +69,16 @@ ask() {
         else
             REPLY="no"
         fi
-        log "非交互模式：$prompt → $REPLY（要自动确认请加 --yes 或内核参数 qm1.install.yes=1）"
+        log "非交互模式：$_ask_prompt → ${REPLY}（要自动确认请加 --yes 或内核参数 qm1.install.yes=1）"
         return 0
     fi
-    if [ -n "$default" ]; then
-        printf '%s [%s]: ' "$prompt" "$default"
+    if [ -n "$_ask_default" ]; then
+        printf '%s [%s]: ' "$_ask_prompt" "$_ask_default"
     else
-        printf '%s: ' "$prompt"
+        printf '%s: ' "$_ask_prompt"
     fi
     read -r REPLY || REPLY=""
-    [ -n "$REPLY" ] || REPLY="$default"
+    [ -n "$REPLY" ] || REPLY="$_ask_default"
 }
 
 [ "$(id -u)" -eq 0 ] || die "需要 root 权限"
@@ -79,14 +87,11 @@ ask() {
 # 那是"哪些字节写到哪里"和"密码怎么写进配置"的逻辑，写错就是一块报废的 eMMC
 # 或者一台连不上网的机器。单独成文件是为了能在 CI 里用合成的 GPT 镜像直接验证
 # 它，而不必真机。
-QM1_INSTALL_LIB=/usr/local/lib/qm1/install-lib.sh
-if [ -r "$QM1_INSTALL_LIB" ]; then
-    # shellcheck source=/dev/null
-    . "$QM1_INSTALL_LIB"
-else
-    printf '[qm1-install][fail] 缺少 %s，无法继续\n' "$QM1_INSTALL_LIB" >&2
-    exit 1
-fi
+#
+# 库文件的位置允许覆盖（QM1_INSTALL_LIB / --lib）：设备上装的是
+# /usr/local/lib/qm1/install-lib.sh，而 CI 里直接用仓库里那一份 ——
+# 这样"构建链的实现"和"镜像里的实现"能在同一台机器上被同一套用例验证。
+QM1_INSTALL_LIB="${QM1_INSTALL_LIB:-/usr/local/lib/qm1/install-lib.sh}"
 
 TARGET="${QM1_INSTALL_TARGET:-}"
 MODE="${QM1_INSTALL_MODE:-auto}"          # auto | media | emmc
@@ -101,6 +106,17 @@ SSH_PUBKEY="${QM1_SSH_PUBKEY:-}"
 SSH_PASSWORD="${QM1_SSH_PASSWORD:-}"
 HOSTNAME_CFG="${QM1_HOSTNAME:-}"
 LOGIN_USER="qm1"
+# 源（要复制出去的那套系统）。默认从 / 的挂载点反查；允许显式指定 ——
+# CI 里没有"从 U 盘启动的 QM1"，只有合成出来的 GPT 循环设备，
+# 源必须能由参数给定，否则整套写盘流程没法在 CI 上跑。
+SRC_ROOT_OVERRIDE="${QM1_SOURCE_ROOT:-}"
+SRC_ESP_OVERRIDE="${QM1_SOURCE_ESP:-}"
+SRC_DISK_OVERRIDE="${QM1_SOURCE_DISK:-}"
+# CI / 无交互验证时跳过登录账号与口令设置（改的是构建机的账号，不该碰）
+NO_LOGIN_ACCOUNT="${QM1_NO_LOGIN_ACCOUNT:-0}"
+# 显式跳过 EFI 启动项登记。只在"确实没法登记"时才用 ——
+# 悄悄跳过却报成功是最坏的结果（机器开不了机，报告却说装好了）。
+SKIP_EFI_ENTRY="${QM1_SKIP_EFI_ENTRY:-0}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -116,11 +132,25 @@ while [ $# -gt 0 ]; do
         --ssh-password) SSH_PASSWORD="$2"; shift 2 ;;
         --hostname) HOSTNAME_CFG="$2"; shift 2 ;;
         --backup-dir) BACKUP_DIR="$2"; shift 2 ;;
+        --lib) QM1_INSTALL_LIB="$2"; shift 2 ;;
+        --source-root) SRC_ROOT_OVERRIDE="$2"; shift 2 ;;
+        --source-esp) SRC_ESP_OVERRIDE="$2"; shift 2 ;;
+        --source-disk) SRC_DISK_OVERRIDE="$2"; shift 2 ;;
+        --no-login-account) NO_LOGIN_ACCOUNT=1; shift ;;
+        --skip-efi-entry) SKIP_EFI_ENTRY=1; shift ;;
         --yes) ASSUME_YES=1; shift ;;
         -h|--help) sed -n '2,30p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) die "未知参数：$1" ;;
     esac
 done
+
+if [ -r "$QM1_INSTALL_LIB" ]; then
+    # shellcheck source=/dev/null
+    . "$QM1_INSTALL_LIB"
+else
+    printf '[qm1-install][fail] 缺少 %s，无法继续\n' "$QM1_INSTALL_LIB" >&2
+    exit 1
+fi
 
 # ---------- 内核命令行参数 ----------
 # GRUB 菜单靠内核参数把"装到哪、要不要确认"告诉本脚本（单元是
@@ -137,31 +167,49 @@ for _w in $(cat /proc/cmdline 2>/dev/null || true); do
 done
 # 优先级：命令行 > 环境变量（QM1_INSTALL_MODE / QM1_INSTALL_TARGET 等在上面的
 # 变量初始化里已经读过；这里内核命令行在后面覆盖它）。
-log "安装模式：$MODE　目标：${TARGET:-自动选择}　自动确认：$ASSUME_YES"
+log "安装模式：${MODE}　目标：${TARGET:-自动选择}　自动确认：$ASSUME_YES"
 
 for c in findmnt lsblk sfdisk dd sha256sum e2fsck resize2fs mount blockdev; do
-    command -v "$c" >/dev/null 2>&1 || die "缺少命令 $c（镜像里应装有 util-linux / fdisk / e2fsprogs）"
+    command -v "$c" >/dev/null 2>&1 || die "缺少命令 ${c}（镜像里应装有 util-linux / fdisk / e2fsprogs）"
 done
 
 # ---------- 源：当前系统所在的整盘 ----------
-SRC_ROOT="$(findmnt -no SOURCE / 2>/dev/null || true)"
+#
+# 默认从 / 的挂载点反查；也可以显式指定（--source-root / --source-esp /
+# --source-disk 或环境变量 QM1_SOURCE_*）。CI 里没有"从 U 盘启动的 QM1"，
+# 只有合成出来的 GPT 循环设备 —— 源必须能由参数给定，否则整套写盘流程
+# 只能在真机上验证，写盘逻辑的回归就没人守了。
+SRC_ROOT="$SRC_ROOT_OVERRIDE"
+if [ -z "$SRC_ROOT" ]; then
+    SRC_ROOT="$(findmnt -no SOURCE / 2>/dev/null || true)"
+fi
 [ -n "$SRC_ROOT" ] || die "找不到当前根文件系统挂载点"
 SRC_PART="${SRC_ROOT#/dev/}"
-SRC_PK="$(lsblk -no PKNAME "/dev/$SRC_PART" 2>/dev/null | head -1 || true)"
-[ -n "$SRC_PK" ] || die "无法定位源分区所属磁盘（当前根在 $SRC_ROOT）"
-SRC_DISK="/dev/$SRC_PK"
+if [ -n "$SRC_DISK_OVERRIDE" ]; then
+    SRC_DISK="$SRC_DISK_OVERRIDE"
+else
+    SRC_PK="$(lsblk -no PKNAME "/dev/$SRC_PART" 2>/dev/null | head -1 || true)"
+    [ -n "$SRC_PK" ] || die "无法定位源分区所属磁盘（当前根在 ${SRC_ROOT}）"
+    SRC_DISK="/dev/$SRC_PK"
+fi
 
-log "当前系统根分区：$SRC_ROOT（磁盘 $SRC_DISK）"
+log "当前系统根分区：${SRC_ROOT}（磁盘 ${SRC_DISK}）"
 
-SRC_ESP=""
-for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
-    [ "$p" = "$(basename "$SRC_PART")" ] && continue
-    if lsblk -no FSTYPE "/dev/$p" 2>/dev/null | grep -qi vfat; then
-        SRC_ESP="/dev/$p"
-        break
-    fi
-done
+SRC_ESP="$SRC_ESP_OVERRIDE"
+if [ -z "$SRC_ESP" ]; then
+    for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
+        [ "$p" = "$(basename "$SRC_PART")" ] && continue
+        if lsblk -no FSTYPE "/dev/$p" 2>/dev/null | grep -qi vfat; then
+            SRC_ESP="/dev/$p"
+            break
+        fi
+    done
+fi
 [ -n "$SRC_ESP" ] || die "在 $SRC_DISK 上找不到 FAT32 的 ESP 分区"
+# 源必须都是块设备：dd 复制的是**整个设备**（含文件系统之外的空闲区），
+# 尺寸也按设备算。用 stat 读块设备节点只会得到 0。
+[ -b "$SRC_ESP" ]  || die "源 ESP 不是块设备：$SRC_ESP"
+[ -b "$SRC_ROOT" ] || die "源根分区不是块设备：${SRC_ROOT}（整分区复制需要块设备）"
 log "源 ESP：$SRC_ESP   源根分区：$SRC_ROOT"
 
 # ---------- [1/6] 选择安装目标 ----------
@@ -179,43 +227,45 @@ device_kind() {
     #
     # 内核在 MMC 卡的 device/type 里给出真实类型：
     #   MMC = eMMC，SD = SD 卡，SDIO = SDIO 卡（本机的 Wi-Fi）
-    local name="$1" d="/sys/block/$1" dev type
-    dev="$(readlink -f "$d/device" 2>/dev/null || true)"
-    type=""
-    if [ -n "$dev" ] && [ -r "$dev/type" ]; then
-        type="$(cat "$dev/type" 2>/dev/null || true)"
+    _dk_name="$1"
+    _dk_d="/sys/block/$1"
+    _dk_dev=""
+    _dk_type=""
+    _dk_dev="$(readlink -f "$_dk_d/device" 2>/dev/null || true)"
+    if [ -n "$_dk_dev" ] && [ -r "$_dk_dev/type" ]; then
+        _dk_type="$(cat "$_dk_dev/type" 2>/dev/null || true)"
     fi
-    case "$type" in
+    case "$_dk_type" in
         MMC)   echo "emmc"; return ;;
         SD)    echo "sd"; return ;;
         SDIO*) echo "sdio"; return ;;
     esac
-    if [ "$(cat "$d/removable" 2>/dev/null || echo 0)" = "1" ]; then echo "removable"; return; fi
-    if [ -n "$dev" ] && printf '%s' "$dev" | grep -q '/usb'; then echo "usb"; return; fi
+    if [ "$(cat "$_dk_d/removable" 2>/dev/null || echo 0)" = "1" ]; then echo "removable"; return; fi
+    if [ -n "$_dk_dev" ] && printf '%s' "$_dk_dev" | grep -q '/usb'; then echo "usb"; return; fi
     # 是 MMC 设备但读不到 type（老内核 / 没暴露）：不猜，交给调用方显式指定
-    case "$name" in
+    case "$_dk_name" in
         mmcblk*) echo "mmc-unknown"; return ;;
     esac
     echo "other"
 }
 
 list_candidates() {
-    local d name dev kind size
-    for d in /sys/block/*; do
-        name="$(basename "$d")"
-        case "$name" in loop*|ram*|sr*|dm-*|zram*|md*|nbd*) continue ;; esac
-        dev="/dev/$name"
-        [ -b "$dev" ] || continue
-        [ "$dev" = "$SRC_DISK" ] && continue
-        kind="$(device_kind "$name")"
+    _lc_d=""; _lc_name=""; _lc_dev=""; _lc_kind=""; _lc_size=""
+    for _lc_d in /sys/block/*; do
+        _lc_name="$(basename "$_lc_d")"
+        case "$_lc_name" in loop*|ram*|sr*|dm-*|zram*|md*|nbd*) continue ;; esac
+        _lc_dev="/dev/$_lc_name"
+        [ -b "$_lc_dev" ] || continue
+        [ "$_lc_dev" = "$SRC_DISK" ] && continue
+        _lc_kind="$(device_kind "$_lc_name")"
         # SDIO 卡（本机的 Wi-Fi 模块）永远不作为安装目标：
         # 往它上面写分区表会直接毁掉主联网链路。
-        if [ "$kind" = "sdio" ]; then
-            printf '  %-16s %-10s %s\n' "$dev" "sdio" "$(lsblk -dno SIZE "$dev" 2>/dev/null | head -1 || true)（跳过：Wi-Fi 的 SDIO 卡）"
+        if [ "$_lc_kind" = "sdio" ]; then
+            printf '  %-16s %-10s %s\n' "$_lc_dev" "sdio" "$(lsblk -dno SIZE "$_lc_dev" 2>/dev/null | head -1 || true)（跳过：Wi-Fi 的 SDIO 卡）"
             continue
         fi
-        size="$(lsblk -dno SIZE "$dev" 2>/dev/null | head -1 || true)"
-        printf '  %-16s %-10s %s\n' "$dev" "$kind" "$size"
+        _lc_size="$(lsblk -dno SIZE "$_lc_dev" 2>/dev/null | head -1 || true)"
+        printf '  %-16s %-10s %s\n' "$_lc_dev" "$_lc_kind" "$_lc_size"
     done
 }
 
@@ -238,31 +288,23 @@ if [ -z "$TARGET" ]; then
     # 往上面写整盘镜像 = 把主联网链路写坏。
     AUTO_TARGET=""
     if [ "$MODE" = "media" ]; then
-        while read -r dev kind _rest; do
-            [ -n "$dev" ] || continue
-            case "$kind" in
-                removable|usb) AUTO_TARGET="$dev"; break ;;
-            esac
-        done <<< "$CANDIDATES"
+        # 用 awk 选，而不是 while read <<< ：管道里的 read 在子 shell 中执行，
+        # 循环里赋的变量出不来（POSIX sh 没有 here-string 可用）。
+        AUTO_TARGET="$(printf '%s\n' "$CANDIDATES" | awk '$2=="removable"||$2=="usb"{print $1; exit}')"
         [ -n "$AUTO_TARGET" ] || die "--mode media 需要一个可移动 / USB 介质作为目标，但没找到。
 本机候选设备如下：
 $(printf '%s\n' "$CANDIDATES" | sed 's/^/    /')
 请用 --target <设备> 显式指定（例如 --target /dev/sdb）。"
         TARGET="$AUTO_TARGET"
-        log "选中可移动介质：$TARGET（eMMC 不会被触碰）"
+        log "选中可移动介质：${TARGET}（eMMC 不会被触碰）"
     else
-        while read -r dev kind _rest; do
-            [ -n "$dev" ] || continue
-            case "$kind" in
-                emmc) AUTO_TARGET="$dev"; break ;;
-            esac
-        done <<< "$CANDIDATES"
+        AUTO_TARGET="$(printf '%s\n' "$CANDIDATES" | awk '$2=="emmc"{print $1; exit}')"
         [ -n "$AUTO_TARGET" ] || die "没有找到 eMMC（内核 MMC 类型 = MMC 的块设备）。本机可能的存储设备如下：
 $(printf '%s\n' "$CANDIDATES" | sed 's/^/    /')
 请用 --target <设备> 显式指定目标（例如 --target /dev/mmcblk1）。"
         TARGET="$AUTO_TARGET"
         MODE="emmc"
-        log "选中 eMMC：$TARGET（内核 MMC 类型 = MMC）"
+        log "选中 eMMC：${TARGET}（内核 MMC 类型 = MMC）"
     fi
 fi
 
@@ -277,15 +319,15 @@ case "$MODE" in
 esac
 
 if [ "$MODE" = "emmc" ] && [ "$TARGET_KIND" != "emmc" ]; then
-    die "模式是 emmc，但目标 $TARGET 不是 eMMC（$TARGET_KIND）"
+    die "模式是 emmc，但目标 $TARGET 不是 eMMC（${TARGET_KIND}）"
 fi
 if [ "$MODE" = "media" ] && [ "$TARGET_KIND" = "emmc" ]; then
     die "模式是 media（不动 eMMC），但目标是 eMMC $TARGET —— 请改用 --mode emmc"
 fi
 
-log "目标：$TARGET（类型 $TARGET_KIND，模式 $MODE）"
+log "目标：${TARGET}（类型 ${TARGET_KIND}，模式 ${MODE}）"
 if [ "$MODE" = "media" ]; then
-    log "非破坏性路径：只写 $TARGET，eMMC 保持原样 ⇒ 原系统保留，取下介质即可回退"
+    log "非破坏性路径：只写 ${TARGET}，eMMC 保持原样 ⇒ 原系统保留，取下介质即可回退"
 else
     warn "破坏性路径：会覆盖 $TARGET 的分区表与内容（原系统需要先备份）"
 fi
@@ -345,13 +387,15 @@ fi
 # 64 位十六进制 PSK 必须**不加引号**，否则会被当成 64 个字符的口令，
 # 超过 wpa_supplicant 的 63 字符上限 —— 现象是"密码明明是对的却连不上"。
 write_wifi_conf() {
-    local ssid="$1" psk="$2" psk_value
-    if [ -n "$psk" ]; then
-        if ! psk_value="$(qm1_wpa_psk_value "$psk")"; then
-            die "Wi-Fi 密码长度非法（${#psk} 字符）：需要 8..63 字符，或 64 位十六进制"
+    _ww_ssid="$1"
+    _ww_psk="$2"
+    _ww_psk_value=""
+    if [ -n "$_ww_psk" ]; then
+        if ! _ww_psk_value="$(qm1_wpa_psk_value "$_ww_psk")"; then
+            die "Wi-Fi 密码长度非法（${#_ww_psk} 字符）：需要 8..63 字符，或 64 位十六进制"
         fi
     else
-        psk_value=""
+        _ww_psk_value=""
     fi
     {
         echo "# 由安装程序生成"
@@ -359,9 +403,9 @@ write_wifi_conf() {
         echo "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev"
         echo "update_config=1"
         echo "network={"
-        echo "    ssid=$(qm1_wpa_ssid_value "$ssid")"
-        if [ -n "$psk_value" ]; then
-            echo "    psk=$psk_value"
+        echo "    ssid=$(qm1_wpa_ssid_value "$_ww_ssid")"
+        if [ -n "$_ww_psk_value" ]; then
+            echo "    psk=$_ww_psk_value"
             echo "    key_mgmt=WPA-PSK"
         else
             # 开放网络：没有口令就不能写 key_mgmt=WPA-PSK，否则 wpa_supplicant
@@ -443,28 +487,38 @@ fi
 # 镜像里预置了 qm1 用户，但口令是**锁定的**（镜像里不放默认口令 ——
 # 一份会被公开仓库分发的镜像不该带任何通用口令）。
 # 这里在装机时生成一次性口令写进去，装完就能 SSH 登进去。
-if id "$LOGIN_USER" >/dev/null 2>&1; then
+#
+# 这三步（useradd / chpasswd / sshd 配置）以前是"失败只警告"——
+# 于是经常装出一台"有账号但没口令"或者"连账号都没有"的机器，
+# 用户只能插着显示器键盘手工收拾。账号装不上 = 装机没完成，直接中止
+# （这一步在写盘之前，中止不会留下写了一半的 eMMC）。
+if [ "$NO_LOGIN_ACCOUNT" = "1" ]; then
+    log "按 --no-login-account 跳过登录账号与口令设置（CI / 无交互验证用）"
+elif id "$LOGIN_USER" >/dev/null 2>&1; then
     log "镜像内已有账号：$LOGIN_USER"
 else
-    if useradd --create-home --shell /bin/bash "$LOGIN_USER" 2>/dev/null; then
-        usermod -aG sudo "$LOGIN_USER" 2>/dev/null || true
-        log "已创建账号：$LOGIN_USER"
-    else
-        warn "创建账号 $LOGIN_USER 失败 —— 装完后需要手工创建"
-    fi
+    command -v useradd >/dev/null 2>&1 \
+        || die "镜像里没有 useradd —— 缺少 passwd 包，装机中止。
+请在构建镜像时把 passwd 加进 BASE_PKGS（scripts/build-rootfs.sh），再重做镜像。"
+    useradd --create-home --shell /bin/bash "$LOGIN_USER" \
+        || die "创建账号 $LOGIN_USER 失败 —— 装机中止（还没有对目标盘做任何写入）。
+请检查 /etc/passwd 是否可写、passwd 包是否装全，然后重试。"
+    usermod -aG sudo "$LOGIN_USER" 2>/dev/null || true
+    log "已创建账号：$LOGIN_USER"
 fi
-if id "$LOGIN_USER" >/dev/null 2>&1; then
+if [ "$NO_LOGIN_ACCOUNT" != "1" ] && id "$LOGIN_USER" >/dev/null 2>&1; then
     if [ -z "$SSH_PASSWORD" ]; then
         # 24 位十六进制：够长、不会和 shell/键盘布局打架
         SSH_PASSWORD="$(od -An -tx1 -N 12 /dev/urandom 2>/dev/null | tr -d ' \n')"
     fi
     if [ -n "$SSH_PASSWORD" ]; then
-        if printf '%s:%s\n' "$LOGIN_USER" "$SSH_PASSWORD" | chpasswd 2>/dev/null; then
-            log "已为 $LOGIN_USER 设置一次性登录口令"
-        else
-            warn "设置口令失败 —— 装完后需要用 sudo passwd 手工设置"
-            SSH_PASSWORD=""
-        fi
+        command -v chpasswd >/dev/null 2>&1 \
+            || die "镜像里没有 chpasswd —— 缺少 passwd 包，装机中止。
+请在构建镜像时把 passwd 加进 BASE_PKGS（scripts/build-rootfs.sh），再重做镜像。"
+        printf '%s:%s\n' "$LOGIN_USER" "$SSH_PASSWORD" | chpasswd \
+            || die "设置 $LOGIN_USER 的登录口令失败 —— 装机中止（还没有对目标盘做任何写入）。
+请检查 /etc/shadow 是否可写、passwd 包是否装全，然后重试。"
+        log "已为 $LOGIN_USER 设置一次性登录口令"
     fi
     # sshd 允许口令登录（仅限这个账号）。
     # 命名必须排在 overlay 里的 sshd_config.d/qm1.conf **之前**
@@ -504,11 +558,10 @@ source_used_end() {
 
 # 源盘尾部**未分区**的空间（U 盘容量大于安装镜像时的"同盘既当启动盘又当备份盘"）
 source_tail_bytes() {
-    local dsize used
-    dsize="$(blockdev --getsize64 "$SRC_DISK" 2>/dev/null || echo 0)"
-    used="$(source_used_end)"
+    _st_dsize="$(blockdev --getsize64 "$SRC_DISK" 2>/dev/null || echo 0)"
+    _st_used="$(source_used_end)"
     # 盘尾留 1 MiB 给 GPT 备份头
-    echo $(( dsize - used - 1048576 ))
+    echo $(( _st_dsize - _st_used - 1048576 ))
 }
 
 device_hash() {  # $1=偏移 $2=长度
@@ -522,6 +575,28 @@ backup_hash() {  # $1=备份映像内偏移 $2=长度
 # 逐分区比对备份与原盘 —— 不是只算备份文件自身的哈希
 verify_backup_partitions() {
     qm1_verify_backup "$TARGET" "$BACKUP_SRC" "$BACKUP_BASE"
+}
+
+# ESP 里到底有没有引导文件。
+# 哈希对不上时，这是目标侧能给出的第二个独立证据：
+# 根文件系统能被 e2fsck 读通 + ESP 里有 EFI/BOOT/BOOT*.EFI
+# ⇒ 目标盘大体是好的（源在复制期间被改过而已）。
+esp_has_boot_files() {
+    _eb_mnt="$(mktemp -d /tmp/qm1-espchk.XXXXXX)"
+    if ! mount -o ro "$1" "$_eb_mnt" 2>/dev/null; then
+        rmdir "$_eb_mnt" 2>/dev/null || true
+        return 1
+    fi
+    _eb_found=0
+    for _eb_f in "$_eb_mnt"/EFI/BOOT/BOOT*.EFI "$_eb_mnt"/EFI/*/grubx64.efi \
+                "$_eb_mnt"/EFI/*/grubia32.efi "$_eb_mnt"/EFI/*/BOOTX64.EFI; do
+        if [ -f "$_eb_f" ]; then
+            _eb_found=1
+        fi
+    done
+    umount "$_eb_mnt" 2>/dev/null || true
+    rmdir "$_eb_mnt" 2>/dev/null || true
+    [ "$_eb_found" -eq 1 ]
 }
 
 if [ "$MODE" = "emmc" ]; then
@@ -564,7 +639,7 @@ if [ "$MODE" = "emmc" ]; then
         dir:*)
             BACKUP_STORE="${BACKUP_METHOD#dir:}"
             BACKUP_FILE="$BACKUP_STORE/qm1-emmc-preinstall-$STAMP.img"
-            log "整盘备份 → $BACKUP_FILE（${TARGET_MIB} MiB，请耐心）"
+            log "整盘备份 → ${BACKUP_FILE}（${TARGET_MIB} MiB，请耐心）"
             dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
             BACKUP_SRC="$BACKUP_FILE"
             BACKUP_BASE=0
@@ -586,7 +661,7 @@ if [ "$MODE" = "emmc" ]; then
 请先检查介质（这通常意味着 U 盘读写有问题），不要在备份不可信的情况下继续。"
 
     if [ "$ASSUME_YES" != 1 ]; then
-        ask "备份已完成并逐分区校验通过，确认覆盖 $TARGET？" "no"
+        ask "备份已完成并逐分区校验通过，确认覆盖 ${TARGET}？" "no"
         [ "$REPLY" = "yes" ] || die "已取消（未做任何写入）"
     fi
 else
@@ -607,12 +682,31 @@ fi
 # ---------- [5/6] 写入系统 ----------
 step "[5/6] 写入系统"
 
-ESP_MIB="$(lsblk -bno SIZE "$SRC_ESP" 2>/dev/null | head -1)"
-ESP_MIB=$(( ESP_MIB / 1048576 ))
-[ "$ESP_MIB" -gt 0 ] || die "无法读取源 ESP 大小"
+# 源 ESP / 源根分区的字节数：**块设备必须用 blockdev --getsize64**。
+# stat -c%s 读的是"设备节点本身"的大小，对块设备恒为 0 ——
+# 原来就是用 stat 取的大小，于是"大小必须 > 0"的断言**必然**失败，
+# 而且是在两个 dd 都写完之后才失败 ⇒ eMMC 停在写了一半的状态，
+# 用户从 U 盘重启看到的只是"启动失败"，查不出真正原因。
+SRC_ESP_BYTES="$(blockdev --getsize64 "$SRC_ESP" 2>/dev/null || echo 0)"
+SRC_ROOT_BYTES="$(blockdev --getsize64 "$SRC_ROOT" 2>/dev/null || echo 0)"
+[ "$SRC_ESP_BYTES" -gt 0 ] \
+    || die "读不出源 ESP 大小：${SRC_ESP}（blockdev --getsize64 返回 ${SRC_ESP_BYTES}）"
+[ "$SRC_ROOT_BYTES" -gt 0 ] \
+    || die "读不出源根分区大小：${SRC_ROOT}（blockdev --getsize64 返回 ${SRC_ROOT_BYTES}）"
+
+# 分区大小按 MiB 向上取整（和 assemble-disk.sh 的口径一致）
+ESP_MIB=$(( (SRC_ESP_BYTES + 1048575) / 1048576 ))
+[ "$ESP_MIB" -gt 0 ] || die "源 ESP 大小异常：$SRC_ESP_BYTES 字节"
 ROOT_START_MIB=$(( 1 + ESP_MIB ))
 ROOT_MIB=$(( TARGET_MIB - ROOT_START_MIB - 1 ))
 [ "$ROOT_MIB" -gt 0 ] || die "目标盘太小：${TARGET_MIB} MiB"
+
+# 源必须放得进目标分区：否则 dd 会越过分区尾部，把 GPT 备份头冲掉。
+[ "$SRC_ESP_BYTES" -le $(( ESP_MIB * 1048576 )) ] \
+    || die "源 ESP（$SRC_ESP_BYTES 字节）比目标 ESP 分区还大"
+[ "$SRC_ROOT_BYTES" -le $(( ROOT_MIB * 1048576 )) ] \
+    || die "源根分区（$SRC_ROOT_BYTES 字节）比目标根分区（${ROOT_MIB} MiB）还大。
+换一个更大的目标盘，或先把源缩小。"
 
 log "在 $TARGET 上写分区表：p1 ESP ${ESP_MIB} MiB（EFI System），p2 根分区 ${ROOT_MIB} MiB（Linux）"
 
@@ -642,14 +736,22 @@ for _ in $(seq 1 20); do
     PART2=""
     PART1_NO=""
     PART2_NO=""
-    while read -r _name _pno _start _size; do
-        [ -n "${_name:-}" ] || continue
-        PART1="/dev/$_name"; PART1_NO="$_pno"
-    done < <(qm1_find_partition_by_type "$TARGET" "$QM1_PARTTYPE_EFI")
-    while read -r _name _pno _start _size; do
-        [ -n "${_name:-}" ] || continue
-        PART2="/dev/$_name"; PART2_NO="$_pno"
-    done < <(qm1_find_partition_by_type "$TARGET" "$QM1_PARTTYPE_LINUX")
+    # qm1_find_partition_by_type 输出 "名字 分区号 起始 扇区数" 一行。
+    # 这里用 awk 取字段，而不是 `while read ... done < <(...)` ——
+    # 后者是 bash 专有的进程替换，POSIX sh 没有；而且管道里的 read
+    # 在子 shell 中执行，循环里赋的变量出不来。
+    _esp_row="$(qm1_find_partition_by_type "$TARGET" "$QM1_PARTTYPE_EFI" || true)"
+    _lin_row="$(qm1_find_partition_by_type "$TARGET" "$QM1_PARTTYPE_LINUX" || true)"
+    if [ -n "$_esp_row" ]; then
+        PART1_NAME="$(printf '%s\n' "$_esp_row" | awk '{print $1}')"
+        PART1_NO="$(printf '%s\n' "$_esp_row" | awk '{print $2}')"
+        PART1="/dev/$PART1_NAME"
+    fi
+    if [ -n "$_lin_row" ]; then
+        PART2_NAME="$(printf '%s\n' "$_lin_row" | awk '{print $1}')"
+        PART2_NO="$(printf '%s\n' "$_lin_row" | awk '{print $2}')"
+        PART2="/dev/$PART2_NAME"
+    fi
     if [ -n "$PART1" ] && [ -n "$PART2" ]; then
         break
     fi
@@ -658,69 +760,145 @@ done
 [ -n "$PART1" ] && [ -n "$PART2" ] \
     || die "分区设备没出现或类型不对（等 10 秒仍未看到 EFI System + Linux 文件系统两个分区）"
 [ -b "$PART1" ] && [ -b "$PART2" ] || die "分区设备没出现：$PART1 / $PART2"
-log "目标分区：$PART1（ESP，p$PART1_NO） / $PART2（根，p$PART2_NO）"
+log "目标分区：${PART1}（ESP，p${PART1_NO}） / ${PART2}（根，p${PART2_NO}）"
 
 # 分区布局自检：写出来的分区表必须与我们打算写的一致
 _layout="$(LC_ALL=C sfdisk -d "$TARGET" 2>/dev/null || true)"
-_esp_got="$(awk -F': ' '/start=/{print $2; exit}' <<<"$_layout" | head -1)"
 if [ -n "$_layout" ]; then
-    _n_parts="$(grep -c '^[^#].*start=' <<<"$_layout" || true)"
+    _n_parts="$(printf '%s\n' "$_layout" | grep -c '^[^#].*start=' || true)"
     [ "${_n_parts:-0}" -eq 2 ] \
         || die "分区布局不对：期望 2 个分区，实际 ${_n_parts:-0} 个"
+    _esp_got="$(printf '%s\n' "$_layout" | awk -F': ' '/start=/{print $2; exit}' | cut -d, -f1 | sed 's/.*=//')"
     log "分区布局自检通过（2 个分区，起点 ${_esp_got:-?}）"
 fi
 
-mount -o remount,ro / 2>/dev/null || warn "根文件系统改只读失败（继续，可能有轻微不一致）"
+# ---------- 源哈希：必须在复制**之前**算 ----------
+#
+# 原来的顺序是：remount ro → dd → remount rw → 算源哈希 → 比对。
+# 问题出在"算源哈希"这一步：它在 remount rw **之后**，而源在 dd 期间是
+# 只读的、dd 之后又被改回可写 —— 只要这之后有任何一次写入（系统日志、
+# 缓存、第一次启动留下的痕迹），哈希必然对不上 ⇒ 把一次**成功**的安装
+# 报成失败，还留下一块"写了一半"的 eMMC。
+#
+# 现在的顺序：先把源改只读 → 算源哈希 → 再 dd → 再改回可写 → 只校验目标。
+CUR_ROOT_SRC="$(findmnt -no SOURCE / 2>/dev/null || true)"
+SRC_STABLE=1
+if [ "$SRC_ROOT" = "$CUR_ROOT_SRC" ]; then
+    if mount -o remount,ro / 2>/dev/null; then
+        log "根文件系统已改只读（源内容此刻是稳定的）"
+    else
+        SRC_STABLE=0
+        warn "根文件系统改只读失败 —— 源内容可能在复制期间变化，本次校验按尽力而为处理"
+    fi
+else
+    # CI 里源是另一块环设备，不是正在运行的根：不需要（也不该）动它
+    log "源不是当前运行的根文件系统（${CUR_ROOT_SRC}），无需改只读"
+fi
+
+SRC_ESP_HASH="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
+SRC_ROOT_HASH="$(sha256sum "$SRC_ROOT" | awk '{print $1}')"
 
 log "复制 ESP：$SRC_ESP → $PART1"
-dd if="$SRC_ESP" of="$PART1" bs=4M conv=fsync status=progress
+dd if="$SRC_ESP" of="$PART1" bs=4M conv=fsync status=progress \
+    || die "复制 ESP 失败 —— 中止。目标盘处于写了一半的状态，不要从这里启动。
+可用恢复手段：
+  1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
+     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+  2) 重新跑一遍安装（备份会自动再存一份）。"
 log "复制根文件系统：$SRC_ROOT → $PART2"
-dd if="$SRC_ROOT" of="$PART2" bs=4M conv=fsync status=progress
+dd if="$SRC_ROOT" of="$PART2" bs=4M conv=fsync status=progress \
+    || die "复制根文件系统失败 —— 中止。目标盘处于写了一半的状态，不要从这里启动。
+可用恢复手段：
+  1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
+     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+  2) 重新跑一遍安装（备份会自动再存一份）。"
 
-mount -o remount,rw / 2>/dev/null || warn "根文件系统改回可写失败（继续）"
+if [ "$SRC_ROOT" = "$CUR_ROOT_SRC" ]; then
+    mount -o remount,rw / 2>/dev/null || warn "根文件系统改回可写失败（继续）"
+fi
 
-# 逐分区校验必须放在"刚写完、还没做任何后续改动"的状态，
-# 否则 resize2fs / 换菜单之后 sha256 必然不同 → 误报失败。
+# ---------- 校验：只信目标 ----------
 #
-# ★ 比较的是**镜像本身那几字节**，不是整个分区：
-#   根分区是按整块盘的大小建的（根分区 = 盘容量 - ESP - 1MiB），而根文件系统
-#   镜像只有镜像那么大；ESP 分区同理（按 MiB 向上取整）。拿整个分区去 sha256
-#   必然和镜像对不上 —— 那会让每一次安装都在这里中止，而原因看上去像
-#   "写盘失败"，其实写盘是好的。
+# 写完之后从**目标**上把刚写进去的那几个字节读回来算哈希，
+# 和复制前算好的源哈希比。目标上读回来的内容不受"源后来又被写过"影响。
 log "校验：逐分区比对 sha256（刚写入、未做后续改动的状态）"
-SRC_ESP_BYTES="$(stat -c%s "$SRC_ESP" 2>/dev/null || echo 0)"
-SRC_ROOT_BYTES="$(stat -c%s "$SRC_ROOT" 2>/dev/null || echo 0)"
-[ "$SRC_ESP_BYTES" -gt 0 ] || die "读不出 ESP 镜像大小：$SRC_ESP"
-[ "$SRC_ROOT_BYTES" -gt 0 ] || die "读不出根文件系统镜像大小：$SRC_ROOT"
-SRC_ESP_HASH="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
 DST_ESP_HASH="$(qm1_hash_range "$PART1" 0 "$SRC_ESP_BYTES")"
-SRC_ROOT_HASH="$(sha256sum "$SRC_ROOT" | awk '{print $1}')"
 DST_ROOT_HASH="$(qm1_hash_range "$PART2" 0 "$SRC_ROOT_BYTES")"
 
 rc=0
 if [ "$SRC_ESP_HASH" = "$DST_ESP_HASH" ]; then
     log "ESP 写入校验通过：$DST_ESP_HASH"
 else
-    warn "ESP 写入校验失败：源 $SRC_ESP_HASH / 目标 $DST_ESP_HASH"
+    warn "ESP 写入校验不一致：源 $SRC_ESP_HASH / 目标 $DST_ESP_HASH"
     rc=1
 fi
 if [ "$SRC_ROOT_HASH" = "$DST_ROOT_HASH" ]; then
     log "根文件系统写入校验通过：$DST_ROOT_HASH"
 else
-    warn "根文件系统写入校验失败：源 $SRC_ROOT_HASH / 目标 $DST_ROOT_HASH"
+    warn "根文件系统写入校验不一致：源 $SRC_ROOT_HASH / 目标 $DST_ROOT_HASH"
     rc=1
 fi
-# 校验失败 = 写盘没成功，继续往下走只会留下一个"装了一半"的 eMMC，
-# 而用户从 U 盘重启后看到的现象是"启动失败"，却查不出真正原因。
-# 这里必须立刻中止，并说清楚当前 eMMC 处于什么状态、怎么恢复。
+
 if [ "$rc" -ne 0 ]; then
-    die "写入校验失败 —— 中止，没有做后续改动（菜单、provisioning、安装记录都没做）。
+    # 哈希对不上有两种完全不同的原因，处理方式必须分开：
+    #   a) 源在复制期间被写过（源哈希"漂移"）—— 此时不一致可能是假警报；
+    #   b) 真的写坏了（源没变，目标不对）—— 必须中止。
+    # 现在再算一次源哈希：它变了 ⇒ 情况 a；没变 ⇒ 情况 b。
+    SRC_ESP_HASH2="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
+    SRC_ROOT_HASH2="$(sha256sum "$SRC_ROOT" | awk '{print $1}')"
+    if [ "$SRC_ESP_HASH" != "$SRC_ESP_HASH2" ] || [ "$SRC_ROOT_HASH" != "$SRC_ROOT_HASH2" ]; then
+        warn "源在复制期间被写过（哈希漂移）：$SRC_ROOT_HASH → $SRC_ROOT_HASH2"
+        if [ "$SRC_STABLE" -eq 0 ]; then
+            warn "源当时没能改只读 —— 这次不一致可能只是源在变，不能据此判定写盘失败"
+        fi
+        # 源漂移 ⇒ 哈希不足为凭，改用目标侧的硬校验来定论：
+        #   根文件系统必须能通过 e2fsck，ESP 里必须有引导文件。
+        e2fsck -fp "$PART2" >/dev/null 2>&1 || e2fsck -f "$PART2" >/dev/null 2>&1 || true
+        if e2fsck -fn "$PART2" >/dev/null 2>&1; then
+            log "目标根文件系统 e2fsck -fn 检查通过"
+        else
+            die "目标根文件系统检查不通过（e2fsck -fn）—— 写盘确实坏了，中止。
+$TARGET 处于写了一半的状态，不要从这里启动。
+可用恢复手段：
+  1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
+     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+  2) 重新跑一遍安装（备份会自动再存一份）。"
+        fi
+        if esp_has_boot_files "$PART1"; then
+            log "目标 ESP 引导文件检查通过（EFI/BOOT/BOOT*.EFI）"
+        else
+            die "目标 ESP 里没有找到引导文件（EFI/BOOT/BOOT*.EFI）—— 写盘确实坏了，中止。
+$TARGET 处于写了一半的状态，不要从这里启动。
+可用恢复手段：
+  1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
+     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+  2) 重新跑一遍安装（备份会自动再存一份）。"
+        fi
+    else
+        # 校验失败 = 写盘没成功，继续往下走只会留下一个"装了一半"的 eMMC，
+        # 而用户从 U 盘重启后看到的现象是"启动失败"，却查不出真正原因。
+        # 这里必须立刻中止，并说清楚当前 eMMC 处于什么状态、怎么恢复。
+        die "写入校验失败 —— 中止，没有做后续改动（菜单、provisioning、安装记录都没做）。
 $TARGET 现在处于**写了一半**的状态，不要从这里启动。
 可用的恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=<备份文件> of=$TARGET bs=4M conv=fsync
+     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
   2) 重新跑一遍安装（备份会自动再存一份）。
 先把 U 盘插好、别拔，然后重新启动到安装介质再试。"
+    fi
+fi
+
+# 目标根分区比镜像大：dd 只写了源根分区那么大一截，剩下的区域还是
+# **上一套系统的残留**（可能含旧文件、旧凭据）。先把多出来的部分清零，
+# 后面 resize2fs 扩出来的空闲块里才不会留着旧数据。
+ROOT_TAIL_BYTES=$(( ROOT_MIB * 1048576 - SRC_ROOT_BYTES ))
+if [ "$ROOT_TAIL_BYTES" -gt 0 ]; then
+    log "清空根分区尾部残留：$(( ROOT_TAIL_BYTES / 1048576 )) MiB"
+    # 用字节精确的 skip/count：按 MiB 取整会越过分区尾，撞上 GPT 备份头。
+    dd if=/dev/zero of="$PART2" bs=1M iflag=skip_bytes,count_bytes \
+        skip="$SRC_ROOT_BYTES" count="$ROOT_TAIL_BYTES" \
+        conv=notrunc,fsync status=progress \
+        || warn "清零根分区尾部失败（继续，resize2fs 仍可继续）"
 fi
 
 # ---------- [6/6] 收尾 ----------
@@ -818,7 +996,12 @@ rmdir "$DST_ROOT_MNT" 2>/dev/null || true
 # efibootmgr 不可用时靠 \EFI\BOOT\ 兜底路径 + 手工命令。
 EFI_ENTRY_DONE="no"
 EFI_LOADER=""
-if [ -e /sys/firmware/efi/efivars ]; then
+if [ "$SKIP_EFI_ENTRY" -eq 1 ]; then
+    # 显式跳过：只在"确实没法登记"时用（例如 CI 的环设备上没有 efivars）。
+    # 必须是**显式**的 —— 悄悄跳过却报成功是最坏的结果。
+    EFI_ENTRY_DONE="skipped"
+    warn "按 --skip-efi-entry 显式跳过 EFI 启动项登记"
+elif [ -e /sys/firmware/efi/efivars ]; then
     if command -v efibootmgr >/dev/null 2>&1; then
         _esp_mnt="$(mktemp -d)"
         if mount "$PART1" "$_esp_mnt" 2>/dev/null; then
@@ -830,7 +1013,7 @@ if [ -e /sys/firmware/efi/efivars ]; then
             if [ -n "$EFI_LOADER" ]; then
                 if efibootmgr -c -d "$TARGET" -p "$PART1_NO" -L "QM1 Debian" \
                         -l "$EFI_LOADER" 2>/dev/null; then
-                    log "已登记 UEFI 启动项：QM1 Debian（$EFI_LOADER，磁盘 $TARGET 分区 p$PART1_NO）"
+                    log "已登记 UEFI 启动项：QM1 Debian（${EFI_LOADER}，磁盘 $TARGET 分区 p${PART1_NO}）"
                     EFI_ENTRY_DONE="yes"
                 else
                     warn "efibootmgr 登记启动项失败（可以稍后手工执行，见下方提示）"
@@ -852,11 +1035,24 @@ fi
 if [ "$EFI_ENTRY_DONE" != "yes" ]; then
     cat <<EOF
   手工登记（进入已装好的系统后执行，或从 U 盘的安装环境执行）：
-    efibootmgr -c -d $TARGET -p $PART1_NO -L "QM1 Debian" -l '\\\\EFI\\\\BOOT\\\\BOOTIA32.EFI'
+    efibootmgr -c -d $TARGET -p $PART1_NO -L "QM1 Debian" -l '\\EFI\\BOOT\\BOOTIA32.EFI'
     efibootmgr -o 1        # 可选：把它设为第一启动项
-  兜底：\\\\EFI\\\\BOOT\\\\BOOTIA32.EFI 是固件的可引导路径，多数固件会自动找到它
+  兜底：\\EFI\\BOOT\\BOOTIA32.EFI 是固件的可引导路径，多数固件会自动找到它
   （BOOTX64.EFI 只有在固件是 64 位时才加载得了，别优先用它）。
 EOF
+fi
+
+# 登记不上就必须判失败 —— 系统已经装好了，可固件里没有指向它的启动项，
+# 用户重开机看到的只有"开不了机"，而报告却说装好了。
+# 只有显式 --skip-efi-entry 才允许带着"没登记"的状态收场。
+if [ "$EFI_ENTRY_DONE" != "yes" ] && [ "$SKIP_EFI_ENTRY" -ne 1 ]; then
+    die "EFI 启动项没有登记成功 —— 不能报成功（固件里没有指向 $TARGET 的启动项，重开机很可能开不了机）。
+系统本身已经写好了（目标 ${TARGET}，根分区 ${PART2}），缺的是启动项。
+补救（进入已装好的系统后执行，或从 U 盘的安装环境执行）：
+  efibootmgr -c -d $TARGET -p $PART1_NO -L \"QM1 Debian\" -l '\\EFI\\BOOT\\BOOTIA32.EFI'
+  efibootmgr -o 1
+确实没法登记时（比如这台机器压根没在 UEFI 模式下启动），
+可以显式加 --skip-efi-entry 跳过这一步 —— 但那样机器多半开不了机。"
 fi
 
 echo
@@ -866,11 +1062,13 @@ if [ "$rc" -eq 0 ]; then
 else
     echo " 安装结束，但校验有失败项 ⚠️（见上面的 sha256 对比）"
 fi
-echo " 目标设备 : $TARGET（模式 $MODE）"
+echo " 目标设备 : ${TARGET}（模式 ${MODE}）"
 echo " 根分区   : $PART2"
 echo " 备份     : ${BACKUP_FILE:-none}"
 if [ "$EFI_ENTRY_DONE" = "yes" ]; then
     echo " UEFI 启动项 : 已登记（QM1 Debian）"
+elif [ "$EFI_ENTRY_DONE" = "skipped" ]; then
+    echo " UEFI 启动项 : 未登记（--skip-efi-entry 显式跳过，见上面的手工命令）"
 else
     echo " UEFI 启动项 : 未登记 —— 见上面的手工命令"
 fi

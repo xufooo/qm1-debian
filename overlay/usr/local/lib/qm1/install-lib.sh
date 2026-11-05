@@ -87,10 +87,10 @@ qm1_verify_backup() {
         dsum="$(qm1_hash_range "$target" "$start" "$size")"
         bsum="$(qm1_hash_range "$bsrc" $(( base + start )) "$size")"
         if [ -n "$dsum" ] && [ "$dsum" = "$bsum" ]; then
-            qm1_install_log "  分区 $name（偏移 $start，$(( size / 1048576 )) MiB）一致：$dsum"
+            qm1_install_log "  分区 ${name}（偏移 ${start}，$(( size / 1048576 )) MiB）一致：$dsum"
             ok=$(( ok + 1 ))
         else
-            qm1_install_warn "  分区 $name（偏移 $start，$(( size / 1048576 )) MiB）不一致：原盘 $dsum / 备份 $bsum"
+            qm1_install_warn "  分区 ${name}（偏移 ${start}，$(( size / 1048576 )) MiB）不一致：原盘 $dsum / 备份 $bsum"
             bad=$(( bad + 1 ))
         fi
     done < <(lsblk -bnro NAME,START,SIZE,TYPE "$target" 2>/dev/null \

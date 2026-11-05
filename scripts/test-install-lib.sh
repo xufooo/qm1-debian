@@ -208,9 +208,9 @@ wpa_case() {  # $1=说明 $2=ssid $3=psk $4=期望
     a="$(wpa_eval "$LIB" "$2" "$3")"
     b="$(wpa_eval "$COMMON_LIB" "$2" "$3")"
     if [ "$a" != "$b" ]; then
-        bad "$1：两份实现不一致（镜像内 $a / 构建链 $b）"
+        bad "$1：两份实现不一致（镜像内 $a / 构建链 ${b}）"
     elif [ -n "${4:-}" ] && [ "$a" != "$4" ]; then
-        bad "$1：得到 $a，期望 $4"
+        bad "$1：得到 ${a}，期望 $4"
     else
         ok "$1 → $a"
     fi
@@ -226,6 +226,75 @@ wpa_case "含空格与引号的 SSID" "$SSID_TRICKY" "passphrase" '"My \"Net\"\\
 wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||1'
 wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||1'
 wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"||0'
+
+echo "== 磁盘辅助函数（两份实现必须一致） =="
+# 主机侧（构建链）现在也有一份同名实现，放在 scripts/lib/common.sh 里 ——
+# install-qm1.sh 用它做"备份逐分区校验"和"目标分区布局规划"。
+#
+# 为什么必须断言一致：设备侧安装器 source 的是镜像里那份 install-lib.sh，
+# 主机侧安装器 source 的是构建链这份 common.sh。两份实现一旦走样，
+# "CI 里验证过的备份校验"和"真机上真正跑的备份校验"就不是同一件事了 ——
+# 而备份校验失手的后果是"出事时才发现没有退路"。
+disk_eval() {  # $1=lib $2...=要执行的命令 → 输出 + "rc=返回值"
+    bash -c '
+        set -uo pipefail
+        . "$1"; shift
+        set +e
+        "$@"
+        printf "rc=%s\n" "$?"
+    ' _ "$1" "${@:2}"
+}
+disk_parity() {  # $1=说明 $2...=命令
+    _desc="$1"; shift
+    _a="$(disk_eval "$LIB" "$@" 2>&1 || true)"
+    _b="$(disk_eval "$COMMON_LIB" "$@" 2>&1 || true)"
+    if [ "$_a" = "$_b" ]; then
+        ok "${_desc}：两份实现输出一致"
+    else
+        bad "${_desc}：两份实现不一致
+  镜像内：$_a
+  构建链：$_b"
+    fi
+}
+disk_parity "分区列表"        qm1_partitions "$LOOP"
+disk_parity "按类型找分区"    qm1_find_partition "$LOOP" "$QM1_PARTTYPE_EFI"
+disk_parity "按类型找分区（带分区号）" qm1_find_partition_by_type "$LOOP" "$QM1_PARTTYPE_LINUX"
+disk_parity "已用空间"        qm1_used_end_bytes "$LOOP"
+disk_parity "字节范围哈希"    qm1_hash_range "$LOOP" 0 1048576
+# 备份与原盘此刻**不一致**（上面刚往备份里写过一个字节），
+# 所以这一步同时验证了"不一致时两份实现都判失败、且给出同样的说明"。
+disk_parity "备份逐分区校验（不一致时）" qm1_verify_backup "$LOOP" "$BACKUP" 0
+
+echo "== 目标布局规划（写盘后按真实容量重建分区表） =="
+# 这个函数决定"写完盘之后分区表长什么样"：ESP 固定在 1 MiB，
+# 根分区一直撑到盘尾前 1 MiB（给备份 GPT 留位）。
+# 它要读镜像自己的分区表 —— 而 sfdisk -d 的分区行是 **"key=value"**
+# （"start=2048, size=131072, type=c12a..."，冒号只出现在行首的
+# "设备路径 : " 上）。这里曾经按 "key: value" 解析，结果永远读不到
+# ESP 大小 —— 解析不出来不是报错退出，就是默默规划出一个错的布局。
+PLAN_IMG="$WORK/plan.img"
+truncate -s 256M "$PLAN_IMG"
+sfdisk "$PLAN_IMG" >/dev/null <<'SPEC'
+label: gpt
+start=1MiB, size=64MiB, type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b
+start=65MiB, size=190MiB, type=0fc63daf-8483-4772-8e79-3d69d8477de4
+SPEC
+plan="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$PLAN_IMG" 268435456 2>&1 || true)"
+if [ "$plan" = "64 65 190" ]; then
+    ok "256 MiB 目标规划出：ESP 64 MiB / 根分区 65 MiB 起 / 根分区 190 MiB"
+else
+    bad "分区布局规划结果不对：'$plan'（期望 '64 65 190'）"
+fi
+
+# 反向用例：根分区不在 ESP 之后的镜像必须被拒绝（宁可不装，
+# 也不能按另一种布局重建分区表）。
+plan_bad="$(bash -c '. "$1"; qm1_plan_target_layout "$2" "$3"' _ "$COMMON_LIB" "$IMG" 268435456 2>&1 || true)"
+case "$plan_bad" in
+    *不一致*|*"没有 EFI System 分区"*)
+        ok "拒绝了与约定布局不符的镜像（根分区不在 ESP 之后）" ;;
+    *)
+        bad "非约定布局的镜像没有被拒绝：'$plan_bad'" ;;
+esac
 
 if [ "$fails" -eq 0 ]; then
     echo "install-lib 测试全部通过"
