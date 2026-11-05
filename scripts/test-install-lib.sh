@@ -301,7 +301,7 @@ tb_wrong_hash="$(qm1_hash_range "$TB_MEDIA" $(( TB_BASE * 4 )) "$TB_SIZE")"
 if [ -n "$tb_wrong_hash" ] && [ "$tb_wrong_hash" != "$tb_src_hash" ]; then
     ok "4 倍偏移处不是这份备份（说明偏移确实按字节解释了）"
 else
-    bad "4 倍偏移处的哈希与备份相同（$tb_wrong_hash）—— seek 可能被当成块数了"
+    bad "4 倍偏移处的哈希与备份相同（${tb_wrong_hash}）—— seek 可能被当成块数了"
 fi
 # 备份之前的内容不能被动过（那块是安装镜像的地盘，不能被备份覆盖）
 printf '\000' > "$WORK/one-zero-byte"

@@ -139,6 +139,12 @@ SKIP_EFI_ENTRY="${QM1_SKIP_EFI_ENTRY:-0}"
 # ★ 必须在这里给初值：脚本开了 set -u，不给初值的话，
 #   "没传 --force-kind" 这条最常见的路径会直接因 unbound variable 退出。
 FORCE_KIND=""
+# efivars 的位置。默认就是内核给的那个；做成可注入的，是为了让端到端测试
+# 能走到"这台机器压根没在 UEFI 模式下启动"那条分支 ——
+# CI 的 runner 恰恰**有** efivars（还预装了 efibootmgr），
+# 想测"没有 efivars"时那条最终状态说清楚了没有，就得能把它指到一个
+# 不存在的路径上去。
+EFIVARS_PATH="${QM1_EFIVARS_PATH:-/sys/firmware/efi/efivars}"
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -1119,7 +1125,7 @@ if [ "$SKIP_EFI_ENTRY" -eq 1 ]; then
     # 必须是**显式**的 —— 悄悄跳过却报成功是最坏的结果。
     EFI_ENTRY_DONE="skipped"
     warn "按 --skip-efi-entry 显式跳过 EFI 启动项登记"
-elif [ -e /sys/firmware/efi/efivars ]; then
+elif [ -e "$EFIVARS_PATH" ]; then
     if command -v efibootmgr >/dev/null 2>&1; then
         _esp_mnt="$(mktemp -d)"
         if mount "$PART1" "$_esp_mnt" 2>/dev/null; then
@@ -1148,7 +1154,7 @@ elif [ -e /sys/firmware/efi/efivars ]; then
         warn "镜像里没有 efibootmgr —— 无法自动登记 UEFI 启动项"
     fi
 else
-    warn "当前不是以 UEFI 模式启动（没有 /sys/firmware/efi/efivars）—— 无法登记 UEFI 启动项"
+    warn "当前不是以 UEFI 模式启动（没有 ${EFIVARS_PATH}）—— 无法登记 UEFI 启动项"
 fi
 if [ "$EFI_ENTRY_DONE" != "yes" ]; then
     cat <<EOF

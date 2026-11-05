@@ -14,7 +14,7 @@
 #   `systemd.debug_shell=1` 起得来，但自动化没法登录进去 —— 之前那版脚本
 #   就是死在这儿：等一句永远不来的 "Booting in debug shell."，等到超时。
 #   所以这里改成两条不依赖交互的路：
-#     ① 串口控制台日志：断言 systemd 走到了 multi-user.target、sshd 起���、
+#     ① 串口控制台日志：断言 systemd 走到了 multi-user.target、sshd 起来了、
 #        resolved 起了、qm1-firstboot 跑完了，而且**关键单元没有一个起失败**；
 #     ② 离线读客户机写回磁盘的 journal（debugfs 导出 + journalctl --directory），
 #        从里面断言更细的东西（单元输出、自检脚本的结论）。
@@ -112,7 +112,7 @@ if [ -n "$DISK" ]; then
         echo "BOOT-SMOKE: SKIP（找不到 OVMF 固件，装 ovmf 包才有）" >&2
         exit 77
     fi
-    [ -f "$OVMF_VARS" ] || { echo "BOOT-SMOKE: SKIP（找不到配套的 OVMF_VARS：$OVMF_VARS）" >&2; exit 77; }
+    [ -f "$OVMF_VARS" ] || { echo "BOOT-SMOKE: SKIP（找不到配套的 OVMF_VARS：${OVMF_VARS}）" >&2; exit 77; }
     log "OVMF 固件：$OVMF_CODE"
 
     DISK_COPY="$WORK/qm1-disk-boot.img"
@@ -125,15 +125,21 @@ if [ -n "$DISK" ]; then
     # 从 GPT 里找出 ext4 的根分区（type=0fc63daf-8483-4772-8e79-3d69d8477de4）
     need sfdisk
     need dd
+    # ★ 解析要落在**整行**上，不能按空白切字段再找 start=：
+    #   util-linux 的 sfdisk -d 会把数值**按列对齐**打印，
+    #   形如 "start=        2048, size=       131072, type=0fc63daf-…"
+    #   按空白切字段后拿到的是裸的 "start="，数字被切到了下一个字段，
+    #   于是 "s/.*start=\([0-9]*\).*/\1/p" 取到空串 —— 这条断言会一直判不过。
+    #   （安装器端到端测试里已经踩过一次同样的坑。）
     PART_LINE="$(sfdisk -d "$DISK_COPY" 2>/dev/null \
-        | grep 'type=0fc63daf-8483-4772-8e79-3d69d8477de4' | head -1 || true)"
+        | awk '!seen && index(tolower($0), "type=0fc63daf-8483-4772-8e79-3d69d8477de4") { print; seen=1 }')"
     [ -n "$PART_LINE" ] || die "整盘镜像里找不到 ext4 根分区（GPT 里没有 0fc63daf 类型）"
-    PART_START="$(printf '%s' "$PART_LINE" | sed -n 's/.*start=\([0-9]*\).*/\1/p')"
-    PART_SIZE="$(printf '%s' "$PART_LINE" | sed -n 's/.*size=\([0-9]*\).*/\1/p')"
+    PART_START="$(printf '%s' "$PART_LINE" | sed -n 's/.*start=[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
+    PART_SIZE="$(printf '%s' "$PART_LINE" | sed -n 's/.*size=[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
     if [ -z "$PART_START" ] || [ -z "$PART_SIZE" ]; then
         die "解析分区位置失败：$PART_LINE"
     fi
-    log "根分区：起始扇区 $PART_START，长度 $PART_SIZE 扇区"
+    log "根分区：起始扇区 ${PART_START}，长度 $PART_SIZE 扇区"
     BOOT_IMG="$WORK/rootfs-from-disk.img"
     dd if="$DISK_COPY" of="$BOOT_IMG" bs=512 skip="$PART_START" count="$PART_SIZE" conv=sparse status=none
     [ -s "$BOOT_IMG" ] || die "从整盘镜像里抠出根分区失败"
@@ -150,7 +156,7 @@ else
     done
     [ -n "$KERNEL" ] || die "镜像的 /boot 里没有 vmlinuz-*"
     [ -n "$INITRD" ] || die "镜像的 /boot 里没有 initrd.img-*"
-    log "内核：$KERNEL　initrd：$INITRD"
+    log "内核：${KERNEL}　initrd：$INITRD"
 
     # 客户机要往磁盘里写 journal 才能让我们事后读它；用副本启动，免得把构建产物
     # 弄脏（后面还有一步要核对产物哈希）。
@@ -360,4 +366,4 @@ if ! bash "$ASSERT_SCRIPT" --console "$CONSOLE" ${JOURNAL_TEXT_FILE:+--journal-t
     exit 1
 fi
 
-log "启动成功，断言全过（日志：$LOG，控制台：$CONSOLE）"
+log "启动成功，断言全过（日志：${LOG}，控制台：${CONSOLE}）"

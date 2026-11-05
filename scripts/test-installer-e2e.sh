@@ -522,6 +522,9 @@ if grep -q '显式跳过 EFI 启动项登记' "$WORK/install-e.log"; then
 else
     bad "用例 E：日志里没有说明 EFI 登记被显式跳过"
 fi
+# media 分支的安装器会顺手把整盘备份到 /var/tmp（每个 512 MiB）——
+# 用完就删，别让 CI 磁盘被这几个副本吃满。
+rm -f /var/tmp/qm1-target-preinstall-*.img /var/tmp/qm1-target-metadata-*.img 2>/dev/null || true
 
 # ---------- 6. 用例 F：设备侧安装器在 EFI 登记不上时必须显式失败 ----------
 #
@@ -570,6 +573,8 @@ if grep -q '显式跳过 EFI 启动项登记' "$WORK/install-f.log"; then
 else
     ok "用例 F：没有把 EFI 登记失败伪装成'跳过'"
 fi
+# media 分支顺手做的那份整盘备份落在 /var/tmp（每个 512 MiB）——用完就删。
+rm -f /var/tmp/qm1-target-preinstall-*.img /var/tmp/qm1-target-metadata-*.img 2>/dev/null || true
 
 # ---------- 7. 用例 E2：设备侧安装器的 emmc 分支（QM1 上真正的那条路） ----------
 #
@@ -577,7 +582,7 @@ fi
 # 而 emmc 分支有一整套 media 分支没有的东西：覆盖前强制整盘备份、备份与原盘
 # 逐分区 sha256 比对、备份位置的四级搜索、按目标真实容量重建 GPT、
 # 撑满整盘、写安装记录。**这条分支在 CI 里从来没有被跑过** ——
-# 而历史��错（dd 的 seek 以块为单位、备份偏移放大 4 倍）恰好全藏在这条分支里。
+# 而历史错误（dd 的 seek 以块为单位、备份偏移放大 4 倍）恰好全藏在这条分支里。
 #
 # CI 里没有真的 ACPI eMMC，环设备被内核报成别的类型 ⇒ 用 --force-kind emmc
 # 把它"说成" eMMC（安装器本来就支持这个开关，主机侧脚本早就有）。
@@ -656,15 +661,26 @@ if printf '%s\n' "$SF_G" | grep -qi "type=$LINUX_GUID"; then
 else
     bad "用例 E2：根分区的分区类型 GUID 不对"
 fi
-# ★ sfdisk -d 打印的类型 GUID 是**大写**，而 awk 的 index() 大小写敏感 ——
-#   同一批断言里 grep -qi 是大小写不敏感的，所以"GUID 对不对"那条过了，
-#   "起始扇区"这条却解析成空。比对前先把整行转成小写。
-_g_esp_start="$(printf '%s\n' "$SF_G" | awk -v t="$ESP_GUID" '
-    index(tolower($0), t) { for (i = 1; i <= NF; i++) if ($i ~ /^start=/) { sub(/^start=/, "", $i); gsub(/,/, "", $i); print $i; exit } }')"
+# ★ 取 ESP 的起始扇区。
+#   util-linux 的 sfdisk -d 会把数值**按列对齐**打印：
+#       start=        2048, size=       131072, type=c12a7328-…
+#   数字和 "start=" 之间有一串空格 ⇒ 按空白切字段再找 /^start=/ 是找不到的
+#   （切出来的是裸的 "start="，数字被切到下一个字段去了）。
+#   所以这里在**整行**上用正则取数，不切字段。
+#   ★ 断言只认 sfdisk 这一个来源：它是磁盘上真正的 GPT，别拿第二个来源
+#     来"凑"一个判定 —— 两个来源不一致时该查的是谁错了，而不是放宽断言。
+_g_esp_line="$(printf '%s\n' "$SF_G" | awk -v t="$ESP_GUID" '!seen && index(tolower($0), t) { print; seen=1 }')"
+_g_esp_start="$(printf '%s' "$_g_esp_line" | sed -n 's/.*start=[[:space:]]*\([0-9][0-9]*\).*/\1/p')"
 if [ "${_g_esp_start:-}" = "2048" ]; then
     ok "用例 E2：ESP 起于 1 MiB（扇区 2048）"
 else
-    bad "用例 E2：ESP 的起始扇区是 ${_g_esp_start:-?}（应该是 2048）"
+    bad "用例 E2：ESP 的起始扇区是 ${_g_esp_start:-?}（应该是 2048；sfdisk 行：${_g_esp_line:-?}）"
+fi
+# 交叉核对（只作参考，不参与判定）：lsblk 的 START 是**字节**，1 MiB = 1048576。
+_g_esp_start_bytes="$(lsblk -bnro START,PARTTYPE "$LOOP_TGT_G" 2>/dev/null \
+    | awk -v t="$ESP_GUID" 'tolower($2) == t { print $1; exit }')"
+if [ -n "${_g_esp_start_bytes:-}" ] && [ "$_g_esp_start_bytes" != "1048576" ]; then
+    warn "用例 E2：lsblk 报的 ESP 起始是 ${_g_esp_start_bytes} 字节（应为 1048576）—— 与 sfdisk 不一致，值得看一眼"
 fi
 
 # (3) 整盘上只能有两份 GPT 头（主表 + 盘尾备份表），不能有第三份留在中间。
@@ -791,6 +807,151 @@ if mount -t tmpfs -o size=1M tmpfs "$SMALL_DIR" 2>/dev/null; then
 else
     warn "用例 G：挂不了 tmpfs，跳过（内核不允许？）"
 fi
+
+# E2 的备份文件占了 512 MiB，后面两个用例还要再建目标盘 ——
+# 先把它删掉腾地方（断言早就做完了）。
+rm -f "$BACKUP_FILE_G" 2>/dev/null || true
+
+# ---------- 9. 用例 H：备份内容坏了 ⇒ 必须中止，且目标一字节都不能写 ----------
+#
+# 为什么要有这条：
+#   "覆盖前必须留一份能装回去的备份"是这条安装路径的安全底线。
+#   比对逻辑（qm1_verify_backup）自己是有测试的（scripts/test-install-lib.sh
+#   里改一个字节就能被发现），但**安装器接到"比对失败"之后怎么办**，
+#   此前没有任何测试覆盖过 —— 而这里如果处理错了，代价是"备份不可信还照样
+#   把整盘擦掉"，用户连退路都没有。
+#
+# 做法：给安装器一个**包装库**（--lib 指向它）：包装库先加载真库，再把
+#   qm1_verify_backup 包一层 —— 在比对之前，先把备份源里的一个字节改掉
+#   （模拟"介质掉电/写入被截断"）。真比对逻辑一行没改，
+#   所以"发现不一致"这件事是真逻辑做出来的，不是测试自己判的。
+log "用例 H：备份内容被改坏 ⇒ 安装器必须中止且不写目标"
+WRAP_LIB="$WORK/install-lib-tamper.sh"
+cat > "$WRAP_LIB" <<WRAP_EOF
+#!/bin/bash
+# 包装库：先加载真库，再把 qm1_verify_backup 包一层。
+#
+# 在比对之前，把备份源里的一个字节改掉 —— 模拟"备份写到一半被改坏 /
+# 介质掉电"。真比对逻辑一行没改，所以"发现不一致"是真逻辑做出来的。
+. "$INSTALL_LIB"
+eval "\$(declare -f qm1_verify_backup | sed '1s/qm1_verify_backup/qm1_verify_backup_orig/')"
+qm1_verify_backup() {
+    local target="\$1" bsrc="\$2" base="\$3"
+    # offset 4096 落在 GPT 区（前 1 MiB）里 —— 比对的第一项就会发现不一致。
+    printf 'X' | dd of="\$bsrc" bs=1 seek=\$(( base + 4096 )) count=1 conv=notrunc status=none 2>/dev/null || true
+    qm1_verify_backup_orig "\$target" "\$bsrc" "\$base"
+}
+WRAP_EOF
+
+TGT_H="$WORK/target-h.img"
+truncate -s 512M "$TGT_H"
+LOOP_TGT_H="$(losetup --partscan --find --show "$TGT_H" 2>/dev/null)" || skip "造目标失败"
+LOOPS+=("$LOOP_TGT_H")
+BACKUP_H="$WORK/backup-h"
+mkdir -p "$BACKUP_H"
+_h_before="$(whole_sha "$TGT_H")"
+
+if bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_H" \
+        --source-disk "$LOOP_SRC_G" --source-root "${LOOP_SRC_G}p2" --source-esp "${LOOP_SRC_G}p1" \
+        --lib "$WRAP_LIB" --no-login-account --mode emmc --force-kind emmc --yes --skip-efi-entry \
+        --backup-dir "$BACKUP_H" \
+        > "$WORK/install-h.log" 2>&1; then
+    bad "用例 H：备份已经被改坏，安装器却报了成功"
+    echo "---- 安装器完整输出 ----"
+    cat "$WORK/install-h.log"
+    echo "---- 安装器输出结束 ----"
+else
+    ok "用例 H：备份被改坏时安装器判失败"
+    if grep -q '备份校验失败' "$WORK/install-h.log"; then
+        ok "用例 H：失败原因说清了是备份校验失败"
+    else
+        bad "用例 H：失败信息里没有说明是备份校验失败"
+        tail -20 "$WORK/install-h.log"
+    fi
+    # 关键：必须明确说"没有写目标"，否则用户会以为还能重跑。
+    if grep -q '没有对' "$WORK/install-h.log" && grep -q '任何写入' "$WORK/install-h.log"; then
+        ok "用例 H：失败信息里明确说了没有对目标做任何写入"
+    else
+        bad "用例 H：失败信息里没有说明目标未被写入"
+    fi
+fi
+
+_h_after="$(whole_sha "$TGT_H")"
+if [ "$_h_before" = "$_h_after" ]; then
+    ok "用例 H：中止之后目标盘一字节都没动"
+else
+    bad "用例 H：中止之后目标盘被写了（整盘 sha256 变了）"
+fi
+rm -rf "$BACKUP_H" 2>/dev/null || true
+
+# ---------- 10. 用例 I：没法登记 UEFI 启动项时，最终状态必须交代清楚 ----------
+#
+# 为什么要有这条：
+#   系统装好了、固件里却没有指向它的启动项 —— 报告说"装好了"，
+#   用户重开机才发现开不了机，这是最坏的一种收场。
+#   所以"登记不上"必须**判失败**，而且失败信息必须说清楚三件事：
+#     1) 系统本身已经装好了（不要重跑安装，重跑会把刚装好的再擦一遍）；
+#     2) 缺的是启动项；
+#     3) 补救命令是什么。
+#
+# 制造"登记不上"：把 efivars 路径指到一个不存在的地方
+#   （QM1_EFIVARS_PATH 是安装器为此留的注入开关）。
+#   CI 的 runner 恰恰**有** efivars，想测"没有"就得能把它指走。
+#   注意：这次**不给** --skip-efi-entry —— 显式跳过是另一条允许的收场，
+#   这里要测的是"没跳过、但登记不上"时必须判失败。
+log "用例 I：没有 efivars（登记不了启动项）⇒ 必须判失败并交代最终状态"
+TGT_I="$WORK/target-i.img"
+truncate -s 512M "$TGT_I"
+LOOP_TGT_I="$(losetup --partscan --find --show "$TGT_I" 2>/dev/null)" || skip "造目标失败"
+LOOPS+=("$LOOP_TGT_I")
+
+if QM1_EFIVARS_PATH=/nonexistent/qm1-efivars bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_I" \
+        --source-disk "$LOOP_SRC_E" --source-root "${LOOP_SRC_E}p2" --source-esp "${LOOP_SRC_E}p1" \
+        --lib "$INSTALL_LIB" --no-login-account --mode media --yes \
+        > "$WORK/install-i.log" 2>&1; then
+    bad "用例 I：登记不上 UEFI 启动项时安装器居然报成功（重开机可能开不了机）"
+    echo "---- 安装器完整输出 ----"
+    cat "$WORK/install-i.log"
+    echo "---- 安装器输出结束 ----"
+else
+    ok "用例 I：登记不上启动项时安装器判失败"
+fi
+if grep -q '没有登记成功' "$WORK/install-i.log"; then
+    ok "用例 I：失败原因说清了是启动项没登记成功"
+else
+    bad "用例 I：失败信息里没有说明启动项没登记成功"
+    tail -20 "$WORK/install-i.log"
+fi
+if grep -q '系统本身已经装好了' "$WORK/install-i.log"; then
+    ok "用例 I：失败信息里说明系统本身已经装好（别重跑安装）"
+else
+    bad "用例 I：失败信息里没有说明系统本身已经装好"
+fi
+if grep -q '别重跑安装' "$WORK/install-i.log"; then
+    ok "用例 I：失败信息里提醒了别重跑安装"
+else
+    bad "用例 I：失败信息里没有提醒别重跑安装"
+fi
+if grep -q 'efibootmgr -c' "$WORK/install-i.log"; then
+    ok "用例 I：失败信息里给出了可复制的补救命令"
+else
+    bad "用例 I：失败信息里没有补救命令"
+    tail -20 "$WORK/install-i.log"
+fi
+if grep -q '显式跳过 EFI 启动项登记' "$WORK/install-i.log"; then
+    bad "用例 I：没给 --skip-efi-entry 却显示跳过了 EFI 登记"
+else
+    ok "用例 I：没有把 EFI 登记失败伪装成'跳过'"
+fi
+# 顺便确认：失败点在"启动项"这一步，系统本身确实写下去了 ——
+# 不然那句"系统本身已经装好了"就是在骗人。
+if has_file "${LOOP_TGT_I}p2" "QM1-MARKER-FILE"; then
+    ok "用例 I：系统本身确实已经装进目标（失败点只在启动项）"
+else
+    bad "用例 I：目标里没有源的文件内容（'系统本身已经装好了'这句是假的？）"
+fi
+# media 分支顺手做的那份整盘备份落在 /var/tmp（512 MiB）——用完就删。
+rm -f /var/tmp/qm1-target-preinstall-*.img /var/tmp/qm1-target-metadata-*.img 2>/dev/null || true
 
 printf '\n'
 if [ "$FAILED" = "0" ]; then

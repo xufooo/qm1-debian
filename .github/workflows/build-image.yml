@@ -893,16 +893,27 @@ jobs:
           # 报 unbound variable 把脚本打断 —— 而且往往正好打断在装机流程中间。
           # 一律写成 "${TARGET}（"。
           python3 - "$DEV" "$HOST" scripts/lib/common.sh scripts/test-install-lib.sh \
-                    scripts/test-installer-e2e.sh <<'PY'
+                    scripts/test-installer-e2e.sh scripts/boot-smoke.sh \
+                    overlay/usr/local/lib/qm1/install-lib.sh <<'PY'
           import re, sys
           pat = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]')
           bad = []
+          # U+FFFD = 编码坏掉的字符。中文注释一旦被写坏，
+          # 读的人会以为是自己看花了眼 —— 而且它通常是整段文字被截断，
+          # 意思全丢了。宁可让 CI 报出来。
+          fffd = []
           for f in sys.argv[1:]:
               for i, line in enumerate(open(f, encoding='utf-8'), 1):
+                  if '�' in line:
+                      fffd.append("%s:%d: %s" % (f, i, line.rstrip()))
                   if line.lstrip().startswith('#'):
                       continue
                   for m in pat.finditer(line):
                       bad.append("%s:%d: %s" % (f, i, m.group(0)))
+          if fffd:
+              print("::error::文件里有编码坏掉的字符（U+FFFD）：")
+              print("\n".join(fffd))
+              sys.exit(1)
           if bad:
               print("::error::变量名后面直接跟了中文标点（bash 会把标点吃进变量名）：")
               print("\n".join(bad))
