@@ -181,6 +181,9 @@ check_exists /etc/udev/rules.d/60-qm1-emmc-power.rules "eMMC runtime suspend 的
 check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
 check_exists /usr/local/sbin/qm1-bluetooth-up "蓝牙初始化辅助脚本（失败要留痕）"
 check_exists /usr/local/lib/qm1/install-lib.sh "安装器共用的磁盘/凭据函数库"
+check_exists /usr/local/sbin/qm1-provision "首启运行时部署的包装脚本（跑 provision-agent.sh）"
+check_exists /usr/local/share/qm1/provision-agent.sh "Hermes + headless Chrome 的部署脚本"
+check_exists /etc/systemd/system/qm1-provision.service "首启运行时部署单元（没有它刷完机不会自动铺 Hermes）"
 
 echo "-- 伪文件系统应为空 --"
 for d in /dev /proc /sys /run; do
