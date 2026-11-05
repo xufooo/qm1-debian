@@ -412,8 +412,10 @@ jobs:
           ROOT="$RUNNER_TEMP/qm1-root"
           for unit in systemd-timesyncd.service bluetooth.service; do
             # systemd-timesyncd 由 timers.target 激活，bluetooth 由 multi-user.target。
-            if [ ! -e "$ROOT/etc/systemd/system/timers.target.wants/$unit" ] \
-               && [ ! -e "$ROOT/etc/systemd/system/multi-user.target.wants/$unit" ]; then
+            # 用 -L 判断：发行版单元的链接目标是 /lib/systemd/system/... 的绝对路径，
+            # 在 runner 上这个路径不存在，只有链接本身在镜像里。
+            if [ ! -L "$ROOT/etc/systemd/system/timers.target.wants/$unit" ] \
+               && [ ! -L "$ROOT/etc/systemd/system/multi-user.target.wants/$unit" ]; then
               echo "::error::$unit 未在镜像里启用"
               exit 1
             fi
