@@ -100,6 +100,26 @@ if [ -f "$ROOTFS/etc/fstab" ]; then
         } >> "$ROOTFS/etc/fstab"
         log "已向 fstab 补上根分区条目（UUID=$ROOT_UUID）"
     fi
+    # ★ 补上 ESP 的挂载点。
+    # 原来 fstab 里只有 "/" 一条 ⇒ 装进 eMMC 之后系统不挂 /boot/efi，
+    # 凡是依赖 ESP 已挂载的工具（grub-install、部分引导脚本、查看引导器的
+    # 脚本）都会说"找不到 ESP"。qm1-firstboot 自己是会挂 ESP 的，但那是
+    # 它自己的逻辑，不代表系统里有一条正常的 ESP 挂载。
+    #
+    # 用卷标而不是 UUID：ESP 是 FAT32，卷标在 make-esp.sh 里写死成
+    # $QM1_ESP_LABEL，装机时整盘 dd 会把它一起带走，所以标签订得住。
+    #
+    # nofail + device-timeout 是关键：**ESP 挂不上绝不能挡住开机**。
+    # 我们这台机器的 Wi-Fi 是唯一链路，任何"开机要等某个挂载"的设计都会
+    # 变成"没有网络就没有 SSH"。
+    if ! grep -qE '^[^#]*[[:space:]]/boot/efi[[:space:]]' "$ROOTFS/etc/fstab"; then
+        mkdir -p "$ROOTFS/boot/efi"
+        {
+            echo "# ESP：装进 eMMC 之后系统自己就能挂上引导分区"
+            echo "LABEL=$QM1_ESP_LABEL /boot/efi vfat defaults,noatime,nofail,x-systemd.device-timeout=10s 0 2"
+        } >> "$ROOTFS/etc/fstab"
+        log "已向 fstab 补上 ESP 挂载条目（LABEL=$QM1_ESP_LABEL → /boot/efi，nofail）"
+    fi
 fi
 
 # 发行版名（菜单标题用）：从 rootfs 的构建信息里读

@@ -2,6 +2,11 @@
 Description=Install QM1 Debian to the eMMC (triggered by the kernel argument qm1.install=1)
 Documentation=file:/usr/local/sbin/qm1-install-to-emmc
 ConditionKernelCommandLine=qm1.install=1
+# 已经装过就别再装一次 —— 原来只有内核命令行这一个屏障，
+# /etc/qm1-installed-to-emmc 写进了目标系统却没有任何人读它。
+# 从 eMMC 启动时如果目标 ESP 上还是安装菜单（源 ESP 缺 grub-normal.cfg 的情况），
+# 这条菜单会被再次选中；没有这个条件就会重跑一遍、再擦一次盘。
+ConditionPathExists=!/etc/qm1-installed-to-emmc
 After=local-fs.target systemd-udevd.service
 RequiresMountsFor=/
 

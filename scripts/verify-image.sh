@@ -362,6 +362,16 @@ check_link /etc/resolv.conf /usr/lib/systemd/resolv.conf \
 check_exists /usr/lib/systemd/resolv.conf "systemd-resolved 的 stub 文件本体"
 check_content /etc/passwd '^qm1:' "有可登录账号 qm1（口令由安装器装机时生成）"
 check_content /etc/fstab '^[^#]*[[:space:]]/[[:space:]]' "fstab 里有根分区条目（systemd 才能按 fstab 管理根、fsck-root 才有意义）"
+# ★ ESP 的挂载条目：装进 eMMC 之后系统自己就能挂上引导分区。
+#   nofail + device-timeout 是要害 —— ESP 挂不上绝不能挡开机
+#   （这台机器的 Wi-Fi 是唯一链路，开机要等任何东西都会变成"没有网络就没有 SSH"）。
+check_content /etc/fstab '^[^#]*[[:space:]]/boot/efi[[:space:]].*nofail' \
+    "fstab 里有 ESP 挂载条目（且带 nofail，ESP 挂不上不挡开机）"
+check_exists /etc/systemd/system/qm1-install.service "装到 eMMC 的安装单元"
+# 已装过就别再装一次：/etc/qm1-installed-to-emmc 原来写了却没人读，
+# 从 eMMC 启动时若目标 ESP 上还是安装菜单，会被再次选中 → 重跑一遍再擦一次盘。
+check_content /etc/systemd/system/qm1-install.service '^ConditionPathExists=!/etc/qm1-installed-to-emmc$' \
+    "安装单元认安装记录（已装过就不该再装一遍）"
 check_exists /etc/systemd/system/qm1-wifi@.service "Wi-Fi 单元（wpa_supplicant）"
 check_content /etc/systemd/system/qm1-wifi@.service '^TimeoutStartSec=(1[2-9][0-9]|[2-9][0-9]{2,})' \
     "Wi-Fi 单元的超时 ≥120s（进程要来得及 fork 出来）"

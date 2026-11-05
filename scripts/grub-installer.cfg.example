@@ -21,24 +21,39 @@
 #   qm1.install.yes=1       非交互环境下也确认破坏性操作
 #                            （systemd 单元里跑，没有 TTY；不给这个参数，
 #                              安装器会在"确认覆盖 eMMC？"那一步停下）
+#   qm1.install.backup_dir=<目录>
+#                            整盘备份放在哪（必须是一块能放下 28.5GiB
+#                            的介质上的目录，路径不能含空格）。
+#                            菜单里的 ① 没给这个参数时，安装器会依次找：
+#                            安装介质自己的挂载点 → 别的可写文件系统
+#                            → 安装介质尾部未分区空间。
 #
 # 安装动作由 systemd 单元 qm1-install.service 执行
 # （ConditionKernelCommandLine=qm1.install=1，所以正常启动不会误触发）。
 
-set timeout=8
+# ★ 超时与默认项是安全设计，不是随手写的：
+#   默认项必须是**不写盘**的那一条。原来默认项就是"安装到 eMMC"，
+#   插上 U 盘什么都不选，8 秒后就开始擦 eMMC —— 没有任何二次确认。
+#   现在：默认项 = 第 0 条（试用系统，只读盘）；破坏性的安装要自己选。
+#   GRUB 的 default 从 0 开始数，所以"第 0 条"写 0。
+#   超时 30 秒后自动落到默认项（还是安全的）。
+set timeout=30
 set default=0
 
 search --label @ESP_LABEL@ --set=root
 
-# ① 安装到 eMMC：备份 → 写分区 → 校验 → 换成正常菜单
-menuentry "① 安装 QM1 @SUITE_AMD64@ 到 eMMC（备份 → 写入 → 校验）" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1
+# ① 试用：只启动，不碰 eMMC（默认项；先跑 qm1-selftest 看驱动）
+menuentry "① 试用系统（不写盘，可先跑驱动自检）" {
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd.img
 }
 
-# ② 试用：只启动，不碰 eMMC（先跑 qm1-selftest 看驱动）
-menuentry "② 试用系统（不写盘，可先跑驱动自检）" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
+# ② 安装到 eMMC：备份 → 写分区 → 校验 → 换成正常菜单
+#    ★ 这一条会清空 eMMC 上的全部内容，并先把原盘整盘备份一份。
+#      备份放不下 28.5GiB 就装不成（安装器会明确告诉你怎么办）。
+menuentry "② 安装 QM1 @SUITE_AMD64@ 到 eMMC（会清空 eMMC，先整盘备份）" {
+    echo "这一条会把 eMMC 上的内容全部清掉（先做整盘备份）。确定请按回车。"
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1
     initrd /initrd.img
 }
 
@@ -48,4 +63,6 @@ menuentry "③ GRUB 命令行（救援）" {
     echo "  set root=UUID=<root_uuid>"
     echo "  linux  /vmlinuz root=UUID=<root_uuid> ro console=tty0 console=ttyS0,115200n8 intel_idle.max_cstate=1"
     echo "  initrd /initrd.img"
+    echo "装到 eMMC（带备份目录）的手工示例："
+    echo "  linux  /vmlinuz root=UUID=<root_uuid> ro qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1 qm1.install.backup_dir=/media/backup"
 }

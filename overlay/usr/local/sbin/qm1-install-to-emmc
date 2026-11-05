@@ -132,6 +132,7 @@ while [ $# -gt 0 ]; do
         --ssh-password) SSH_PASSWORD="$2"; shift 2 ;;
         --hostname) HOSTNAME_CFG="$2"; shift 2 ;;
         --backup-dir) BACKUP_DIR="$2"; shift 2 ;;
+        --force-kind) FORCE_KIND="$2"; shift 2 ;;
         --lib) QM1_INSTALL_LIB="$2"; shift 2 ;;
         --source-root) SRC_ROOT_OVERRIDE="$2"; shift 2 ;;
         --source-esp) SRC_ESP_OVERRIDE="$2"; shift 2 ;;
@@ -158,11 +159,21 @@ fi
 #   qm1.install.mode=emmc|media
 #   qm1.install.yes=1
 #   qm1.install.target=/dev/mmcblk1
+#   qm1.install.backup_dir=<目录>
+#
+# ★ qm1.install.backup_dir 是给"备份放哪"补的通道。
+#   覆盖 eMMC 之前必须有一份能放下整盘（28.5GiB）的备份，而菜单①所在的
+#   安装介质自己那点空间根本放不下 —— 没有这个参数，现场就只能手动敲命令
+#   跑安装器（GRUB 里按 c / e 编辑命令行），门槛太高。
+#   路径里不能有空格（内核参数按空格切分），所以只能给无空格的路径。
 for _w in $(cat /proc/cmdline 2>/dev/null || true); do
     case "$_w" in
         qm1.install.mode=*)   MODE="${_w#qm1.install.mode=}" ;;
         qm1.install.yes=1)    ASSUME_YES=1 ;;
         qm1.install.target=*) TARGET="${_w#qm1.install.target=}" ;;
+        qm1.install.backup_dir=*)
+            BACKUP_DIR="${_w#qm1.install.backup_dir=}"
+            ;;
     esac
 done
 # 优先级：命令行 > 环境变量（QM1_INSTALL_MODE / QM1_INSTALL_TARGET 等在上面的
@@ -199,10 +210,16 @@ SRC_ESP="$SRC_ESP_OVERRIDE"
 if [ -z "$SRC_ESP" ]; then
     for p in $(lsblk -no NAME "$SRC_DISK" 2>/dev/null | grep -v '^$' || true); do
         [ "$p" = "$(basename "$SRC_PART")" ] && continue
-        if lsblk -no FSTYPE "/dev/$p" 2>/dev/null | grep -qi vfat; then
-            SRC_ESP="/dev/$p"
-            break
-        fi
+        # ★ 不要写 `lsblk ... | grep -qi vfat`：管道里 grep 一命中就退，
+        #   上游 lsblk 还在写就被 SIGPIPE 打死（141），而本脚本开了
+        #   pipefail ⇒ "找到了"会被误判成"没找到"。先取值再判断。
+        _p_fs="$(lsblk -no FSTYPE "/dev/$p" 2>/dev/null || true)"
+        case "$_p_fs" in
+            *[Vv][Ff][Aa][Tt])
+                SRC_ESP="/dev/$p"
+                break
+                ;;
+        esac
     done
 fi
 [ -n "$SRC_ESP" ] || die "在 $SRC_DISK 上找不到 FAT32 的 ESP 分区"
@@ -241,7 +258,10 @@ device_kind() {
         SDIO*) echo "sdio"; return ;;
     esac
     if [ "$(cat "$_dk_d/removable" 2>/dev/null || echo 0)" = "1" ]; then echo "removable"; return; fi
-    if [ -n "$_dk_dev" ] && printf '%s' "$_dk_dev" | grep -q '/usb'; then echo "usb"; return; fi
+    # 同上：不用管道 + grep -q（SIGPIPE 会让 pipefail 把"是"判成"不是"）。
+    case "$_dk_dev" in
+        */usb*) echo "usb"; return ;;
+    esac
     # 是 MMC 设备但读不到 type（老内核 / 没暴露）：不猜，交给调用方显式指定
     case "$_dk_name" in
         mmcblk*) echo "mmc-unknown"; return ;;
@@ -310,6 +330,14 @@ fi
 
 [ -b "$TARGET" ] || die "找不到目标设备 $TARGET"
 TARGET_KIND="$(device_kind "$(basename "$TARGET")")"
+if [ -n "$FORCE_KIND" ]; then
+    # 环设备上跑不了"内核报 MMC 类型"这条路（CI 的假 eMMC 是 loop 设备），
+    # 所以给一个显式的类型覆盖开关 —— 主机侧脚本早就有 --force-kind，
+    # 设备侧没有 ⇒ **设备侧的 mode=emmc 分支在 CI 里一次都没跑过**，
+    # 而两个 P0 缺陷恰好都藏在那条分支里。
+    warn "--force-kind：把目标 $TARGET 的类型强制认作 ${FORCE_KIND}（真实类型 ${TARGET_KIND}）"
+    TARGET_KIND="$FORCE_KIND"
+fi
 case "$MODE" in
     auto)
         if [ "$TARGET_KIND" = "emmc" ]; then MODE="emmc"; else MODE="media"; fi
@@ -543,6 +571,9 @@ TARGET_BYTES="$(blockdev --getsize64 "$TARGET")"
 TARGET_MIB=$(( TARGET_BYTES / 1048576 ))
 STAMP="$(date +%Y%m%d-%H%M%S)"
 BACKUP_FILE=""
+# 恢复命令（把备份写回目标）。尾部备份不是文件，而是"介质 + 字节偏移"，
+# 所以命令必须带偏移；用伪路径当 dd 的 if= 是错的（用户照抄必然失败）。
+BACKUP_RESTORE_CMD=""
 BACKUP_SRC=""        # 备份数据所在（文件或裸设备）
 BACKUP_BASE=0        # 备份映像的字节 0 在 BACKUP_SRC 里的偏移
 
@@ -625,6 +656,22 @@ if [ "$MODE" = "emmc" ]; then
             break
         done
         if [ -z "$BACKUP_METHOD" ]; then
+            # ★ 再看**别的**文件系统（第二支 U 盘、外置硬盘……）。
+            #   这台机器只有一个 USB-A 口，常见做法是"大 U 盘既当启动盘
+            #   又当备份盘"（走下面的尾部未分区空间），但插了第二块盘
+            #   时也该自动用上，而不是逼用户去敲 --backup-dir。
+            for _mp in $(findmnt -rn -o TARGET 2>/dev/null | sort -u); do
+                case "$_mp" in
+                    /|/boot|/boot/efi|/efi|/proc|/sys|/dev|/dev/shm|/run) continue ;;
+                esac
+                [ -d "$_mp" ] && [ -w "$_mp" ] || continue
+                need="$(avail_bytes "$_mp")"
+                [ "${need:-0}" -ge "$TARGET_BYTES" ] || continue
+                BACKUP_METHOD="dir:$_mp"
+                break
+            done
+        fi
+        if [ -z "$BACKUP_METHOD" ]; then
             _tail="$(source_tail_bytes)"
             if [ "${_tail:-0}" -ge "$TARGET_BYTES" ]; then
                 BACKUP_METHOD="raw:$SRC_DISK"
@@ -632,8 +679,11 @@ if [ "$MODE" = "emmc" ]; then
         fi
     fi
     [ -n "$BACKUP_METHOD" ] || die "覆盖 eMMC 前必须能放下整盘备份（需要 ${TARGET_BYTES} 字节），但没有找到合适的备份位置。
-请用 --backup-dir <大容量介质上的目录> 指定；
-或把安装镜像 dd 到一个比镜像大 ≥28.5GiB 的 U 盘（尾部未分区空间会自动用作备份区）。"
+可用办法（按推荐顺序）：
+  1) 用内核参数 qm1.install.backup_dir=<路径> 指定另一块有 ≥28.5GiB 空间的介质上的目录；
+  2) 插一支容量 ≥（安装镜像 + 28.5GiB）的 U 盘当启动盘 —— 尾部未分区空间会自动用作备份区；
+  3) 插第二块大盘（≥28.5GiB 可用）—— 安装器会自动挑一个可写的挂载点。
+注意：单支 32GiB 的 U 盘装不下（镜像本身约 6.3GiB，还要再放 28.5GiB 的备份）。"
 
     case "$BACKUP_METHOD" in
         dir:*)
@@ -643,22 +693,35 @@ if [ "$MODE" = "emmc" ]; then
             dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
             BACKUP_SRC="$BACKUP_FILE"
             BACKUP_BASE=0
+            BACKUP_RESTORE_CMD="dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync"
             ;;
         raw:*)
             BACKUP_RAW_DEV="${BACKUP_METHOD#raw:}"
             BACKUP_BASE="$(source_used_end)"
             BACKUP_FILE="${BACKUP_RAW_DEV}@${BACKUP_BASE}"
             log "整盘备份 → 安装介质尾部未分区空间（$BACKUP_RAW_DEV 偏移 ${BACKUP_BASE}，${TARGET_MIB} MiB，请耐心）"
-            dd if="$TARGET" of="$BACKUP_RAW_DEV" bs=4M seek=$(( BACKUP_BASE / 1048576 )) \
-               conv=notrunc,fsync status=progress
+            # ★ 偏移必须按**字节**算，不能按 4MiB 块算。
+            #   dd 的 seek 以 bs 的块为单位：写 `seek=$((BASE/1048576))` 配 bs=4M
+            #   实际落点是 4×BASE（MiB 数当成了 4MiB 块数）——备份会写到
+            #   四倍偏移处，随后按正确偏移读回校验必然不一致，安装永远走不完。
+            #   这里用 oflag=seek_bytes 让 seek 直接按字节解释；
+            #   同一文件里尾部清零用的也是字节精确写法，两处必须一致。
+            dd if="$TARGET" of="$BACKUP_RAW_DEV" bs=4M seek="$BACKUP_BASE" \
+               oflag=seek_bytes conv=notrunc,fsync status=progress
             BACKUP_SRC="$BACKUP_RAW_DEV"
+            # 恢复命令也必须带偏移 —— 备份不在文件里，而在介质的尾部。
+            BACKUP_RESTORE_CMD="dd if=\"$BACKUP_RAW_DEV\" of=\"$TARGET\" bs=4M seek=\"$BACKUP_BASE\" oflag=seek_bytes conv=notrunc,fsync"
             ;;
     esac
 
     verify_backup_partitions \
         || die "备份校验失败（逐分区 sha256 不一致）—— 中止。没有对 $TARGET 做任何写入。
 备份位置：$BACKUP_FILE
-请先检查介质（这通常意味着 U 盘读写有问题），不要在备份不可信的情况下继续。"
+先查这三样，再怀疑别的：
+  1) 备份是不是写在了预期位置（尾部备份是按**字节**偏移写的：$BACKUP_RAW_DEV 偏移 $BACKUP_BASE）；
+  2) 介质是不是掉盘/掉电（U 盘质量、供电）；
+  3) 目标盘在备份期间有没有被改过（有人插拔了设备）。
+备份不可信就不要继续 —— 这一步没过就等于没有退路。"
 
     if [ "$ASSUME_YES" != 1 ]; then
         ask "备份已完成并逐分区校验通过，确认覆盖 ${TARGET}？" "no"
@@ -668,11 +731,13 @@ else
     AVAIL="$(avail_bytes /var/tmp || echo 0)"
     if [ "${AVAIL:-0}" -ge "$TARGET_BYTES" ]; then
         BACKUP_FILE="/var/tmp/qm1-target-preinstall-$STAMP.img"
+        BACKUP_RESTORE_CMD="dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync"
         log "介质空间足够，顺手做一份整盘备份 → $BACKUP_FILE"
         dd if="$TARGET" of="$BACKUP_FILE" bs=4M conv=fsync status=progress
         sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
     else
         BACKUP_FILE="/var/tmp/qm1-target-metadata-$STAMP.img"
+        BACKUP_RESTORE_CMD="（这只是分区表与前 16 MiB 的元数据备份，不是整盘）"
         log "介质空间不够整盘备份，只备份分区表与前 16 MiB → $BACKUP_FILE"
         dd if="$TARGET" of="$BACKUP_FILE" bs=1M count=16 conv=fsync status=none
         sha256sum "$BACKUP_FILE" > "$BACKUP_FILE.sha256"
@@ -803,14 +868,14 @@ dd if="$SRC_ESP" of="$PART1" bs=4M conv=fsync status=progress \
     || die "复制 ESP 失败 —— 中止。目标盘处于写了一半的状态，不要从这里启动。
 可用恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+     用它恢复：$BACKUP_RESTORE_CMD
   2) 重新跑一遍安装（备份会自动再存一份）。"
 log "复制根文件系统：$SRC_ROOT → $PART2"
 dd if="$SRC_ROOT" of="$PART2" bs=4M conv=fsync status=progress \
     || die "复制根文件系统失败 —— 中止。目标盘处于写了一半的状态，不要从这里启动。
 可用恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+     用它恢复：$BACKUP_RESTORE_CMD
   2) 重新跑一遍安装（备份会自动再存一份）。"
 
 if [ "$SRC_ROOT" = "$CUR_ROOT_SRC" ]; then
@@ -861,7 +926,7 @@ if [ "$rc" -ne 0 ]; then
 $TARGET 处于写了一半的状态，不要从这里启动。
 可用恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+     用它恢复：$BACKUP_RESTORE_CMD
   2) 重新跑一遍安装（备份会自动再存一份）。"
         fi
         if esp_has_boot_files "$PART1"; then
@@ -871,7 +936,7 @@ $TARGET 处于写了一半的状态，不要从这里启动。
 $TARGET 处于写了一半的状态，不要从这里启动。
 可用恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+     用它恢复：$BACKUP_RESTORE_CMD
   2) 重新跑一遍安装（备份会自动再存一份）。"
         fi
     else
@@ -882,7 +947,7 @@ $TARGET 处于写了一半的状态，不要从这里启动。
 $TARGET 现在处于**写了一半**的状态，不要从这里启动。
 可用的恢复手段：
   1) 上面 [4/6] 的整盘备份：$BACKUP_FILE
-     用它恢复：dd if=\"$BACKUP_FILE\" of=\"$TARGET\" bs=4M conv=fsync
+     用它恢复：$BACKUP_RESTORE_CMD
   2) 重新跑一遍安装（备份会自动再存一份）。
 先把 U 盘插好、别拔，然后重新启动到安装介质再试。"
     fi
@@ -1046,8 +1111,12 @@ fi
 # 用户重开机看到的只有"开不了机"，而报告却说装好了。
 # 只有显式 --skip-efi-entry 才允许带着"没登记"的状态收场。
 if [ "$EFI_ENTRY_DONE" != "yes" ] && [ "$SKIP_EFI_ENTRY" -ne 1 ]; then
-    die "EFI 启动项没有登记成功 —— 不能报成功（固件里没有指向 $TARGET 的启动项，重开机很可能开不了机）。
-系统本身已经写好了（目标 ${TARGET}，根分区 ${PART2}），缺的是启动项。
+    die "EFI 启动项没有登记成功 —— 不能报成功（固件里没有指向 $TARGET 的启动项）。
+系统本身已经装好了（目标 ${TARGET}，根分区 ${PART2}），缺的是启动项。
+★ 别重跑安装：重跑会把刚装好的系统再擦一遍。
+兜底：多数固件会自动从 \\EFI\\BOOT\\ 找引导器，ESP 上的 BOOTIA32.EFI 就是为此放的
+（BOOTX64.EFI 只有在固件是 64 位时才加载得了，别优先用它）——
+所以重开机时如果固件菜单里能看到 eMMC，就选它；看不到再用上面的 efibootmgr 命令登记。
 补救（进入已装好的系统后执行，或从 U 盘的安装环境执行）：
   efibootmgr -c -d $TARGET -p $PART1_NO -L \"QM1 Debian\" -l '\\EFI\\BOOT\\BOOTIA32.EFI'
   efibootmgr -o 1

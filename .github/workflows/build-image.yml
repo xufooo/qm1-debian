@@ -1079,11 +1079,41 @@ jobs:
             || { echo "::error::安装菜单缺少 qm1.install.mode=emmc（目标不明确）"; exit 1; }
           grep -q 'qm1.install.yes=1' build/out/installer-grub.cfg \
             || { echo "::error::安装菜单缺少 qm1.install.yes=1（非交互下会停在确认步骤）"; exit 1; }
+          # 安全：安装菜单的**第一条（默认项）必须是不写盘的那条**。
+          # 原来默认项就是"安装到 eMMC" + timeout=8 ⇒ 插上 U 盘什么都不选，
+          # 8 秒后就开始擦 eMMC，没有任何二次确认。
+          FIRST_LINUX="$(awk '
+            /^menuentry / { if (!seen) { seen = 1 } ; next }
+            seen && /^[[:space:]]*linux[[:space:]]/ { print; exit }
+          ' build/out/installer-grub.cfg)"
+          case "$FIRST_LINUX" in
+            *qm1.install=1*)
+              echo "::error::安装菜单的第一条（默认项）带 qm1.install=1 —— 插上 U 盘就会自动擦 eMMC"; exit 1 ;;
+          esac
+          grep -q 'qm1.install.backup_dir' build/out/installer-grub.cfg \
+            || { echo "::error::安装菜单没有讲怎么给备份目录（qm1.install.backup_dir）"; exit 1; }
           # 4) 设备端要能分区：sfdisk 来自 fdisk 包；要登记 UEFI 启动项：efibootmgr
           [ -x "$ROOT/usr/sbin/sfdisk" ] || [ -x "$ROOT/usr/bin/sfdisk" ] \
             || { echo "::error::镜像里没有 sfdisk（设备上无法给 eMMC 分区）"; exit 1; }
           { [ -x "$ROOT/usr/sbin/efibootmgr" ] || [ -x "$ROOT/usr/bin/efibootmgr" ]; } \
             || { echo "::error::镜像里没有 efibootmgr（装完无法登记 UEFI 启动项）"; exit 1; }
+          # ★ 静态守卫：设备侧安装器的三个要害
+          #   1) 尾部备份的 dd 必须按**字节**偏移（oflag=seek_bytes）。
+          #      原来写 seek=$((BASE/1048576)) 配 bs=4M ⇒ 实际落到 4×BASE，
+          #      备份写错位置 ⇒ 按正确偏移读回校验必然不一致 ⇒ 真机安装永远走不完。
+          #   2) 必须有 qm1.install.backup_dir —— 菜单①所在的安装介质放不下 28.5GiB，
+          #      没有这个通道就只剩"手敲命令"一条路。
+          #   3) 必须有 --force-kind —— 否则设备侧 mode=emmc 分支在 CI 里零覆盖，
+          #      而 P0 恰好藏在那条分支里。
+          INSTALLER="$ROOT/usr/local/sbin/qm1-install-to-emmc"
+          [ -f "$INSTALLER" ] \
+            || { echo "::error::镜像里没有 qm1-install-to-emmc"; exit 1; }
+          grep -q 'oflag=seek_bytes' "$INSTALLER" \
+            || { echo "::error::尾部备份的 dd 没有按字节偏移（缺 oflag=seek_bytes）"; exit 1; }
+          grep -q 'qm1.install.backup_dir' "$INSTALLER" \
+            || { echo "::error::安装器没有 qm1.install.backup_dir（真机没法给备份位置）"; exit 1; }
+          grep -q -- '--force-kind' "$INSTALLER" \
+            || { echo "::error::安装器没有 --force-kind（mode=emmc 分支没法进 CI）"; exit 1; }
           echo "OK   安装介质（安装菜单 + 正常菜单 + 安装脚本 + sfdisk + efibootmgr）齐备"
           zstd -12 -T0 --long=27 -f build/out/qm1-installer.img -o build/out/qm1-installer.img.zst
           ls -lh build/out/qm1-installer.img.zst
