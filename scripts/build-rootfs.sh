@@ -31,6 +31,7 @@ HOOKS_DIR="$REPO_ROOT/hooks"
 KERNEL_VERSION=""   # 空 = 用发行版元包；非空 = 固定某个 point release
 WIFI_MODULE_DEB=""  # 空 = 不装外部 Wi-Fi 模块；非空 = 装这个打了补丁的 .deb
 RTW88_MODULE_DEB="" # 空 = 不装 rtw88 回移模块；非空 = 装这个 .deb（推荐路径）
+BT_HCIATTACH_DEB="" # 空 = 不装蓝牙厂商初始化包；非空 = 装这个 .deb
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -44,6 +45,7 @@ while [ $# -gt 0 ]; do
         --kernel-version) KERNEL_VERSION="$2"; shift 2 ;;
         --wifi-module-deb) WIFI_MODULE_DEB="$2"; shift 2 ;;
         --rtw88-module-deb) RTW88_MODULE_DEB="$2"; shift 2 ;;
+        --bt-hciattach-deb) BT_HCIATTACH_DEB="$2"; shift 2 ;;
         *) die "未知参数：$1" ;;
     esac
 done
@@ -165,6 +167,19 @@ if [ -n "$RTW88_MODULE_DEB" ]; then
     export QM1_RTW88_MODULE_DEB
 else
     export QM1_RTW88_MODULE_DEB=""
+fi
+
+# 蓝牙：RTL8723BS 的 BT 部分是 ACPI 枚举的 UART（OBDA8723/OBDA0623），
+# 主线没有 Realtek UART HCI 驱动，需要用户态 rtk_hciattach 下发厂商固件；
+# 空 = 不装（蓝牙不可用）。
+if [ -n "$BT_HCIATTACH_DEB" ]; then
+    [ -f "$BT_HCIATTACH_DEB" ] || die "--bt-hciattach-deb 指向的文件不存在：$BT_HCIATTACH_DEB"
+    _bt_deb_dir="$(cd "$(dirname "$BT_HCIATTACH_DEB")" && pwd)"
+    _bt_deb_name="$(basename "$BT_HCIATTACH_DEB")"
+    QM1_BT_HCIATTACH_DEB="$_bt_deb_dir/$_bt_deb_name"
+    export QM1_BT_HCIATTACH_DEB
+else
+    export QM1_BT_HCIATTACH_DEB=""
 fi
 
 log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"

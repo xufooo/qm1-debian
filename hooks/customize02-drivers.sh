@@ -324,6 +324,45 @@ else
     RTW88_MODULE_STATE="absent"
 fi
 
+# ---------- 4d. 蓝牙：RTL8723BS 的 BT 部分（ACPI UART + 厂商固件下发） ----------
+# QM1 的蓝牙是 combo 芯片的 BT 部分，经 **ACPI 枚举的 UART** 挂在主机上
+# （ASUS 官方 Win8 驱动 rtkuart.inf：ACPI\VEN_OBDA&DEV_8723 / 0623）。
+# Linux 主线没有 Realtek UART HCI 驱动，缺的是「把厂商固件刷进芯片并初始化」
+# 这一步 —— 由用户态 rtk_hciattach（lwfinger/rtl8723bs_bt）完成，
+# 之后内核 btuart（CONFIG_BT_HCIUART）接手同一个串口。
+# QM1_BT_HCIATTACH_DEB 指向 scripts/build-bt-hciattach.sh 产出的 .deb。
+if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
+    _bt_deb_name="$(basename "$QM1_BT_HCIATTACH_DEB")"
+    log "安装蓝牙厂商初始化包：$_bt_deb_name"
+    cp "$QM1_BT_HCIATTACH_DEB" "$TARGET/tmp/$_bt_deb_name"
+    if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_bt_deb_name"; then
+        rm -f "$TARGET/tmp/$_bt_deb_name"
+        die "蓝牙包安装失败：$_bt_deb_name"
+    fi
+    rm -f "$TARGET/tmp/$_bt_deb_name"
+    [ -x "$TARGET/usr/sbin/rtk_hciattach" ] \
+        || die "装完 deb 但镜像里没有 /usr/sbin/rtk_hciattach"
+    for _bt_fw in rtlbt_fw rtlbt_config; do
+        [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_fw" ] || die "蓝牙固件 $_bt_fw 缺失"
+    done
+    _bt_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
+    if [ -n "$_bt_kver" ] && [ -f "$TARGET/boot/config-$_bt_kver" ]; then
+        grep -qE '^CONFIG_BT_HCIUART=y$' "$TARGET/boot/config-$_bt_kver" \
+            || warn "内核没有 CONFIG_BT_HCIUART=y —— 厂商固件下发后蓝牙控制器不会被内核接管"
+    fi
+    # 开机自启（用符号链接，避免在 chroot 里跑 systemctl 的副作用）
+    mkdir -p "$TARGET/etc/systemd/system/multi-user.target.wants"
+    ln -sf /lib/systemd/system/qm1-bluetooth.service \
+        "$TARGET/etc/systemd/system/multi-user.target.wants/qm1-bluetooth.service"
+    BT_HCIATTACH_STATE="installed:rtk_hciattach:$_bt_deb_name"
+else
+    if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ]; then
+        die "QM1_BT_HCIATTACH_DEB 指向的文件不存在：$QM1_BT_HCIATTACH_DEB"
+    fi
+    warn "未提供 QM1_BT_HCIATTACH_DEB：镜像里没有 rtk_hciattach，内置蓝牙（ACPI UART）不可用"
+    BT_HCIATTACH_STATE="absent"
+fi
+
 # ---------- 5. out-of-tree / DKMS 驱动（可选） ----------
 if [ -n "${QM1_DKMS_DEB_DIR:-}" ] && [ -d "$QM1_DKMS_DEB_DIR" ]; then
     log "安装外部驱动包：$QM1_DKMS_DEB_DIR"
@@ -388,6 +427,7 @@ i915|DRM_I915|Intel HD Graphics Gen7（HDMI 输出）|
 snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
+btuart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口，编进内核）|
 r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，主线 staging 驱动）|
 brcmfmac|BRCMFMAC|Broadcom Wi-Fi（主线驱动）|
 iwlwifi|IWLWIFI|Intel Wi-Fi（主线驱动）|
@@ -444,6 +484,17 @@ MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
     echo "${WIFI_MODULE_STATE:-absent}"
     echo "--- rtw88 回移模块 ---"
     echo "${RTW88_MODULE_STATE:-absent}"
+    echo "--- 蓝牙厂商初始化包（rtk_hciattach） ---"
+    echo "${BT_HCIATTACH_STATE:-absent}"
+    if [ -n "${QM1_BT_HCIATTACH_DEB:-}" ] && [ -f "$QM1_BT_HCIATTACH_DEB" ]; then
+        for _bt_blob in rtlbt_fw rtlbt_config rtlbt_fw_new; do
+            if [ -f "$TARGET/lib/firmware/rtl_bt/$_bt_blob" ]; then
+                echo "bt_firmware_$_bt_blob=ok"
+            else
+                echo "bt_firmware_$_bt_blob=-"
+            fi
+        done
+    fi
 } > "$MANIFEST"
 
 # 关键驱动判定：module 或 builtin 都算有，只有 absent 才致命
