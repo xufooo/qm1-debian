@@ -87,8 +87,14 @@ for cmd in make gcc git curl dpkg-deb modinfo; do
     command -v "$cmd" >/dev/null 2>&1 || die "missing tool: $cmd"
 done
 
-KSRC="/usr/src/linux-headers-${KVER}/build"
-[ -d "$KSRC" ] || die "kernel build tree not found: $KSRC (install linux-headers-${KVER})"
+# Debian 的 linux-headers-<abi> 不提供 /usr/src/linux-headers-<abi>/build（那是
+# Red Hat / kernel.org 的布局）；Debian 的构建树是 /usr/src/linux-headers-<abi>，
+# 并由 /lib/modules/<abi>/build 指向它。两个路径都认，优先用 /lib/modules 那个。
+KSRC=""
+for cand in "/lib/modules/${KVER}/build" "/usr/src/linux-headers-${KVER}" "/usr/src/linux-headers-${KVER}/build"; do
+    if [ -d "$cand" ]; then KSRC="$cand"; break; fi
+done
+[ -n "$KSRC" ] || die "kernel build tree not found (tried /lib/modules/${KVER}/build and /usr/src/linux-headers-${KVER}); install linux-headers-${KVER}"
 
 WORK="$OUT_DIR/rtw88-build"
 rm -rf "$WORK"
@@ -117,14 +123,24 @@ fetch_to() {   # fetch_to <url> <target>
 build_upstream() {
     log "building the upstream rtw88 8723b backport"
 
-    log "fetching the rtw88 headers of $KERNEL_REF"
-    rm -rf "$WORK/linux"
-    git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$KERNEL_REF" \
-        "$KERNEL_REPO" "$WORK/linux" \
-        || { warn "kernel tree clone failed"; return 1; }
-    git -C "$WORK/linux" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
-        || { warn "sparse checkout failed"; return 1; }
-    RTW88_DIR="$WORK/linux/drivers/net/wireless/realtek/rtw88"
+    # 目标内核自带的 rtw88 头文件最理想：与内核版本严格一致，也省掉一次大仓库 clone。
+    local sysrtw="$KSRC/drivers/net/wireless/realtek/rtw88"
+    if [ -f "$sysrtw/main.h" ]; then
+        log "using the rtw88 headers shipped with $KVER"
+        RTW88_DIR="$WORK/rtw88-headers"
+        rm -rf "$RTW88_DIR"
+        mkdir -p "$RTW88_DIR"
+        cp "$sysrtw"/*.h "$RTW88_DIR/" 2>/dev/null || true
+    else
+        log "fetching the rtw88 headers of $KERNEL_REF"
+        rm -rf "$WORK/linux"
+        git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$KERNEL_REF" \
+            "$KERNEL_REPO" "$WORK/linux" \
+            || { warn "kernel tree clone failed"; return 1; }
+        git -C "$WORK/linux" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
+            || { warn "sparse checkout failed"; return 1; }
+        RTW88_DIR="$WORK/linux/drivers/net/wireless/realtek/rtw88"
+    fi
     [ -f "$RTW88_DIR/main.h" ] || { warn "rtw88 headers are incomplete"; return 1; }
 
     local base="https://raw.githubusercontent.com/torvalds/linux/${UPSTREAM_REF}/drivers/net/wireless/realtek/rtw88"
