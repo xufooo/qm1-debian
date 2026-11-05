@@ -834,13 +834,17 @@ if [ -n "$wlan_mod" ]; then
             row PASS "Wi-Fi 驱动" "${wlan_mod}（rtw88 树外模块）"
             ;;
         *r8723bs_qm1*)
-            row PASS "Wi-Fi 驱动" "${wlan_mod}（打了补丁的树外 staging 模块）"
+            # 回退路径（打了 P1–P6 补丁的树外 staging 模块），不是出货驱动。
+            row WARN "Wi-Fi 驱动" "${wlan_mod}（这是**回退**路径，不是出货的 rtw88 模块；出货路径下不该出现它）"
             ;;
         *r8723bs*)
-            row WARN "Wi-Fi 驱动" "${wlan_mod}（发行版 staging 模块：有永久卡死路径，只是回退方案）"
+            # 发行版树内 staging 驱动：有已知的永久卡死路径，而且它能加载起来
+            # 本身就说明隔离没生效（udev 按 SDIO modalias 抢先绑定的老毛病）。
+            # ★ 这里必须 FAIL：出货标准是"跑在 rtw88 上"。
+            row FAIL "Wi-Fi 驱动" "${wlan_mod}（**发行版树内 staging 模块**：有永久卡死路径，且说明隔离没生效 ⇒ 查 /etc/modprobe.d/qm1-rtl8723bs-fallback.conf 是不是还在）"
             ;;
         *)
-            row WARN "Wi-Fi 驱动" "${wlan_mod}（不是本项目预期的模块名）"
+            row FAIL "Wi-Fi 驱动" "${wlan_mod}（不是本项目预期的模块名 ⇒ 隔离没生效）"
             ;;
     esac
     # 树内 staging 与树外模块都认同一个 SDIO id，必须确认实际绑定的是哪一个
@@ -858,7 +862,10 @@ elif mod_loaded rtw88_qm1 || mod_loaded r8723bs_qm1 || mod_loaded r8723bs; then
     row FAIL "Wi-Fi 驱动" \
         "模块已加载但没有无线接口 —— 出货模块装上了却绑不上设备（看 dmesg 里的 rtw88/rtw8723bs；常见原因：模块索引缺它、模块符号残缺 insmod 报 Unknown symbol、或树内 staging 抢先绑走了 SDIO 卡）"
 else
-    row WARN "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载"
+    # ★ 没有 Wi-Fi 驱动加载 = FAIL，不是 WARN。
+    #   自检的退出码只按 FAIL 计数，以前这里只 warn ⇒ 一台**完全没有 Wi-Fi**
+    #   的机器自检照样 exit 0，验收时看不出来。
+    row FAIL "Wi-Fi 驱动" "没有 Wi-Fi 驱动加载（出货模块是 rtw88_qm1；看 journalctl -u qm1-rtw88-8723bs.service 的失败原因，没有网络口可回退 ⇒ 需要现场处理）"
 fi
 # ★ 真机上再钉一次：QM1 那张 SDIO 卡（0x024c:0xb723）在不在、被谁认领。
 #   前面几条查的是"哪个模块绑着 wlan0"；这条查的是**卡本身**：
