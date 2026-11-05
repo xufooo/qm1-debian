@@ -144,6 +144,42 @@ else
     ok "带偏移的备份也能检出差异"
 fi
 
+echo "== 写入校验：镜像比分区小（安装器的真实情形） =="
+# 安装器把镜像 dd 进一个**按整块盘大小建出来的**分区：根分区 = 盘容量 -
+# ESP - 1MiB，而根文件系统镜像只有镜像那么大。所以校验必须只比镜像那几字节，
+# 拿整个分区去 sha256 永远对不上 —— 那会让每一次安装都停在"写入校验失败"。
+IMAGE="$WORK/rootfs.img"
+truncate -s 50M "$IMAGE"
+dd if=/dev/urandom of="$IMAGE" bs=1M count=50 status=none
+IMG_BYTES="$(stat -c%s "$IMAGE")"
+# 模拟 dd：把镜像写进分区开头
+dd if="$IMAGE" of="/dev/$root_name" bs=1M conv=notrunc status=none
+src_hash="$(sha256sum "$IMAGE" | awk '{print $1}')"
+dst_hash="$(qm1_hash_range "/dev/$root_name" 0 "$IMG_BYTES")"
+if [ -n "$dst_hash" ] && [ "$src_hash" = "$dst_hash" ]; then
+    ok "镜像写进更大的分区后，镜像范围内的 sha256 一致"
+else
+    bad "镜像写进更大的分区后校验不一致：$src_hash / $dst_hash"
+fi
+# 镜像范围内改一个字节，必须被发现
+printf 'Q' | dd of="/dev/$root_name" bs=1 seek=1048576 conv=notrunc status=none
+dst_hash="$(qm1_hash_range "/dev/$root_name" 0 "$IMG_BYTES")"
+if [ "$src_hash" != "$dst_hash" ]; then
+    ok "镜像范围内改一个字节被检出"
+else
+    bad "镜像范围内改了一个字节，校验却通过了"
+fi
+# 镜像范围之外（分区尾巴）改一个字节，不应影响镜像范围内的校验
+printf 'W' | dd of="/dev/$root_name" bs=1 seek=$(( IMG_BYTES + 4096 )) conv=notrunc status=none
+dd if="$IMAGE" of="/dev/$root_name" bs=1M conv=notrunc status=none
+printf 'W' | dd of="/dev/$root_name" bs=1 seek=$(( IMG_BYTES + 4096 )) conv=notrunc status=none
+dst_hash="$(qm1_hash_range "/dev/$root_name" 0 "$IMG_BYTES")"
+if [ "$src_hash" = "$dst_hash" ]; then
+    ok "镜像范围之外的改动不影响镜像范围内的校验"
+else
+    bad "镜像范围之外的改动影响了镜像范围内的校验"
+fi
+
 if [ "$fails" -eq 0 ]; then
     echo "install-lib 测试全部通过"
 else

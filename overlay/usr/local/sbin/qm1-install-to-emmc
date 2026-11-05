@@ -666,11 +666,21 @@ mount -o remount,rw / 2>/dev/null || warn "根文件系统改回可写失败（�
 
 # 逐分区校验必须放在"刚写完、还没做任何后续改动"的状态，
 # 否则 resize2fs / 换菜单之后 sha256 必然不同 → 误报失败。
+#
+# ★ 比较的是**镜像本身那几字节**，不是整个分区：
+#   根分区是按整块盘的大小建的（根分区 = 盘容量 - ESP - 1MiB），而根文件系统
+#   镜像只有镜像那么大；ESP 分区同理（按 MiB 向上取整）。拿整个分区去 sha256
+#   必然和镜像对不上 —— 那会让每一次安装都在这里中止，而原因看上去像
+#   "写盘失败"，其实写盘是好的。
 log "校验：逐分区比对 sha256（刚写入、未做后续改动的状态）"
+SRC_ESP_BYTES="$(stat -c%s "$SRC_ESP" 2>/dev/null || echo 0)"
+SRC_ROOT_BYTES="$(stat -c%s "$SRC_ROOT" 2>/dev/null || echo 0)"
+[ "$SRC_ESP_BYTES" -gt 0 ] || die "读不出 ESP 镜像大小：$SRC_ESP"
+[ "$SRC_ROOT_BYTES" -gt 0 ] || die "读不出根文件系统镜像大小：$SRC_ROOT"
 SRC_ESP_HASH="$(sha256sum "$SRC_ESP" | awk '{print $1}')"
-DST_ESP_HASH="$(sha256sum "$PART1" | awk '{print $1}')"
+DST_ESP_HASH="$(qm1_hash_range "$PART1" 0 "$SRC_ESP_BYTES")"
 SRC_ROOT_HASH="$(sha256sum "$SRC_ROOT" | awk '{print $1}')"
-DST_ROOT_HASH="$(sha256sum "$PART2" | awk '{print $1}')"
+DST_ROOT_HASH="$(qm1_hash_range "$PART2" 0 "$SRC_ROOT_BYTES")"
 
 rc=0
 if [ "$SRC_ESP_HASH" = "$DST_ESP_HASH" ]; then
