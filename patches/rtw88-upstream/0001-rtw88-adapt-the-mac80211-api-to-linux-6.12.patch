@@ -1,0 +1,101 @@
+Subject: [PATCH] rtw88: adapt the upstream tree to the Linux 6.12 mac80211 API
+
+The upstream rtw88 tree carries the real RTL8723B / RTL8723BS support, but
+its mac80211 glue uses the multi-radio callbacks that only newer kernels have
+and the MLO link_sta rate-control callback that 6.12 does not know at all.
+
+This patch keeps the upstream behaviour and removes only the parts that the
+6.12 kernel cannot express:
+
+  - mac80211.c: drop the unused "int radio_idx" parameter of the config,
+    set_rts_threshold, set_antenna and get_antenna callbacks (the QM1 has a
+    single radio) and use the pre-MLO sta_rc_update callback.
+  - rtw8723bs.c: drop the sdio_driver.shutdown callback, the member only
+    exists since Linux 6.14.
+  - tx.c: timer_container_of() is a newer kernel helper, use the plain
+    container_of() instead.
+
+The TX report purge timeout of the upstream tree is already the fixed 2500 ms
+value (RTW_TX_PROBE_TIMEOUT_LONG), so no local patch is needed for it.
+
+--- a/mac80211.c
++++ b/mac80211.c
+@@ -71,7 +71,7 @@
+ 	mutex_unlock(&rtwdev->mutex);
+ }
+ 
+-static int rtw_ops_config(struct ieee80211_hw *hw, int radio_idx, u32 changed)
++static int rtw_ops_config(struct ieee80211_hw *hw, u32 changed)
+ {
+ 	struct rtw_dev *rtwdev = hw->priv;
+ 	int ret = 0;
+@@ -716,8 +716,7 @@
+ 	mutex_unlock(&rtwdev->mutex);
+ }
+ 
+-static int rtw_ops_set_rts_threshold(struct ieee80211_hw *hw, int radio_idx,
+-				     u32 value)
++static int rtw_ops_set_rts_threshold(struct ieee80211_hw *hw, u32 value)
+ {
+ 	struct rtw_dev *rtwdev = hw->priv;
+ 
+@@ -806,7 +805,6 @@
+ }
+ 
+ static int rtw_ops_set_antenna(struct ieee80211_hw *hw,
+-			       int radio_idx,
+ 			       u32 tx_antenna,
+ 			       u32 rx_antenna)
+ {
+@@ -825,7 +823,6 @@
+ }
+ 
+ static int rtw_ops_get_antenna(struct ieee80211_hw *hw,
+-			       int radio_idx,
+ 			       u32 *tx_antenna,
+ 			       u32 *rx_antenna)
+ {
+@@ -941,10 +938,9 @@
+ 
+ static void rtw_ops_sta_rc_update(struct ieee80211_hw *hw,
+ 				  struct ieee80211_vif *vif,
+-				  struct ieee80211_link_sta *link_sta,
++				  struct ieee80211_sta *sta,
+ 				  u32 changed)
+ {
+-	struct ieee80211_sta *sta = link_sta->sta;
+ 	struct rtw_dev *rtwdev = hw->priv;
+ 	struct rtw_sta_info *si = (struct rtw_sta_info *)sta->drv_priv;
+ 
+@@ -988,7 +984,7 @@
+ 	.reconfig_complete	= rtw_reconfig_complete,
+ 	.hw_scan		= rtw_ops_hw_scan,
+ 	.cancel_hw_scan		= rtw_ops_cancel_hw_scan,
+-	.link_sta_rc_update	= rtw_ops_sta_rc_update,
++	.sta_rc_update		= rtw_ops_sta_rc_update,
+ 	.set_sar_specs          = rtw_ops_set_sar_specs,
+ #ifdef CONFIG_PM
+ 	.suspend		= rtw_ops_suspend,
+--- a/rtw8723bs.c
++++ b/rtw8723bs.c
+@@ -46,7 +46,6 @@
+ 	.id_table = rtw_8723bs_id_table,
+ 	.probe = rtw_sdio_probe,
+ 	.remove = rtw_sdio_remove,
+-	.shutdown = rtw_sdio_shutdown,
+ 	.drv = {
+ 		.pm = &rtw_sdio_pm_ops,
+ 	}
+--- a/tx.c
++++ b/tx.c
+@@ -178,8 +178,8 @@
+ 
+ void rtw_tx_report_purge_timer(struct timer_list *t)
+ {
+-	struct rtw_dev *rtwdev = timer_container_of(rtwdev, t,
+-						    tx_report.purge_timer);
++	struct rtw_dev *rtwdev = container_of(t, struct rtw_dev,
++					      tx_report.purge_timer);
+ 	struct rtw_tx_report *tx_report = &rtwdev->tx_report;
+ 	unsigned long flags;
+ 

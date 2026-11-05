@@ -52,6 +52,8 @@ DEB_NAME="qm1-rtw88-8723bs"
 # 本仓库对 vendor 树的本地补丁（patches/rtw88/*.patch）。这些补丁承载上游
 # 还没进 vendor 树的修复，例如 8723BS 的 TX report purge 超时（上游 4d688f22ebbf）。
 PATCH_DIR=""
+KERNEL_BUILD_DIR=""
+UPSTREAM_TREE=""
 
 log()  { printf '[rtw88] %s\n' "$*" >&2; }
 warn() { printf '[rtw88][warn] %s\n' "$*" >&2; }
@@ -72,6 +74,11 @@ Usage: build-rtw88-8723bs-module.sh --kver <kernel-abi> [options]
   --vendor-ref <sha>    commit of the vendor tree
   --patch-dir <dir>     directory with local *.patch files applied to the
                         vendor tree (default: <repo>/patches/rtw88)
+  --upstream-tree <dir>   an existing kernel checkout that carries the rtw88
+                        tree (skips the git clone)
+  --kernel-build-dir <dir>
+                        explicit kernel build tree (overrides the automatic
+                        lookup of /lib/modules/<abi>/build)
   --firmware-dir <dir>  directory that holds rtw8723b_fw.bin
 EOF
 }
@@ -88,6 +95,8 @@ while [ $# -gt 0 ]; do
         --vendor-repo)   VENDOR_REPO="$2"; shift 2 ;;
         --vendor-ref)    VENDOR_REF="$2"; shift 2 ;;
         --patch-dir)     PATCH_DIR="$2"; shift 2 ;;
+        --kernel-build-dir) KERNEL_BUILD_DIR="$2"; shift 2 ;;
+        --upstream-tree)  UPSTREAM_TREE="$2"; shift 2 ;;
         --firmware-dir)  FIRMWARE_DIR="$2"; shift 2 ;;
         -h|--help)       usage; exit 0 ;;
         *) die "unknown argument: $1" ;;
@@ -100,6 +109,7 @@ case "$SOURCE" in auto|upstream|upstream-full|vendor) ;; *) die "invalid --sourc
 if [ -z "$PATCH_DIR" ]; then
     SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
     PATCH_DIR="$SCRIPT_DIR/../patches/rtw88"
+    UPSTREAM_PATCH_DIR="$SCRIPT_DIR/../patches/rtw88-upstream"
 fi
 
 for cmd in make gcc git curl dpkg-deb modinfo; do
@@ -110,9 +120,14 @@ done
 # Red Hat / kernel.org 的布局）；Debian 的构建树是 /usr/src/linux-headers-<abi>，
 # 并由 /lib/modules/<abi>/build 指向它。两个路径都认，优先用 /lib/modules 那个。
 KSRC=""
-for cand in "/lib/modules/${KVER}/build" "/usr/src/linux-headers-${KVER}" "/usr/src/linux-headers-${KVER}/build"; do
-    if [ -d "$cand" ]; then KSRC="$cand"; break; fi
-done
+if [ -n "$KERNEL_BUILD_DIR" ]; then
+    [ -d "$KERNEL_BUILD_DIR" ] || die "kernel build tree not found: $KERNEL_BUILD_DIR"
+    KSRC="$(cd "$KERNEL_BUILD_DIR" && pwd)"
+else
+    for cand in "/lib/modules/${KVER}/build" "/usr/src/linux-headers-${KVER}" "/usr/src/linux-headers-${KVER}/build"; do
+        if [ -d "$cand" ]; then KSRC="$cand"; break; fi
+    done
+fi
 [ -n "$KSRC" ] || die "kernel build tree not found (tried /lib/modules/${KVER}/build and /usr/src/linux-headers-${KVER}); install linux-headers-${KVER}"
 
 # make -C <kernel> 会切目录，所以 M= 必须是绝对路径
@@ -211,14 +226,29 @@ EOF
 build_upstream_full() {
     log "building the whole upstream rtw88 tree ($UPSTREAM_REF) against $KVER"
 
-    rm -rf "$WORK/linux-upstream"
-    git clone --quiet --depth 1 --filter=blob:none --sparse --branch "$UPSTREAM_REF" \
-        "$KERNEL_REPO" "$WORK/linux-upstream" \
-        || { warn "kernel tree clone failed"; return 1; }
-    git -C "$WORK/linux-upstream" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
-        || { warn "sparse checkout failed"; return 1; }
+    # An existing checkout can be used as it is; this skips the git clone.
+    local src=""
+    if [ -n "$UPSTREAM_TREE" ]; then
+        src="$UPSTREAM_TREE/drivers/net/wireless/realtek/rtw88"
+        [ -f "$src/rtw8723bs.c" ] || { warn "$UPSTREAM_TREE has no rtw8723bs.c"; return 1; }
+    fi
 
-    local src="$WORK/linux-upstream/drivers/net/wireless/realtek/rtw88"
+    # A pre-seeded tree (for example a cached clone) is reused as it is.
+    local up_src="$WORK/linux-upstream/drivers/net/wireless/realtek/rtw88"
+    if [ -z "$src" ] && [ ! -f "$up_src/rtw8723bs.c" ]; then
+        rm -rf "$WORK/linux-upstream"
+        git_clone_retry "$KERNEL_REPO" "$WORK/linux-upstream" \
+            --depth 1 --filter=blob:none --sparse --branch "$UPSTREAM_REF" \
+            || { warn "kernel tree clone failed"; return 1; }
+        git -C "$WORK/linux-upstream" sparse-checkout set drivers/net/wireless/realtek/rtw88 \
+            || { warn "sparse checkout failed"; return 1; }
+    else
+        log "reusing the pre-seeded upstream tree in $WORK/linux-upstream"
+    fi
+
+    if [ -z "$src" ]; then
+        src="$WORK/linux-upstream/drivers/net/wireless/realtek/rtw88"
+    fi
     [ -f "$src/rtw8723bs.c" ] || { warn "$UPSTREAM_REF has no rtw8723bs.c"; return 1; }
 
     local mod="$WORK/module-upstream-full"
@@ -226,14 +256,14 @@ build_upstream_full() {
     mkdir -p "$mod"
     cp "$src"/*.c "$src"/*.h "$mod"/ 2>/dev/null || true
 
-    # Mirror upstream's own object lists instead of globbing the directory.
-    # Upstream splits the tree into a core module, one module per chip family
-    # and the transport modules, and it compiles only some of the core files
-    # depending on the kernel configuration:
-    #   rtw88_core-$(CONFIG_PM)          += wow.o
-    #   rtw88_core-$(CONFIG_RTW88_LEDS)  += led.o
-    # led.c carries its own definitions while the core headers provide a stub
-    # when CONFIG_RTW88_LEDS is off, so building led.o unconditionally breaks.
+    # The upstream tree needs the local compatibility patch: its mac80211 glue
+    # uses the multi-radio and the MLO callbacks that Linux 6.12 does not have.
+    apply_patches "$mod" "$UPSTREAM_PATCH_DIR" || return 1
+
+    # Object list: upstream's own core list plus the SDIO transport and the
+    # 8723x / 8723B / 8723BS chip files.  Everything is built into a single
+    # module named rtw88_qm1, so it never collides with the in-tree modules
+    # rtw88_core / rtw88_sdio that the distribution ships.
     local up_mk="$src/Makefile"
     [ -f "$up_mk" ] || { warn "upstream rtw88 Makefile not found"; return 1; }
     local core_objs chip_8723b chip_8723bs chip_8723x sdio_objs
@@ -278,46 +308,34 @@ build_upstream_full() {
         log "target kernel has no CONFIG_RTW88_LEDS; leaving led.o out (as upstream does)"
     fi
 
-    # struct sdio_driver.shutdown only exists in newer kernels; the upstream
-    # 8723BS driver uses it.  Drop the callback when the target kernel does
-    # not have the member -- otherwise the build stops here.
-    if ! grep -A25 'struct sdio_driver {' "$KSRC/include/linux/mmc/card.h" 2>/dev/null \
-            | grep -q 'shutdown'; then
-        if grep -q '\.shutdown *= *rtw_sdio_shutdown' "$mod/rtw8723bs.c"; then
-            log "target kernel has no sdio_driver.shutdown; dropping the callback"
-            sed -i '/\.shutdown *= *rtw_sdio_shutdown,/d' "$mod/rtw8723bs.c"
-        fi
-    fi
-
-    cat > "$mod/Makefile" <<EOF
+    cat > "$mod/Kbuild" <<EOF
 # Out-of-tree build of the complete upstream rtw88 tree.
 # The object lists are taken from the upstream Makefile of $UPSTREAM_REF.
-obj-m += rtw88_qm1_core.o
-rtw88_qm1_core-objs := $core_objs
-obj-m += rtw88_qm1_8723x.o
-rtw88_qm1_8723x-objs := $chip_8723x
-obj-m += rtw88_qm1_8723b.o
-rtw88_qm1_8723b-objs := $chip_8723b
-obj-m += rtw88_qm1_8723bs.o
-rtw88_qm1_8723bs-objs := $chip_8723bs
-obj-m += rtw88_qm1_sdio.o
-rtw88_qm1_sdio-objs := $sdio_objs
+obj-m := rtw88_qm1.o
+rtw88_qm1-objs := $core_objs $sdio_objs $chip_8723x $chip_8723b $chip_8723bs
 ccflags-y += -I\$(src)
 EOF
 
     log "compiling against $KSRC"
+    # KBUILD_MODPOST_WARN: the module exports symbols that the 6.12 kernel
+    # does not know yet, so modpost cannot give them a version.
+    # CONFIG_DEBUG_INFO_BTF_MODULES: the distribution headers ship a vmlinux
+    # that pahole cannot use as the BTF base, so the module BTF step is off.
+    local ld_bin cc_bin
+    ld_bin="$(command -v x86_64-linux-gnu-ld || command -v ld || true)"
+    [ -n "$ld_bin" ] || { warn "no linker found"; return 1; }
+    # The distribution headers pin the compiler of the distribution
+    # (x86_64-linux-gnu-gcc-14); fall back to any available gcc.
+    cc_bin="$(command -v x86_64-linux-gnu-gcc-14 || command -v gcc-14 || command -v gcc || true)"
+    [ -n "$cc_bin" ] || { warn "no C compiler found"; return 1; }
     make -C "$KSRC" M="$mod" -j"$JOBS" modules \
-        CONFIG_RTW88_CORE=y CONFIG_RTW88=m CONFIG_RTW88_SDIO=m \
-        CONFIG_RTW88_8723X=m CONFIG_RTW88_8723B=m CONFIG_RTW88_8723BS=m \
+        KBUILD_MODPOST_WARN=1 CONFIG_DEBUG_INFO_BTF_MODULES= \
+        CC="$cc_bin" LD="$ld_bin" \
         || { warn "the full upstream rtw88 tree does not compile against $KVER"; return 1; }
 
-    local m
-    for m in rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723x.ko \
-             rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko; do
-        [ -f "$mod/$m" ] || { warn "upstream build is missing $m"; return 1; }
-    done
+    [ -f "$mod/rtw88_qm1.ko" ] || { warn "upstream build produced no module"; return 1; }
     MOD_DIR="$mod"
-    MOD_NAMES="rtw88_qm1_core.ko rtw88_qm1_sdio.ko rtw88_qm1_8723x.ko rtw88_qm1_8723b.ko rtw88_qm1_8723bs.ko"
+    MOD_NAMES="rtw88_qm1.ko"
     return 0
 }
 
@@ -331,30 +349,31 @@ EOF
 # because building the unpatched vendor tree would ship the very symptom
 # this backport is meant to cure.
 # ---------------------------------------------------------------------------
-apply_patches() {   # apply_patches <tree-dir>
+apply_patches() {   # apply_patches <tree-dir> [patch-dir]
     local dir="$1" p n=0
+    local pdir="${2:-$PATCH_DIR}"
     [ -d "$dir" ] || die "patch target $dir does not exist"
-    [ -d "$PATCH_DIR" ] || die "patch directory $PATCH_DIR does not exist"
-    for p in "$PATCH_DIR"/*.patch; do
+    [ -d "$pdir" ] || die "patch directory $pdir does not exist"
+    for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         n=$((n + 1))
     done
     [ "$n" -gt 0 ] || die "no *.patch found in $PATCH_DIR"
-    for p in "$PATCH_DIR"/*.patch; do
+    for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         log "dry-run $(basename "$p")"
         if ! (cd "$dir" && patch -p1 --dry-run --batch --forward < "$p"); then
             die "patch does not apply to the vendor tree: $(basename "$p")"
         fi
     done
-    for p in "$PATCH_DIR"/*.patch; do
+    for p in "$pdir"/*.patch; do
         [ -e "$p" ] || continue
         log "applying $(basename "$p")"
         (cd "$dir" && patch -p1 --batch --forward < "$p") \
             || die "failed to apply $(basename "$p")"
     done
     find "$dir" \( -name '*.rej' -o -name '*.orig' \) -delete
-    log "$n patch(es) applied to the vendor tree"
+    log "$n patch(es) applied to $dir"
 }
 
 # ---------------------------------------------------------------------------
@@ -393,6 +412,21 @@ build_vendor() {
     MOD_DIR="$mod"
     MOD_NAMES="rtw_core.ko rtw_sdio.ko rtw_8723b.ko rtw_8723bs.ko"
     return 0
+}
+
+# git clone from github fails now and then with a TLS EOF; retry a few times.
+git_clone_retry() {   # git_clone_retry <url> <dir> [extra args...]
+    local url="$1" dir="$2"; shift 2
+    local attempt
+    for attempt in 1 2 3 4 5; do
+        rm -rf "$dir"
+        if git clone --quiet "$@" "$url" "$dir"; then
+            return 0
+        fi
+        warn "git clone of $url failed (attempt $attempt), retrying"
+        sleep $((attempt * 3))
+    done
+    return 1
 }
 
 MOD_DIR=""
@@ -465,7 +499,7 @@ install -m 0644 "$FW_DIR"/rtw8723b*.bin "$PKG/lib/firmware/rtw88/"
 
 # load the out-of-tree driver instead of the obsolete staging driver
 SDIO_MODULE="rtw88_8723bs"
-for cand in rtw_8723bs.ko rtw88_8723bs.ko rtw88_qm1_8723bs.ko; do
+for cand in rtw88_qm1.ko rtw_8723bs.ko rtw88_8723bs.ko rtw88_qm1_8723bs.ko; do
     if [ -f "$PKG/lib/modules/$KVER/extra/rtw88/$cand" ]; then
         SDIO_MODULE="${cand%.ko}"
         break
@@ -477,7 +511,7 @@ done
 # *staging* driver's parameters -- the rtw88 driver does not have them, and
 # modprobe refuses to load a module with an unknown parameter.
 CORE_MODULE="rtw_core"
-for cand in rtw_core.ko rtw88_core.ko rtw88_qm1_core.ko; do
+for cand in rtw88_qm1.ko rtw_core.ko rtw88_core.ko rtw88_qm1_core.ko; do
     if [ -f "$PKG/lib/modules/$KVER/extra/rtw88/$cand" ]; then
         CORE_MODULE="${cand%.ko}"
         break
@@ -495,11 +529,21 @@ for param in $CORE_PARAMS; do
     esac
 done
 
+# The in-tree kernel ships its own rtw88 modules.  They export the same symbol
+# names as the backport, so they must never be loaded next to it.
+BLACKLIST_EXTRA=""
+if [ "$SOURCE" = "upstream-full" ]; then
+    BLACKLIST_EXTRA="rtw88_core rtw88_sdio rtw88_8723x rtw88_8723b rtw88_8723bs rtw88_pci rtw88_usb"
+fi
+
 {
     echo "# The staging driver r8723bs is superseded by the rtw88 backport."
     echo "# The staging parameters (rtw_power_mgnt / rtw_smart_ps / rtw_ips_mode /"
     echo "# rtw_bw_mode) belong to r8723bs only; the rtw88 driver exposes the ones below."
     echo "blacklist r8723bs"
+    for m in $BLACKLIST_EXTRA; do
+        echo "blacklist $m"
+    done
     echo "options ${CORE_MODULE} disable_lps_deep=y"
     echo "options ${CORE_MODULE} support_bf=y"
     echo "options ${CORE_MODULE} debug_mask=0"
