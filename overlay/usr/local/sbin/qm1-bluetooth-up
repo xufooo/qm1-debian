@@ -13,6 +13,14 @@
 # be silent either -- an invisible failure looks like "the Bluetooth function
 # is missing" and nobody knows where to look.  So we leave a marker file and
 # a journal entry with the likely cause.
+#
+# ★ 只在这台机真的暴露了蓝牙的 ACPI HID 时才加载 hci_uart。
+#   上游 v6.12 的 drivers/bluetooth/hci_h5.c 里 h5_acpi_match[] 认的就是
+#   OBDA8723 / OBDA0623 这两个 HID；没有这个 HID ⇒ hci_uart 没有任何可绑定
+#   的串口，加载它只有一个坏处：hci_uart 是 uart 驱动，会去够所有 8250
+#   端口，在没有对应硬件的机器上有可能把别的东西（尤其是 ttyS0 控制台）
+#   搅黄。所以"没有 HID"时我们不加载它，只如实记一笔。
+#   —— 这也是冒烟测试能跑通的前提：QEMU 里没有这个 HID。
 
 set -u
 
@@ -22,6 +30,41 @@ LOG_TAG=qm1-bluetooth
 log() { logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true; printf '%s\n' "$*" >&2 || true; }
 
 rm -f "$MARKER"
+
+# 这台机有没有暴露蓝牙的 ACPI HID？
+acpi_owner=""
+acpi_hid=""
+for dev in /sys/bus/acpi/devices/*; do
+    [ -e "$dev" ] || continue
+    hid="$(cat "$dev/hid" 2>/dev/null || true)"
+    case "$(printf '%s' "$hid" | tr 'a-z' 'A-Z')" in
+        OBDA8723|OBDA0623)
+            acpi_hid="$hid"
+            acpi_owner="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")"
+            ;;
+    esac
+done
+
+write_marker() {
+    {
+        echo "time=$(date -u +%FT%TZ)"
+        echo "acpi_hid=${acpi_hid:-none}"
+        echo "acpi_owner=${acpi_owner:-none}"
+        echo "firmware=$( [ -f /lib/firmware/rtl_bt/rtl8723bs_fw.bin ] && echo present || echo missing )"
+        echo "serdev_driver=$( [ -d /sys/bus/serio/drivers/hci_uart_h5 ] && echo registered || echo absent )"
+        echo "hint=$1"
+    } >"$MARKER"
+    chmod 0644 "$MARKER" 2>/dev/null || true
+}
+
+if [ -z "$acpi_hid" ] && [ ! -e /etc/qm1/bluetooth-force ]; then
+    # 没有 HID ⇒ 没有可绑定的串口 ⇒ 不加载 hci_uart（加载了也绑不上，
+    # 只会白占一个 uart 端口）。这不是故障，是这台机本来就没有这个控制器。
+    # 需要强行加载时（万一 DSDT 用了别的 HID）：touch /etc/qm1/bluetooth-force
+    log "这台机没有暴露蓝牙的 ACPI HID（OBDA8723/OBDA0623）⇒ hci_uart 没有可绑定的串口，不加载它"
+    write_marker "no Bluetooth ACPI HID (OBDA8723/OBDA0623) on this machine; hci_uart was not loaded on purpose"
+    exit 0
+fi
 
 modprobe hci_uart 2>/dev/null || true
 modprobe btrtl 2>/dev/null || true
@@ -38,25 +81,7 @@ done
 
 # No hci0.  Find out who owns the Bluetooth ACPI node: if 8250 claimed it,
 # the port is a plain 16550 and hci_uart can never bind it.
-owner=""
-for dev in /sys/bus/acpi/devices/*; do
-    [ -e "$dev" ] || continue
-    hid="$(cat "$dev/hid" 2>/dev/null || true)"
-    case "$hid" in
-        OBDA8723|OBDA0623)
-            owner="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")"
-            ;;
-    esac
-done
+write_marker "if acpi_owner is 8250*, blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf"
 
-{
-    echo "time=$(date -u +%FT%TZ)"
-    echo "acpi_owner=${owner:-none}"
-    echo "firmware=$( [ -f /lib/firmware/rtl_bt/rtl8723bs_fw.bin ] && echo present || echo missing )"
-    echo "serdev_driver=$( [ -d /sys/bus/serio/drivers/hci_uart_h5 ] && echo registered || echo absent )"
-    echo "hint=if acpi_owner is 8250*, blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf"
-} >"$MARKER"
-chmod 0644 "$MARKER" 2>/dev/null || true
-
-log "no hci0 after 30s; ACPI owner=${owner:-none} (details in $MARKER)"
+log "no hci0 after 30s; ACPI owner=${acpi_owner:-none} (details in $MARKER)"
 exit 0
