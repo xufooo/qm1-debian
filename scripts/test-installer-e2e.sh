@@ -172,6 +172,23 @@ gpt_sig_at() {  # $1=文件 $2=偏移；0 = 那一带里找到了 "EFI PART"
     [ "${_gsa_count:-0}" -gt 0 ]
 }
 
+# 分区里某个文件的权限位（八进制，如 600）
+file_mode() {  # $1=分区设备 $2=相对路径
+    _fm_mnt="$WORK/mnt-$$-$RANDOM"
+    mkdir -p "$_fm_mnt"
+    if mount -o ro "$1" "$_fm_mnt" 2>/dev/null; then
+        if [ -f "$_fm_mnt/$2" ]; then
+            stat -c '%a' "$_fm_mnt/$2" 2>/dev/null || stat -f '%Lp' "$_fm_mnt/$2" 2>/dev/null
+            umount "$_fm_mnt" 2>/dev/null || true
+            rmdir "$_fm_mnt" 2>/dev/null || true
+            return 0
+        fi
+        umount "$_fm_mnt" 2>/dev/null || true
+    fi
+    rmdir "$_fm_mnt" 2>/dev/null || true
+    return 1
+}
+
 # 逐分区比对：备份 vs 安装前的原盘（用与安装器同一份实现）
 per_partition_ok() {  # $1=原盘环设备 $2=备份文件
     bash -c '
@@ -549,6 +566,163 @@ if grep -q '显式跳过 EFI 启动项登记' "$WORK/install-f.log"; then
     bad "用例 F：没给 --skip-efi-entry 却显示跳过了 EFI 登记"
 else
     ok "用例 F：没有把 EFI 登记失败伪装成'跳过'"
+fi
+
+# ---------- 7. 用例 E2：设备侧安装器的 emmc 分支（QM1 上真正的那条路） ----------
+#
+# 用例 E 走的是 --mode media；QM1 上真正把系统装进 eMMC 走的是 --mode emmc ——
+# 而 emmc 分支有一整套 media 分支没有的东西：覆盖前强制整盘备份、备份与原盘
+# 逐分区 sha256 比对、备份位置的四级搜索、按目标真实容量重建 GPT、
+# 撑满整盘、写安装记录。**这条分支在 CI 里从来没有被跑过** ——
+# 而历史��错（dd 的 seek 以块为单位、备份偏移放大 4 倍）恰好全藏在这条分支里。
+#
+# CI 里没有真的 ACPI eMMC，环设备被内核报成别的类型 ⇒ 用 --force-kind emmc
+# 把它"说成" eMMC（安装器本来就支持这个开关，主机侧脚本早就有）。
+log "用例 E2：设备侧安装器的 emmc 分支（整盘备份 + 重建分区表 + 撑满整盘）"
+SRC_G="$WORK/source-g.img"
+make_disk "$SRC_G" 512 64 446 || skip "造源盘失败"
+LOOP_SRC_G="$MD_DEV"
+format_parts "$LOOP_SRC_G"
+put_file "${LOOP_SRC_G}p1" "EFI/BOOT/BOOTIA32.EFI" "FAKE-BOOTLOADER" || warn "放引导文件失败"
+# 源 ESP 上同时放"安装菜单"和"正常菜单"：6a 步要用后者换掉前者。
+# 目标里要是还留着安装菜单，重开机就会又走进安装流程 —— 这是刷机后最恶心的坑。
+put_file "${LOOP_SRC_G}p1" "EFI/BOOT/grub.cfg" \
+    "menuentry 'install to eMMC' { linux /qm1.install=1 qm1.install.mode=emmc }" \
+    || warn "放安装菜单失败"
+put_file "${LOOP_SRC_G}p1" "EFI/BOOT/grub-normal.cfg" "normal boot menu" || warn "放正常菜单失败"
+put_file "${LOOP_SRC_G}p2" "QM1-MARKER-FILE" "SOURCE-CONTENT-MARKER" || warn "放标记文件失败"
+
+TGT_G="$WORK/target-g.img"
+truncate -s 512M "$TGT_G"
+LOOP_TGT_G="$(losetup --partscan --find --show "$TGT_G" 2>/dev/null)" || skip "造目标失败"
+LOOPS+=("$LOOP_TGT_G")
+
+BACKUP_G="$WORK/backup-g"
+mkdir -p "$BACKUP_G"
+
+if bash "$DEVICE_INSTALLER" --target "$LOOP_TGT_G" \
+        --source-disk "$LOOP_SRC_G" --source-root "${LOOP_SRC_G}p2" --source-esp "${LOOP_SRC_G}p1" \
+        --lib "$INSTALL_LIB" --no-login-account --mode emmc --force-kind emmc --yes --skip-efi-entry \
+        --backup-dir "$BACKUP_G" \
+        > "$WORK/install-g.log" 2>&1; then
+    ok "用例 E2：设备侧安装器的 emmc 分支退出码为 0"
+else
+    bad "用例 E2：设备侧安装器的 emmc 分支返回非零"
+    tail -40 "$WORK/install-g.log"
+fi
+
+# (1) 覆盖前必须留下整盘备份 —— 这是"还能装回原版系统"的唯一保障。
+BACKUP_FILE_G="$(find "$BACKUP_G" -maxdepth 1 -type f -name 'qm1-emmc-preinstall-*' | head -1)"
+if [ -n "$BACKUP_FILE_G" ]; then
+    ok "用例 E2：覆盖前做了整盘备份（$(basename "$BACKUP_FILE_G")）"
+    _bg_size="$(stat -c '%s' "$BACKUP_FILE_G" 2>/dev/null || stat -f '%z' "$BACKUP_FILE_G" 2>/dev/null || echo 0)"
+    _tg_size="$(stat -c '%s' "$TGT_G" 2>/dev/null || stat -f '%z' "$TGT_G" 2>/dev/null || echo 0)"
+    if [ "${_bg_size:-0}" = "${_tg_size:-0}" ] && [ "${_tg_size:-0}" -gt 0 ]; then
+        ok "用例 E2：备份大小等于整盘大小（是整盘副本，不是分区表）"
+    else
+        bad "用例 E2：备份大小 ${_bg_size} 与整盘 ${_tg_size} 不一致"
+    fi
+else
+    bad "用例 E2：没有找到整盘备份文件"
+fi
+
+# (2) 目标必须按真实容量重建分区表：正好两个分区、类型 GUID 正确、ESP 起于 1 MiB。
+SF_G="$(sfdisk -d "$LOOP_TGT_G" 2>/dev/null || true)"
+_g_parts="$(printf '%s\n' "$SF_G" | grep -c ' type=' || true)"
+if [ "${_g_parts:-0}" = "2" ]; then
+    ok "用例 E2：目标盘上正好两个分区"
+else
+    bad "用例 E2：目标盘上有 ${_g_parts:-0} 个分区（应该是 2）"
+fi
+if printf '%s\n' "$SF_G" | grep -qi "type=$ESP_GUID"; then
+    ok "用例 E2：ESP 的分区类型 GUID 正确"
+else
+    bad "用例 E2：ESP 的分区类型 GUID 不对"
+fi
+if printf '%s\n' "$SF_G" | grep -qi "type=$LINUX_GUID"; then
+    ok "用例 E2：根分区的分区类型 GUID 正确"
+else
+    bad "用例 E2：根分区的分区类型 GUID 不对"
+fi
+_g_esp_start="$(printf '%s\n' "$SF_G" | awk -v t="$ESP_GUID" '
+    index($0, t) { for (i = 1; i <= NF; i++) if ($i ~ /^start=/) { sub(/^start=/, "", $i); gsub(/,/, "", $i); print $i; exit } }')"
+if [ "${_g_esp_start:-}" = "2048" ]; then
+    ok "用例 E2：ESP 起于 1 MiB（扇区 2048）"
+else
+    bad "用例 E2：ESP 的起始扇区是 ${_g_esp_start:-?}（应该是 2048）"
+fi
+
+# (3) 整盘上只能有两份 GPT 头（主表 + 盘尾备份表），不能有第三份留在中间。
+#     主机侧那条路径曾经把"内容大小的镜像"写进 28.5 GiB 的盘 ⇒ 镜像自带的
+#     备份 GPT 留在 6.3 GiB 处，盘尾还有旧的一份 ⇒ 一盘三份 GPT。
+_g_gpt_count="$(grep -abo 'EFI PART' "$TGT_G" 2>/dev/null | wc -l | tr -d ' ')"
+_g_gpt_tail=$(( 512 * 1024 * 1024 - 33 * 512 ))
+_g_gpt_offsets="$(grep -abo 'EFI PART' "$TGT_G" 2>/dev/null | cut -d: -f1 | tr '\n' ' ')"
+if [ "${_g_gpt_count:-0}" = "2" ]; then
+    ok "用例 E2：整盘上只有两份 GPT 头（主表 + 盘尾备份表）"
+else
+    bad "用例 E2：整盘上有 ${_g_gpt_count:-0} 份 GPT 头（应该是 2），偏移：${_g_gpt_offsets:-}"
+fi
+_g_gpt_tail_ok=0
+for _g_off in $_g_gpt_offsets; do
+    [ "$_g_off" = "$_g_gpt_tail" ] && _g_gpt_tail_ok=1
+done
+if [ "$_g_gpt_tail_ok" = "1" ]; then
+    ok "用例 E2：备份 GPT 落在盘尾（偏移 $_g_gpt_tail）"
+else
+    bad "用例 E2：盘尾没有备份 GPT（偏移：${_g_gpt_offsets:-}）"
+fi
+
+# (4) 目标 ESP 里必须是正常菜单，不能还留着安装菜单。
+_g_menu="$(file_content "${LOOP_TGT_G}p1" "EFI/BOOT/grub.cfg" 2>/dev/null || true)"
+if [ -n "$_g_menu" ] && ! printf '%s' "$_g_menu" | grep -q 'qm1.install=1'; then
+    ok "用例 E2：目标 ESP 里换成了正常菜单（不再重入安装）"
+else
+    bad "用例 E2：目标 ESP 里还是安装菜单或没有菜单"
+fi
+
+# (5) 安装记录必须写进目标根分区，权限 0600，内容标明是 emmc 模式。
+if has_file "${LOOP_TGT_G}p2" "etc/qm1-installed-to-emmc"; then
+    ok "用例 E2：目标根分区里写了安装记录"
+    _g_rec="$(file_content "${LOOP_TGT_G}p2" "etc/qm1-installed-to-emmc" 2>/dev/null || true)"
+    if printf '%s' "$_g_rec" | grep -q 'mode=emmc'; then
+        ok "用例 E2：安装记录标明 mode=emmc"
+    else
+        bad "用例 E2：安装记录里没有 mode=emmc"
+    fi
+    _g_mode="$(file_mode "${LOOP_TGT_G}p2" "etc/qm1-installed-to-emmc" 2>/dev/null || echo '?')"
+    if [ "$_g_mode" = "600" ]; then
+        ok "用例 E2：安装记录权限是 0600"
+    else
+        bad "用例 E2：安装记录权限是 ${_g_mode}（应该是 600）"
+    fi
+else
+    bad "用例 E2：目标根分区里没有安装记录"
+fi
+
+# (6) 根文件系统撑满整盘且干净。
+if has_file "${LOOP_TGT_G}p2" "QM1-MARKER-FILE"; then
+    ok "用例 E2：目标根分区里有源的文件内容"
+else
+    bad "用例 E2：目标根分区里没有源的文件"
+fi
+if e2fsck -fn "${LOOP_TGT_G}p2" >/dev/null 2>&1; then
+    ok "用例 E2：目标根文件系统 e2fsck -fn 干净"
+else
+    bad "用例 E2：目标根文件系统 e2fsck -fn 不干净"
+fi
+_g_root_mib="$(lsblk -bnro SIZE "${LOOP_TGT_G}p2" 2>/dev/null | head -1)"
+if [ "${_g_root_mib:-0}" -gt 400000000 ] 2>/dev/null; then
+    ok "用例 E2：根分区撑满了（${_g_root_mib:-?} 字节）"
+else
+    bad "用例 E2：根分区只有 ${_g_root_mib:-?} 字节（没撑满整盘）"
+fi
+
+# (7) 日志必须写明做了整盘备份。
+if grep -q '整盘备份' "$WORK/install-g.log"; then
+    ok "用例 E2：日志写明了整盘备份"
+else
+    bad "用例 E2：日志里没有整盘备份的记录"
 fi
 
 printf '\n'

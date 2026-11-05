@@ -117,6 +117,10 @@ NO_LOGIN_ACCOUNT="${QM1_NO_LOGIN_ACCOUNT:-0}"
 # 显式跳过 EFI 启动项登记。只在"确实没法登记"时才用 ——
 # 悄悄跳过却报成功是最坏的结果（机器开不了机，报告却说装好了）。
 SKIP_EFI_ENTRY="${QM1_SKIP_EFI_ENTRY:-0}"
+# 显式覆盖目标介质的类型（emmc/sd/other）。空 = 按内核报的类型认。
+# ★ 必须在这里给初值：脚本开了 set -u，不给初值的话，
+#   "没传 --force-kind" 这条最常见的路径会直接因 unbound variable 退出。
+FORCE_KIND=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
