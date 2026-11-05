@@ -99,6 +99,62 @@ hook 会临时挂 `<suite>-proposed-updates` 精确安装，装完即撤，
   它还额外带一份 `grub-normal.cfg`，安装脚本装完会把它拷回目标 ESP，
   所以装好之后从 eMMC 启动看到的仍是普通菜单。
 
+### 分步引导式安装（非破坏性优先）
+
+安装介质里的安装器是分 6 步走的，每一步都打印「现在做什么、做完是什么」：
+
+| 步骤 | 做什么 | 结果 |
+|---|---|---|
+| [1/6] 选择目标 | 列出除当前系统盘外的所有块设备，**优先选可移动介质**（microSD / U 盘） | 目标设备 + 模式（media / emmc） |
+| [2/6] 检查目标 | 显示目标上已有的分区，确认后才动手 | 已有分区清单 |
+| [3/6] 网络与 SSH | 读介质上的 provisioning，或交互输入 SSID/密码；默认开 SSH，可带公钥 | provisioning 目录 |
+| [4/6] 备份 | 装到 eMMC 时**强制整盘备份**（空间不够直接中止）；装到可移动介质时顺手备份 | 备份文件 + sha256 |
+| [5/6] 写入 | 写 GPT、dd 两个分区、逐分区 sha256 校验、撑满整盘 | 目标系统 |
+| [6/6] 收尾 | 换回正常菜单、把 provisioning 写进目标、写安装记录 | 下一步提示 |
+
+**「非破坏性」是什么意思**：默认路径是「装到可移动介质，eMMC 一个字节都不动」。
+原系统因此原样保留，取下介质就能回退 —— 这是「还能装回原版系统」的前提。
+只有显式选 eMMC 才会动 eMMC，而那条路必须先做完整备份，否则安装器直接中止。
+
+非交互用法（脚本 / CI）：
+
+```bash
+sudo qm1-install-to-emmc --target /dev/sdb --mode media \
+     --provision-dir ./provision --backup-dir /mnt/bigdisk
+```
+
+### 首次配置：开机即联网（Raspberry Pi 式）
+
+这台机器没有 RJ45，唯一联网链路是内置 Wi-Fi。如果每次装完都要接显示器键盘
+手动敲 `wpa_supplicant`，装机就成了麻烦事。所以照 Pi 的做法：**把配置文件放进
+启动分区，开机自己读**。
+
+生成 provisioning 目录：
+
+```bash
+bash scripts/prepare-provision.sh --out build/provision \
+     --ssid "MyWiFi" --psk "passphrase" --enable-ssh \
+     --ssh-pubkey ~/.ssh/id_ed25519.pub
+```
+
+| 文件 | 作用 |
+|---|---|
+| `wpa_supplicant.conf` | Wi-Fi 配置；存在即写入系统并启用 `qm1-wifi@wlan0` |
+| `ssh` | 存在即开机自动启用 SSH |
+| `authorized_keys` | 可选：SSH 公钥（装到 root 与指定用户） |
+| `hostname` | 可选：主机名 |
+
+两种投放方式：
+
+1. **装机时带上**：`build-image.sh --provision-dir build/provision` → provisioning 进 ESP 的
+   `/qm1/provision/`，安装器也会把它复制进目标系统的 `/etc/qm1/provision/`。
+2. **事后补**：直接往启动分区里放文件（FAT32，普通 U 盘就能改），
+   首次开机 `qm1-firstboot` 会按卷标 `QM1ESP` 找到它并读取。
+
+首次开机时 `qm1-firstboot.service` 会：把 `wpa_supplicant.conf` 写进
+`/etc/wpa_supplicant/` → 启用并拉起 `qm1-wifi@wlan0`；启用 SSH；导入公钥；
+设置主机名；写标记 `/var/lib/qm1/firstboot-done`（幂等，不会重复执行）。
+
 ### 第 1 步：先在 U 盘上试跑（不碰 eMMC）
 
 ```bash
