@@ -652,6 +652,34 @@ else
     row WARN "Wi-Fi 关联" "没有 iw 或 $WLAN_IF 不存在"
 fi
 
+# 没关联上的时候，光说"未关联"没有用 —— 现场要的是**为什么**。
+# wpa_supplicant 会把原因写进 journal，而这几条原因各自对应完全不同的修法：
+#   * 路由器是 WPA3-only 或要求 SAE ⇒ 我们的配置里已经带了 SAE
+#     （key_mgmt=WPA-PSK SAE + sae_password），但驱动/固件不一定支持 WPA3；
+#   * 口令不对 / key_mgmt 对不上 ⇒ 改密码；
+#   * AP 用 802.1x（企业级）⇒ 本机只支持 PSK，配置层面无解；
+#   * 压根没找到这个 SSID ⇒ 2.4G/5G 频段或信号的问题。
+# 所以这里把 journal 里的关键行抓出来直接说清楚。
+if command -v journalctl >/dev/null 2>&1; then
+    _wifi_log="$(journalctl -b --no-pager -t wpa_supplicant 2>/dev/null || true)"
+    [ -n "$_wifi_log" ] || _wifi_log="$(journalctl -b --no-pager 2>/dev/null | grep -i wpa_supplicant || true)"
+    if [ -z "$_wifi_log" ]; then
+        row INFO "Wi-Fi 关联失败原因" "journal 里没有 wpa_supplicant 的记录（可能刚开机还没关联过）"
+    elif grep -qi 'SAE' <<<"$_wifi_log"; then
+        row FAIL "Wi-Fi 关联失败原因" "日志里出现 SAE（WPA3）相关记录 —— 路由器可能是 WPA3-only 或混合模式且要求 SAE；本机已按 WPA-PSK SAE 配置，若仍失败则是驱动/固件不支持 WPA3，需要换路由器加密方式"
+    elif grep -qi 'Pre-shared key may be incorrect\|authentication failed\|WPA handshake failed' <<<"$_wifi_log"; then
+        row FAIL "Wi-Fi 关联失败原因" "认证失败 —— 口令不对，或路由器的加密方式与配置里的 key_mgmt 不匹配"
+    elif grep -qi '802.1x\|EAP' <<<"$_wifi_log"; then
+        row FAIL "Wi-Fi 关联失败原因" "AP 用的是 802.1x（企业级）认证 —— 本机只支持 WPA-PSK/SAE，配置层面无解"
+    elif grep -qi 'SSID.*not found\|no suitable AP\|CTRL-EVENT-SSID-TEMP-DISABLED' <<<"$_wifi_log"; then
+        row FAIL "Wi-Fi 关联失败原因" "没找到这个 SSID —— 路由器可能关了 2.4G 或改了 SSID/隐藏了 SSID"
+    else
+        row WARN "Wi-Fi 关联失败原因" "日志里没有能直接归因的关键字（看 journalctl -b -t wpa_supplicant 的完整输出）"
+    fi
+else
+    row INFO "Wi-Fi 关联失败原因" "没有 journalctl，跳过"
+fi
+
 # 信道宽度：出货模块把 8723B 的能力收窄到 20 MHz（patches/rtw88-upstream/
 # 0006）。40 MHz 在这颗芯片的一个变体上根本不支持，而社区报告里 40 MHz
 # 正是随机断连的来源 —— 这台机器没有第二条链路，稳定性优先。所以这里核对

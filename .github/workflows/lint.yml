@@ -166,6 +166,19 @@ jobs:
           # 反例必须挂。断言串腐化了当场就发现，不用烧一轮 CI。
           bash scripts/test-boot-smoke-assert.sh
 
+      - name: wpa_supplicant configuration rules
+        run: |
+          set -euo pipefail
+          # 密码写对了却连不上，是这台机器最致命的一类问题：它没有 RJ45，
+          # Wi-Fi 断了 = 整机断网 = 看起来像砖。而 wpa_supplicant 的取值
+          # 规则（64 位十六进制 PSK 不能加引号、空口令不能写 psk=、
+          # WPA3/SAE 要不要配）散落在**两份**同名实现和三个写入方里，
+          # 任何一处走样都不会有报错 —— 只会安静地连不上。
+          #
+          # 这条测试本地就能跑（不需要 sfdisk），所以挂在这里当阻断检查：
+          # 规则不一致当场红，不用等真机。
+          bash scripts/test-wpa-conf.sh
+
       - name: Upstream rtw88 patch set (applies to the pinned tree)
         run: |
           set -euo pipefail

@@ -462,12 +462,15 @@ write_wifi_conf() {
         echo "    ssid=$(qm1_wpa_ssid_value "$_ww_ssid")"
         if [ -n "$_ww_psk_value" ]; then
             echo "    psk=$_ww_psk_value"
-            echo "    key_mgmt=WPA-PSK"
-        else
-            # 开放网络：没有口令就不能写 key_mgmt=WPA-PSK，否则 wpa_supplicant
-            # 会因为找不到 psk 而拒绝这个网络块。
-            echo "    key_mgmt=NONE"
+            # 明文口令同时可以当 SAE 口令：路由器是 WPA3-only 或
+            # WPA2/WPA3 混合且要求 SAE 时，只有 WPA-PSK 是永远连不上的。
+            # 64 位十六进制是 PMK，不能当 SAE 口令 ⇒ 那情况下不给。
+            _ww_sae_value="$(qm1_wpa_sae_value "$_ww_psk" || true)"
+            [ -n "$_ww_sae_value" ] && echo "    sae_password=$_ww_sae_value"
         fi
+        # key_mgmt 里 PSK 在前，wpa_supplicant 先试 PSK ⇒ 纯 WPA2 不受影响；
+        # 没有口令时必须是 NONE（否则 wpa_supplicant 拒收整段 network 块）。
+        echo "    key_mgmt=$(qm1_wpa_key_mgmt_value "$_ww_psk")"
         echo "}"
     } > "$WORK_PROV/wpa_supplicant.conf"
     chmod 0600 "$WORK_PROV/wpa_supplicant.conf"

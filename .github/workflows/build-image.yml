@@ -874,6 +874,29 @@ jobs:
               || { echo "::error::$LIB 缺少 $fn"; exit 1; }
           done
 
+          # --- wpa_supplicant 取值规则：两份实现同名同在，写配置的人必须用它 ---
+          # 这台机器没有 RJ45，Wi-Fi 连不上 = 整机断网。而 wpa 的取值规则
+          # （64 位十六进制 PSK 不能加引号、空口令不能写 psk=、WPA3 要不要
+          # 配 SAE）写错时**不会有任何报错**，只会安静地连不上。
+          for fn in qm1_wpa_escape qm1_wpa_ssid_value qm1_wpa_psk_value \
+                    qm1_wpa_sae_value qm1_wpa_key_mgmt_value; do
+            grep -q "^${fn}()" scripts/lib/common.sh \
+              || { echo "::error::scripts/lib/common.sh 缺少 $fn"; exit 1; }
+            grep -q "^${fn}()" "$LIB" \
+              || { echo "::error::$LIB 缺少 $fn（镜像里的安装器会找不到这个 helper）"; exit 1; }
+          done
+          # 写配置的两个脚本必须走共享 helper，而不是自己写死 key_mgmt ——
+          # 自己写死的话，改了 common.sh 也不会生效。
+          for w in "$DEV" scripts/provision-agent.sh; do
+            grep -q 'qm1_wpa_key_mgmt_value' "$w" \
+              || { echo "::error::$w 没有走共享的 key_mgmt 取值规则"; exit 1; }
+            grep -q 'qm1_wpa_sae_value' "$w" \
+              || { echo "::error::$w 没有走共享的 sae_password 取值规则（WPA3 路由器会连不上）"; exit 1; }
+            if grep -q 'key_mgmt=WPA-PSK$' "$w"; then
+              echo "::error::$w 里还有写死的 key_mgmt=WPA-PSK"; exit 1
+            fi
+          done
+
           # --- 镜像里必须有 passwd 包 ---
           # useradd/chpasswd 来自 passwd 包；缺了它安装器会在 [3/6] 中止。
           # 这里按"包列表里的独立一项"来匹配，避免被 chpasswd 之类的字符串蒙混过去。

@@ -137,3 +137,38 @@ qm1_wpa_psk_value() {
     fi
     return 1
 }
+
+# SAE（WPA3）口令：只有明文口令能用。64 位十六进制是 PMK，不是口令 ——
+# 拿 PMK 当 SAE 口令必然认证失败，所以这种情况不给 sae_password。
+qm1_wpa_sae_value() {
+    local psk="$1"
+    [ -n "$psk" ] || return 0
+    if printf '%s' "$psk" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        return 0
+    fi
+    if [ "${#psk}" -ge 8 ] && [ "${#psk}" -le 63 ]; then
+        printf '"%s"' "$(qm1_wpa_escape "$psk")"
+        return 0
+    fi
+    return 1
+}
+
+# key_mgmt 的取值：空口令 → NONE；64 位十六进制 → WPA-PSK（PMK 只能做 WPA2-PSK）；
+# 8..63 字符明文 → WPA-PSK SAE（PSK 排在前面，wpa_supplicant 先试 PSK，
+# 所以纯 WPA2 的路由器不受影响；路由器若是 WPA3-only 或混合要求 SAE，
+# 没有这一项就永远连不上 —— 这台机器没有 RJ45，Wi-Fi 断了等于整机断网）。
+qm1_wpa_key_mgmt_value() {
+    local psk="$1"
+    [ -n "$psk" ] || { printf 'NONE'; return 0; }
+    if printf '%s' "$psk" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+        printf 'WPA-PSK'
+        return 0
+    fi
+    # 只有长度合法的明文口令才配得上 SAE；
+    # 长度非法的口令会在 qm1_wpa_psk_value 那一步被调用方拒绝。
+    if [ "${#psk}" -ge 8 ] && [ "${#psk}" -le 63 ]; then
+        printf 'WPA-PSK SAE'
+        return 0
+    fi
+    printf 'WPA-PSK'
+}

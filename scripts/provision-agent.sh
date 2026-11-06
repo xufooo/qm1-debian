@@ -113,17 +113,27 @@ if [ -n "$WIFI_SSID" ]; then
         printf '[provision][fail] Wi-Fi 密码长度非法（%s 字符）：需要 8..63 字符，或 64 位十六进制\n' "${#WIFI_PASS}" >&2
         exit 1
     fi
-    cat > /etc/wpa_supplicant/wpa_supplicant.conf <<EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=CN
-
-network={
-    ssid=$(qm1_wpa_ssid_value "$WIFI_SSID")
-    psk=$_psk_value
-    key_mgmt=WPA-PSK
-}
-EOF
+    # 明文口令同时可以当 SAE 口令：路由器是 WPA3-only 或 WPA2/WPA3 混合
+    # 且要求 SAE 时，只有 WPA-PSK 是永远连不上的。
+    # 64 位十六进制是 PMK，不能当 SAE 口令 ⇒ 那情况下不给 sae_password。
+    _sae_value=""
+    if [ -n "$WIFI_PASS" ]; then
+        _sae_value="$(qm1_wpa_sae_value "$WIFI_PASS" || true)"
+    fi
+    {
+        printf 'ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n'
+        printf 'update_config=1\n'
+        printf 'country=CN\n'
+        printf '\n'
+        printf 'network={\n'
+        printf '    ssid=%s\n' "$(qm1_wpa_ssid_value "$WIFI_SSID")"
+        # 没有口令就是开放网络 ⇒ 不能写 psk=（空值会被 wpa_supplicant 判为
+        # 非法行，整段 network 块被丢掉 ⇒ "能看见 SSID 就是连不上"）。
+        [ -n "$_psk_value" ] && printf '    psk=%s\n' "$_psk_value"
+        [ -n "$_sae_value" ] && printf '    sae_password=%s\n' "$_sae_value"
+        printf '    key_mgmt=%s\n' "$(qm1_wpa_key_mgmt_value "$WIFI_PASS")"
+        printf '}\n'
+    } > /etc/wpa_supplicant/wpa_supplicant.conf
     # 单元名是 qm1-wifi@**.service（模板单元，%i = 接口名），
     # 不是 qm1-wifi.service —— 原来写的那个名字不存在，enable 永远失败。
     systemctl enable --now qm1-wifi@wlan0.service \

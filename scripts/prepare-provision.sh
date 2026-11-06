@@ -102,11 +102,17 @@ chmod 0700 "$OUT"
 # 否则它会被当成 64 字符的口令而超过 63 的上限，wpa_supplicant 直接拒绝
 # （现象是"密码是对的却连不上"）。SSID 一律加引号并转义。
 PSK_LINE=""
+SAE_LINE=""
 if [ -n "$PSK" ]; then
     if ! PSK_VALUE="$(qm1_wpa_psk_value "$PSK")"; then
         die "Wi-Fi 密码长度非法（${#PSK} 字符）：需要 8..63 字符，或 64 位十六进制"
     fi
     PSK_LINE="    psk=$PSK_VALUE"
+    # 明文口令同时可以当 SAE 口令（路由器是 WPA3-only 或混合模式时要用）。
+    # 64 位十六进制是 PMK，不能当口令，所以那情况不给 sae_password。
+    if SAE_VALUE="$(qm1_wpa_sae_value "$PSK")" && [ -n "$SAE_VALUE" ]; then
+        SAE_LINE="    sae_password=$SAE_VALUE"
+    fi
 fi
 
 {
@@ -117,14 +123,13 @@ fi
     echo "network={"
     echo "    ssid=$(qm1_wpa_ssid_value "$SSID")"
     [ -n "$PSK_LINE" ] && echo "$PSK_LINE"
+    [ -n "$SAE_LINE" ] && echo "$SAE_LINE"
     # 没有 psk 就是开放网络 ⇒ key_mgmt 必须是 NONE。
     # 写成 WPA-PSK 又不带 psk，wpa_supplicant 会拒绝整段 network 块
     # （而且是"连不上"这种看不出原因的现象）。
-    if [ -n "$PSK_LINE" ]; then
-        echo "    key_mgmt=WPA-PSK"
-    else
-        echo "    key_mgmt=NONE"
-    fi
+    # 有口令时 key_mgmt 带 SAE：纯 WPA2 的路由器会先走 PSK，不受影响；
+    # WPA3-only / 要求 SAE 的混合路由器才连得上（这台机器没网口）。
+    echo "    key_mgmt=$(qm1_wpa_key_mgmt_value "$PSK")"
     echo "}"
 } > "$OUT/wpa_supplicant.conf"
 chmod 0600 "$OUT/wpa_supplicant.conf"

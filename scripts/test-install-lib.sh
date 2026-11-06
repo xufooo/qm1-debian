@@ -195,13 +195,15 @@ echo "== wpa_supplicant 取值规则（两份实现必须一致） =="
 # 两边一旦走样，就会出现"CI 里配好的密码，机器上连不上"。
 COMMON_LIB="$REPO_ROOT/scripts/lib/common.sh"
 [ -r "$COMMON_LIB" ] || { echo "找不到 $COMMON_LIB" >&2; exit 1; }
-wpa_eval() {  # $1=lib $2=ssid $3=psk → "ssid_value|psk_value|rc"
+wpa_eval() {  # $1=lib $2=ssid $3=psk → "ssid|psk|sae|key_mgmt|rc"
     bash -c '
         set -uo pipefail
         . "$1"
         s="$(qm1_wpa_ssid_value "$2")"
         if p="$(qm1_wpa_psk_value "$3")"; then rc=0; else rc=1; p=""; fi
-        printf "%s|%s|%s\n" "$s" "$p" "$rc"
+        if sa="$(qm1_wpa_sae_value "$3")"; then :; else sa=""; fi
+        km="$(qm1_wpa_key_mgmt_value "$3")"
+        printf "%s|%s|%s|%s|%s\n" "$s" "$p" "$sa" "$km" "$rc"
     ' _ "$1" "$2" "$3"
 }
 wpa_case() {  # $1=说明 $2=ssid $3=psk $4=期望
@@ -216,16 +218,21 @@ wpa_case() {  # $1=说明 $2=ssid $3=psk $4=期望
     fi
 }
 HEX64="$(printf 'a%.0s' $(seq 1 64))"
-wpa_case "64 位十六进制 PSK 不加引号" "MySSID" "$HEX64" "\"MySSID\"|$HEX64|0"
-wpa_case "普通口令加引号" "MySSID" "passphrase" '"MySSID"|"passphrase"|0'
-wpa_case "含引号与反斜杠的口令" "MySSID" 'pa"ss\word' '"MySSID"|"pa\"ss\\word"|0'
+# key_mgmt 的取值也在同一份断言里比：
+#   * 明文口令 → WPA-PSK SAE（路由器是 WPA3-only 或要求 SAE 的混合模式时，
+#     只写 WPA-PSK 是永远连不上的 —— 这台机器没有 RJ45，Wi-Fi 断了等于整机断网）；
+#   * 64 位十六进制（PMK）→ 只能 WPA-PSK（PMK 当不了 SAE 口令）；
+#   * 空口令 → NONE。
+wpa_case "64 位十六进制 PSK 不加引号" "MySSID" "$HEX64" "\"MySSID\"|$HEX64||WPA-PSK|0"
+wpa_case "普通口令加引号" "MySSID" "passphrase" '"MySSID"|"passphrase"|"passphrase"|WPA-PSK SAE|0'
+wpa_case "含引号与反斜杠的口令" "MySSID" 'pa"ss\word' '"MySSID"|"pa\"ss\\word"|"pa\"ss\\word"|WPA-PSK SAE|0'
 # SSID 里同时有空格、引号和反斜杠：这三个都要转义，否则 wpa_supplicant 会
 # 把 SSID 截断或读成别的名字。
 SSID_TRICKY='My "Net"\'
-wpa_case "含空格与引号的 SSID" "$SSID_TRICKY" "passphrase" '"My \"Net\"\\"|"passphrase"|0'
-wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||1'
-wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||1'
-wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"||0'
+wpa_case "含空格与引号的 SSID" "$SSID_TRICKY" "passphrase" '"My \"Net\"\\"|"passphrase"|"passphrase"|WPA-PSK SAE|0'
+wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||WPA-PSK|1'
+wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||WPA-PSK|1'
+wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"|||NONE|0'
 
 echo "== 磁盘辅助函数（两份实现必须一致） =="
 # 主机侧（构建链）现在也有一份同名实现，放在 scripts/lib/common.sh 里 ——
