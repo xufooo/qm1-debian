@@ -29,10 +29,22 @@ if [ ! -e "$ROOT/dev/null" ] && [ ! -L "$ROOT/dev/null" ]; then
     created_null=1
 fi
 
-chroot "$ROOT" systemd-analyze --man=no verify "${units[@]}"
+verify_units() {
+    if chroot "$ROOT" systemd-analyze --man=no "$@"; then
+        return 0
+    else
+        result=$?
+        # Preserve the original failure while exposing the manager's actual
+        # load error; an offline tree cannot be diagnosed with journalctl.
+        echo "Unit verification failed; retrying with debug logging" >&2
+        SYSTEMD_LOG_LEVEL=debug chroot "$ROOT" systemd-analyze --man=no "$@" || true
+        return "$result"
+    fi
+}
+verify_units verify "${units[@]}"
 # These templates need different instances. The file argument is the
 # existing template, not an instance filename that does not exist.
-chroot "$ROOT" systemd-analyze --man=no --instance=wlan0 verify \
+verify_units --instance=wlan0 verify \
     /etc/systemd/system/qm1-wifi@.service
-chroot "$ROOT" systemd-analyze --man=no --instance=1000 verify \
+verify_units --instance=1000 verify \
     /usr/lib/systemd/system/user@.service
