@@ -174,6 +174,9 @@ jobs:
             --profile "${{ inputs.profile || 'base' }}" \
             ${EXTRA[@]+"${EXTRA[@]}"}
 
+      - name: Validate shipped systemd units
+        run: bash scripts/verify-systemd-units.sh build/rootfs
+
       - name: Build image artifacts (ESP + rootfs + manifest)
         run: |
           bash scripts/build-image.sh \
@@ -1245,24 +1248,6 @@ jobs:
           rm -f build/out/esp-installer.provisioned.img build/out/qm1-installer.provisioned.img
           rm -rf "$PROV"
           echo "OK   provisioning 注入可用（裸 ESP 与整盘镜像两条路径都通过）"
-
-      - name: Validate shipped systemd units
-        run: |
-          set -eu
-          ROOT=build/rootfs
-          # 打包清空了 /dev；离线解析 mask -> /dev/null 仍需要该设备存在。
-          # 只临时补这个节点，退出时清理，不能把它留进最终文件系统。
-          test -f "$ROOT/usr/lib/systemd/system/user@.service"
-          mknod -m 666 "$ROOT/dev/null" c 1 3
-          trap 'rm -f "$ROOT/dev/null"' EXIT
-          # 精简系统不要求安装 man-db；这里只验单元及依赖，不验手册页。
-          chroot "$ROOT" systemd-analyze --man=no verify \
-            qm1-ssh-hostkeys.service ssh.service \
-            qm1-wifi@wlan0.service qm1-firstboot.service \
-            qm1-bluetooth.service qm1-hardware-fixups.service \
-            qm1-selftest.service qm1-selftest.timer \
-            qm1-health-collect.service qm1-health-collect.timer \
-            user@1000.service
 
       - name: Assert the system base contains no application payload
         run: |

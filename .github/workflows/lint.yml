@@ -184,6 +184,7 @@ jobs:
           bash scripts/test-hardware-fixups.sh
           bash scripts/test-base-policy.sh
           bash scripts/test-selfcheck-policy.sh
+          bash scripts/test-unit-verifier.sh
 
       - name: Upstream rtw88 patch set (applies to the pinned tree)
         run: |
