@@ -14,6 +14,20 @@ for unit in qm1-ssh-hostkeys.service qm1-firstboot.service qm1-bluetooth.service
 done
 : > "$WORK/root/usr/lib/systemd/system/ssh.service"
 : > "$WORK/root/usr/lib/systemd/system/user@.service"
+cat > "$WORK/bin/unshare" <<'SH'
+#!/bin/sh
+[ "$1 $2 $3" = '--mount --propagation private' ] || exit 20
+shift 3
+exec "$@"
+SH
+cat > "$WORK/bin/mount" <<'SH'
+#!/bin/sh
+printf 'mount %s\n' "$*" >> "$FIXTURE_MOUNT_LOG"
+SH
+cat > "$WORK/bin/umount" <<'SH'
+#!/bin/sh
+printf 'umount %s\n' "$*" >> "$FIXTURE_MOUNT_LOG"
+SH
 cat > "$WORK/bin/mknod" <<'SH'
 #!/bin/sh
 # Parser fixture only: no actual device creation or access.
@@ -41,12 +55,19 @@ for arg in "$@"; do
 done
 if [ "${FIXTURE_VERIFY_FAIL:-0}" = 1 ]; then exit 7; fi
 SH
-chmod +x "$WORK/bin/mknod" "$WORK/bin/chroot"
+chmod +x "$WORK/bin/"*
+export FIXTURE_MOUNT_LOG="$WORK/mount.log"
 PATH="$WORK/bin:$PATH" bash "$SCRIPT_DIR/verify-systemd-units.sh" "$WORK/root"
 [ ! -e "$WORK/root/dev/null" ]
+[ ! -e "$WORK/root/sys" ]
+[ ! -e "$WORK/root/proc" ]
 if PATH="$WORK/bin:$PATH" FIXTURE_VERIFY_FAIL=1 \
     bash "$SCRIPT_DIR/verify-systemd-units.sh" "$WORK/root"; then
     echo 'FAIL verifier hid a unit verification error'; exit 1
 fi
 [ ! -e "$WORK/root/dev/null" ]
-echo 'PASS real unit paths, distinct template instances, failure propagation and device cleanup'
+[ ! -e "$WORK/root/sys" ]
+[ ! -e "$WORK/root/proc" ]
+[ "$(grep -c '^umount ' "$FIXTURE_MOUNT_LOG")" = 4 ]
+[ "$(grep -c '^mount -o remount,bind,ro ' "$FIXTURE_MOUNT_LOG")" = 2 ]
+echo 'PASS isolated read-only runtime mounts, cleanup, real unit paths, distinct template instances, failure propagation and device cleanup'
