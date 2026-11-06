@@ -120,7 +120,7 @@ for b in /sys/class/block/mmcblk*; do
 done
 if [ -n "$emmc_blk" ]; then
     _parts="$(lsblk -ndo NAME "$emmc_blk" 2>/dev/null | tail -n +2 | tr '\n' ' ')"
-    row PASS "eMMC 块设备" "$emmc_blk（type=MMC）分区：${_parts:-无}　全部 mmc：${mmc_summary}"
+    row PASS "eMMC 块设备" "${emmc_blk}（type=MMC）分区：${_parts:-无}　全部 mmc：${mmc_summary}"
 elif [ -n "$mmc_summary" ]; then
     row FAIL "eMMC 块设备" "没有找到 type=MMC 的 eMMC（只看到：${mmc_summary}）"
 else
@@ -275,10 +275,10 @@ if [ -n "$ifs" ]; then
                    && _bool_true "$_p_lps" && _bool_true "$_p_bf" \
                    && [ "$_p_dbg" = "0" ]; then
                     row PASS "rtw88 省电/参数" \
-                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=$_p_dbg（模块 $_rtw_owner）"
+                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=${_p_dbg}（模块 ${_rtw_owner}）"
                 else
                     row FAIL "rtw88 省电/参数" \
-                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=$_p_dbg（模块 ${_rtw_owner:-未找到持有该参数的 rtw 模块}）—— 前两项须为真、debug_mask 须为 0（见 /etc/modprobe.d/qm1-rtw88-8723bs.conf；disable_lps_deep 不为真会被省电看门狗卡住 TX）"
+                        "disable_lps_deep=$_p_lps support_bf=$_p_bf debug_mask=${_p_dbg}（模块 ${_rtw_owner:-未找到持有该参数的 rtw 模块}）—— 前两项须为真、debug_mask 须为 0（见 /etc/modprobe.d/qm1-rtw88-8723bs.conf；disable_lps_deep 不为真会被省电看门狗卡住 TX）"
                 fi
                 ;;
             *r8723bs_qm1*)
@@ -552,7 +552,7 @@ if [ -d /etc/qm1/provision ]; then
     prov_dir="/etc/qm1/provision"
 fi
 if [ -n "$prov_dir" ]; then
-    row PASS "provisioning 文件" "$prov_dir（$(ls -1 "$prov_dir" 2>/dev/null | tr '\n' ' ')）"
+    row PASS "provisioning 文件" "${prov_dir}（$(ls -1 "$prov_dir" 2>/dev/null | tr '\n' ' ')）"
 else
     row WARN "provisioning 文件" "没有 /etc/qm1/provision（可放到启动分区 /qm1/provision/）"
 fi
@@ -579,7 +579,7 @@ fi
 if [ "$_resolv_target" = "/usr/lib/systemd/resolv.conf" ]; then
     row PASS "DNS 数据源" "/etc/resolv.conf → /usr/lib/systemd/resolv.conf（resolved 的 stub）"
 elif [ -n "$_resolv_target" ]; then
-    row FAIL "DNS 数据源" "/etc/resolv.conf 指向 $_resolv_target，不是 resolved 的 stub —— 没有 DNS 数据源（NTP 解析不了域名 → 时钟停在 1970 → TLS 全废）"
+    row FAIL "DNS 数据源" "/etc/resolv.conf 指向 ${_resolv_target}，不是 resolved 的 stub —— 没有 DNS 数据源（NTP 解析不了域名 → 时钟停在 1970 → TLS 全废）"
 else
     row FAIL "DNS 数据源" "/etc/resolv.conf 不是指向 stub 的软链（Debian 13 的 systemd/resolved 都不带这个文件，得自己挂）"
 fi
@@ -588,7 +588,7 @@ _qm1_uid="$(id -u qm1 2>/dev/null || true)"
 if [ "$_qm1_uid" = "1000" ]; then
     row PASS "可登录账号" "qm1 (uid 1000) 存在"
 elif [ -n "$_qm1_uid" ]; then
-    row WARN "可登录账号" "qm1 的 uid 是 $_qm1_uid（预期 1000）"
+    row WARN "可登录账号" "qm1 的 uid 是 ${_qm1_uid}（预期 1000）"
 else
     row FAIL "可登录账号" "没有 qm1 账号 —— 刷完机没人能登"
 fi
@@ -642,7 +642,7 @@ if command -v iw >/dev/null 2>&1 && [ -e "/sys/class/net/$WLAN_IF" ]; then
     _link="$(iw dev "$WLAN_IF" link 2>/dev/null || true)"
     if grep -q 'Connected to' <<<"$_link"; then
         _ssid="$(iw dev "$WLAN_IF" link 2>/dev/null | sed -n 's/^[[:space:]]*SSID:[[:space:]]*//p' | head -1)"
-        row PASS "Wi-Fi 关联" "已关联${_ssid:+（SSID: $_ssid）}"
+        row PASS "Wi-Fi 关联" "已关联${_ssid:+（SSID: ${_ssid}）}"
     elif grep -q 'not connected' <<<"$_link"; then
         row FAIL "Wi-Fi 关联" "未关联 —— 内置 Wi-Fi 是这台机器唯一的联网链路；先看绑定的是哪个模块（rtw88_qm1 才算对）"
     else
@@ -776,16 +776,16 @@ else
     pc="$(cat "$emmc_host/power/control" 2>/dev/null || true)"
     asd="$(cat "$emmc_host/power/autosuspend_delay_ms" 2>/dev/null || true)"
     if [ "$pc" = "on" ] && { [ -z "$asd" ] || [ "$asd" = "-1" ]; }; then
-        row PASS "eMMC runtime PM" "已关闭自动挂起（$emmc_host：control=on${asd:+，autosuspend_delay_ms=$asd}）"
+        row PASS "eMMC runtime PM" "已关闭自动挂起（${emmc_host}：control=on${asd:+，autosuspend_delay_ms=$asd}）"
     else
-        row WARN "eMMC runtime PM" "control=${pc:-未知} autosuspend_delay_ms=${asd:-未知}（$emmc_host，自动挂起仍开 → 可能在读写中掉卡）"
+        row WARN "eMMC runtime PM" "control=${pc:-未知} autosuspend_delay_ms=${asd:-未知}（${emmc_host}，自动挂起仍开 → 可能在读写中掉卡）"
     fi
 fi
 
 # microSD 卡检测：上游 sdhci-acpi 的 CD pull-up quirk 只对
 # ASUSTeK + T100TA 生效；这块板子若不匹配，卡槽就是插了也认不出。
 if [ -n "$sd_blk" ]; then
-    row PASS "microSD 卡" "检测到 SD 卡（$sd_blk）"
+    row PASS "microSD 卡" "检测到 SD 卡（${sd_blk}）"
 else
     dmi_v="$(cat /sys/devices/virtual/dmi/id/sys_vendor 2>/dev/null || echo '')"
     dmi_p="$(cat /sys/devices/virtual/dmi/id/product_name 2>/dev/null || echo '')"
@@ -794,7 +794,7 @@ else
             row WARN "microSD 卡" "未检出 SD 卡（本板匹配上游 quirk，若卡已插请检查 DSDT 的 CD 引脚）"
             ;;
         *)
-            row INFO "microSD 卡" "未检出 SD 卡（上游 CD pull-up quirk 只匹配 ASUSTeK+T100TA，本机=$dmi_v / $dmi_p）"
+            row INFO "microSD 卡" "未检出 SD 卡（上游 CD pull-up quirk 只匹配 ASUSTeK+T100TA，本机=$dmi_v / ${dmi_p}）"
             ;;
     esac
 fi
@@ -812,7 +812,7 @@ else
     row WARN "存储设备" "没有 mmcblk 设备"
 fi
 life="$(find /sys/class/mmc_host -name life_time -type f 2>/dev/null | head -1 | xargs -r cat 2>/dev/null || true)"
-[ -n "$life" ] && row INFO "eMMC 寿命计数" "$life（0x… 越大越接近寿命上限）"
+[ -n "$life" ] && row INFO "eMMC 寿命计数" "${life}（0x… 越大越接近寿命上限）"
 
 # RTC
 if [ -e /dev/rtc0 ]; then
@@ -932,7 +932,7 @@ if command -v timedatectl >/dev/null 2>&1; then
     if [ "$sync" = "yes" ]; then
         row PASS "时间同步" "已同步（$(date -u)）"
     else
-        row WARN "时间同步" "未同步（NTPSynchronized=$sync），TLS 证书校验会失败"
+        row WARN "时间同步" "未同步（NTPSynchronized=${sync}），TLS 证书校验会失败"
     fi
 else
     row WARN "时间同步" "没有 timedatectl"
@@ -950,6 +950,163 @@ if systemctl is-enabled --quiet qm1-hardware-fixups.service 2>/dev/null; then
     row PASS "硬件修正服务" "qm1-hardware-fixups.service 已启用"
 else
     row WARN "硬件修正服务" "qm1-hardware-fixups.service 未启用"
+fi
+
+# ---------------- 8. 开机即用的其余判据 ----------------
+# 这一节补的是"验收清单里能机器判定、但之前没人查"的条目。
+# 为什么要补：清单是人工逐条打勾的，可自检脚本能自动判的那部分就必须
+# 自动判 —— 不然"设备自己查过了吗"永远要靠人记得手动敲一遍。
+# 对应清单条目：1.7 / 2.5 / 2.6 / 2.7 / 2.9 / 3.16 / 6.2 / 6.3 / 6.5 / 7.1
+section "开机即用的其余判据"
+
+# --- 8.1 没有单元处于 failed（清单 2.7）---
+# 只认"看起来像单元名"的行：systemctl 的输出末尾还有一行
+# "0 loaded units listed."，那不是单元。
+_failed_units=""
+if command -v systemctl >/dev/null 2>&1; then
+    _failed_units="$(systemctl list-units --failed --no-legend --plain --no-pager 2>/dev/null \
+        | awk '$1 ~ /^[A-Za-z0-9_.@-]+\.(service|socket|timer|mount|path|target|device|swap|slice)$/ { print $1 }' \
+        || true)"
+fi
+if [ -z "$_failed_units" ]; then
+    row PASS "failed 单元" "没有（systemctl list-units --failed 为空）"
+else
+    row FAIL "failed 单元" "$(printf '%s' "$_failed_units" | tr '\n' ' ')"
+fi
+
+# --- 8.2 没有单元被超时杀掉（清单 2.7）---
+# "timed out" 是 systemd 杀单元时的原话；顺手确认全局默认超时是 120s
+# （我们把默认从发行版的 90s/30s 改成 120s，是为了让取证有时间跑完）。
+_boot_log="$(journalctl -b --no-pager 2>/dev/null || true)"
+_timeout_hits="$(grep -ci 'timed out' <<<"$_boot_log" || true)"
+if [ "${_timeout_hits:-0}" -eq 0 ]; then
+    row PASS "单元超时" "本次启动没有 'timed out' 记录"
+else
+    row FAIL "单元超时" "本次启动有 ${_timeout_hits} 处 'timed out'（看 journalctl -b | grep -i 'timed out'）"
+fi
+_default_to="$(grep -rE '^[[:space:]]*DefaultTimeoutStartSec=' /etc/systemd/system.conf /etc/systemd/system.conf.d/ 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ' || true)"
+if [ -n "$_default_to" ]; then
+    row PASS "默认单元超时" "${_default_to}"
+else
+    row WARN "默认单元超时" "systemd 没设 DefaultTimeoutStartSec（用发行版默认值）"
+fi
+
+# --- 8.3 根分区与 ESP 都在 fstab 里（清单 2.6）---
+_fstab=""
+[ -r /etc/fstab ] && _fstab="$(cat /etc/fstab 2>/dev/null || true)"
+_root_line="$(printf '%s\n' "$_fstab" | awk '$2 == "/" { print; exit }')"
+if [ -n "$_root_line" ]; then
+    row PASS "fstab 根条目" "$(printf '%s' "$_root_line" | tr -s ' ')"
+else
+    row FAIL "fstab 根条目" "/etc/fstab 里没有根分区条目"
+fi
+_esp_line="$(printf '%s\n' "$_fstab" | awk '$2 == "/boot/efi" { print; exit }')"
+if [ -n "$_esp_line" ]; then
+    # ESP 必须带 nofail：ESP 挂不上绝不能挡开机。
+    if printf '%s' "$_esp_line" | grep -q 'nofail'; then
+        row PASS "fstab ESP 条目" "$(printf '%s' "$_esp_line" | tr -s ' ')"
+    else
+        row FAIL "fstab ESP 条目" "$(printf '%s' "$_esp_line" | tr -s ' ') —— 缺 nofail，ESP 挂不上会挡开机"
+    fi
+else
+    row FAIL "fstab ESP 条目" "/etc/fstab 里没有 /boot/efi 条目（ESP 挂不上会挡开机）"
+fi
+
+# --- 8.4 日志落盘（清单 2.9）---
+# journald 默认 Storage=auto ⇒ 只写 /run/log/journal ⇒ 重启即失现场。
+_journal_storage="$(grep -rE '^[[:space:]]*Storage=' /etc/systemd/journald.conf /etc/systemd/journald.conf.d/ 2>/dev/null | tail -1 | cut -d= -f2 | tr -d ' ' || true)"
+if [ "$_journal_storage" = "persistent" ] && [ -d /var/log/journal ]; then
+    _boots="$(journalctl --list-boots --no-pager 2>/dev/null | wc -l | tr -d ' ' || true)"
+    row PASS "日志落盘" "Storage=persistent，/var/log/journal 存在（可列出的启动数=${_boots:-0}）"
+else
+    row WARN "日志落盘" "Storage=${_journal_storage:-未设置}，/var/log/journal ${_journal_dir:-不在}（重启后可能翻不到上次的现场）"
+fi
+
+# --- 8.5 EFI 启动项（清单 1.7）---
+# 这台机器的固件是 32 位 IA32 ⇒ 加载不了 PE32+ 的 BOOTX64.EFI；
+# 必须登记 BOOTIA32.EFI（两种固件都能加载）。
+if [ ! -d /sys/firmware/efi/efivars ]; then
+    row WARN "EFI 启动项" "这台机器不是以 UEFI 模式启动（没有 efivars），登记不了也没法查"
+elif ! command -v efibootmgr >/dev/null 2>&1; then
+    row WARN "EFI 启动项" "没有 efibootmgr，查不了"
+else
+    _efi_out="$(efibootmgr -v 2>/dev/null || true)"
+    if printf '%s' "$_efi_out" | grep -q 'BOOTIA32\.EFI'; then
+        row PASS "EFI 启动项" "有 BOOTIA32.EFI（IA32 固件也能加载的那条）"
+    elif printf '%s' "$_efi_out" | grep -q 'BOOTX64\.EFI'; then
+        row FAIL "EFI 启动项" "只登记了 BOOTX64.EFI —— 这台机器的 32 位 IA32 固件加载不了它，开机会找不到系统"
+    else
+        row FAIL "EFI 启动项" "没有登记任何启动项（efibootmgr -v 看得到才有）"
+    fi
+fi
+
+# --- 8.6 安装记录（清单 7.1）---
+_rec="/etc/qm1-installed-to-emmc"
+if [ -r "$_rec" ]; then
+    _rec_mode="$(stat -c '%a' "$_rec" 2>/dev/null || stat -f '%Lp' "$_rec" 2>/dev/null || echo '?')"
+    _rec_user="$(grep -E '^[[:space:]]*ssh_user=' "$_rec" 2>/dev/null | head -1 | cut -d= -f2 | tr -d ' ' || true)"
+    if [ "$_rec_mode" = "600" ] && [ -n "$_rec_user" ]; then
+        row PASS "安装记录" "${_rec}（权限 ${_rec_mode}，登录账号 ${_rec_user}）"
+    else
+        row WARN "安装记录" "$_rec 存在，但权限=${_rec_mode:-?}、ssh_user=${_rec_user:-缺}"
+    fi
+else
+    row WARN "安装记录" "没有 ${_rec}（这台机器不是用安装器装进 eMMC 的？）"
+fi
+
+# --- 8.7 TLS 可用（清单 2.5）---
+# 先看 DNS 通不通：DNS 不通是网络问题（WARN），DNS 通而 TLS 不通才是
+# 时钟/证书问题（FAIL）—— 把两种混在一起报，网络一抖就变成假故障。
+if ! command -v curl >/dev/null 2>&1; then
+    row WARN "TLS 可用" "没有 curl，查不了"
+elif ! getent hosts deb.debian.org >/dev/null 2>&1; then
+    row WARN "TLS 可用" "DNS 还没解析出 deb.debian.org（网络没通，不是镜像问题）"
+else
+    _tls_head="$(curl -sS -I --max-time 15 https://deb.debian.org/ 2>&1 | head -1 || true)"
+    case "$_tls_head" in
+        HTTP/*) row PASS "TLS 可用" "$(printf '%s' "$_tls_head" | tr -d '\r')" ;;
+        *)      row FAIL "TLS 可用" "DNS 通但 HTTPS 失败：$(printf '%s' "$_tls_head" | tr -d '\r' | cut -c1-120)" ;;
+    esac
+fi
+
+# --- 8.8 模块符号版本不匹配（清单 3.16）---
+# vermagic 对 ≠ 装得上：符号 CRC 对不上时内核在 insmod 时拒绝，
+# 表现是"驱动在、模块列表里有、但接口一个都没有"。
+if grep -qiE 'version mismatch|disagrees about version' <<<"$dmesg_out"; then
+    row FAIL "模块符号版本" "内核抱怨过符号版本不匹配（看 dmesg | grep -i 'version mismatch'）"
+else
+    row PASS "模块符号版本" "没有版本不匹配的抱怨"
+fi
+
+# --- 8.9 SQLite 版本（清单 6.2）---
+# Debian 13 的 3.46.1 有 WAL 损坏 bug ⇒ 必须钉 3.53.4。
+if ! command -v sqlite3 >/dev/null 2>&1; then
+    row WARN "SQLite 版本" "没有 sqlite3（运行时部署还没铺好？）"
+else
+    _sqlite_ver="$(sqlite3 --version 2>/dev/null | awk '{print $1}' || true)"
+    case "$_sqlite_ver" in
+        3.53.4) row PASS "SQLite 版本" "${_sqlite_ver}（已钉到没有 WAL 损坏 bug 的版本）" ;;
+        3.46.*) row FAIL "SQLite 版本" "${_sqlite_ver} —— 这是 Debian 13 自带的有 WAL 损坏 bug 的版本" ;;
+        *)      row WARN "SQLite 版本" "${_sqlite_ver:-读不到}" ;;
+    esac
+fi
+
+# --- 8.10 headless Chrome（清单 6.3）---
+if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
+    row PASS "headless Chrome" "$(command -v chromium 2>/dev/null || command -v chromium-browser)"
+else
+    row WARN "headless Chrome" "没有 chromium（运行时部署还没铺好？）"
+fi
+
+# --- 8.11 /dev/shm 够用（清单 6.5）---
+# Chrome 用 /dev/shm 放共享内存，太小会报 "Small ... shared memory"。
+_shm_bytes="$(df -B1 --output=size /dev/shm 2>/dev/null | awk 'NR == 2 { print $1 }' || true)"
+if [ -z "${_shm_bytes:-}" ]; then
+    row WARN "/dev/shm 大小" "读不到（df --output 不可用？）"
+elif [ "${_shm_bytes:-0}" -ge 268435456 ]; then
+    row PASS "/dev/shm 大小" "$(( _shm_bytes / 1048576 )) MiB"
+else
+    row WARN "/dev/shm 大小" "$(( _shm_bytes / 1048576 )) MiB（小于 256 MiB，Chrome 可能报 Small ... shared memory）"
 fi
 
 # ---------------- 汇总 ----------------

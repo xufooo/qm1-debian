@@ -131,7 +131,7 @@ install_pinned_kernel() {
         fi
     done
     if [ -n "$_others" ]; then
-        warn "镜像里还存在其他内核版本：$_others（固定内核模式下不应出现）"
+        warn "镜像里还存在其他内核版本：${_others}（固定内核模式下不应出现）"
     fi
 }
 
@@ -142,7 +142,7 @@ if [ -n "${QM1_KERNEL_VERSION:-}" ]; then
     [ -n "$SUITE_CODENAME" ] \
         || die "无法确定发行版代号（QM1_SUITE 未设置，/etc/os-release 也没有 VERSION_CODENAME）"
     PINNED_KERNEL_ABI="$(kernel_abi_name "$QM1_KERNEL_VERSION" "$SUITE_CODENAME" amd64)"
-    log "固定内核 point release：$QM1_KERNEL_VERSION → ABI $PINNED_KERNEL_ABI（不装元包）"
+    log "固定内核 point release：$QM1_KERNEL_VERSION → ABI ${PINNED_KERNEL_ABI}（不装元包）"
     # 固定版本时装元包会把发行版当前内核一起拉进来，/lib/modules 出现两个版本
     KERNEL_PKGS=""
     install_pinned_kernel "$PINNED_KERNEL_ABI" "$SUITE_CODENAME"
@@ -234,7 +234,7 @@ if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
     _img_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
     [ -n "$_img_kver" ] || die "镜像里没有 /lib/modules，无法核对 Wi-Fi 模块的 vermagic"
     _deb_name="$(basename "$QM1_WIFI_MODULE_DEB")"
-    log "安装打了补丁的 Wi-Fi 模块：$_deb_name（镜像内核 $_img_kver）"
+    log "安装打了补丁的 Wi-Fi 模块：${_deb_name}（镜像内核 ${_img_kver}）"
     cp "$QM1_WIFI_MODULE_DEB" "$TARGET/tmp/$_deb_name"
     if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_deb_name"; then
         rm -f "$TARGET/tmp/$_deb_name"
@@ -245,7 +245,7 @@ if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
     # 注意 modinfo 必须带 -k <版本>：chroot 里的 uname -r 是**构建机**的内核版本
     # （CI 容器 / 宿主），不是镜像里的内核，不指定就会去错目录里找模块。
     _ko="$TARGET/lib/modules/$_img_kver/extra/rtl8723bs/r8723bs_qm1.ko"
-    [ -f "$_ko" ] || die "装完 deb 但镜像里没有 $_ko（模块包布局不对）"
+    [ -f "$_ko" ] || die "装完 deb 但镜像里没有 ${_ko}（模块包布局不对）"
     _vm="$(chroot "$TARGET" modinfo -k "$_img_kver" -F vermagic r8723bs_qm1 2>/dev/null | awk '{print $1}')"
     if [ -z "$_vm" ]; then
         # 兜底：直接从 .ko 的 .modinfo 段里读（不依赖 chroot 里的 modinfo）
@@ -256,13 +256,13 @@ if [ -n "${QM1_WIFI_MODULE_DEB:-}" ] && [ -f "$QM1_WIFI_MODULE_DEB" ]; then
     fi
     case "$_vm" in
         "$_img_kver"*) : ;;
-        *) die "Wi-Fi 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
+        *) die "Wi-Fi 模块 vermagic（${_vm}）与镜像内核（${_img_kver}）不匹配 —— 必须用同一内核版本重编模块" ;;
     esac
     # ★ 模块索引里必须有它（modprobe 靠 modules.dep 找模块）
     if ! grep -q "r8723bs_qm1\.ko" "$TARGET/lib/modules/$_img_kver/modules.dep" 2>/dev/null; then
         die "模块索引 modules.dep 里没有 r8723bs_qm1 —— modprobe 会找不到它（检查 depmod 是否对 $_img_kver 跑过）"
     fi
-    log "Wi-Fi 模块 vermagic：$_vm（与镜像内核一致）"
+    log "Wi-Fi 模块 vermagic：${_vm}（与镜像内核一致）"
     # modules-load.d 里要改成加载打了补丁的那个
     sed -i 's/^r8723bs$/r8723bs_qm1/' "$TARGET/etc/modules-load.d/qm1-hardware.conf"
     WIFI_MODULE_STATE="installed:$_deb_name"
@@ -285,7 +285,7 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     _img_kver="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
     [ -n "$_img_kver" ] || die "镜像里没有 /lib/modules，无法核对 rtw88 模块的 vermagic"
     _deb_name="$(basename "$QM1_RTW88_MODULE_DEB")"
-    log "安装 rtw88 回移模块：$_deb_name（镜像内核 $_img_kver）"
+    log "安装 rtw88 回移模块：${_deb_name}（镜像内核 ${_img_kver}）"
     cp "$QM1_RTW88_MODULE_DEB" "$TARGET/tmp/$_deb_name"
     if ! chroot "$TARGET" apt-get install -y -qq "/tmp/$_deb_name"; then
         rm -f "$TARGET/tmp/$_deb_name"
@@ -350,14 +350,14 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
         # 兜底：直接从 .ko 的 .modinfo 段里读
         _vm="$(grep -ao 'vermagic=[^ ]*' "$_sdio_ko" 2>/dev/null | head -1 | cut -d= -f2)"
     fi
-    [ -n "$_vm" ] || die "读不到 rtw88 模块的 vermagic（$_sdio_ko）"
+    [ -n "$_vm" ] || die "读不到 rtw88 模块的 vermagic（${_sdio_ko}）"
     case "$_vm" in
         "$_img_kver"*) : ;;
-        *) die "rtw88 模块 vermagic（$_vm）与镜像内核（$_img_kver）不匹配 —— 必须用同一内核版本重编模块" ;;
+        *) die "rtw88 模块 vermagic（${_vm}）与镜像内核（${_img_kver}）不匹配 —— 必须用同一内核版本重编模块" ;;
     esac
     [ -f "$TARGET/lib/firmware/rtw88/rtw8723b_fw.bin" ] \
         || die "rtw88 固件 rtw88/rtw8723b_fw.bin 缺失（Debian 13 的 firmware-realtek 不含该 blob）"
-    log "rtw88 模块：$_sdio_mod（vermagic $_vm，与镜像内核一致）"
+    log "rtw88 模块：${_sdio_mod}（vermagic ${_vm}，与镜像内核一致）"
 
     # ★ 隔离：把树内 staging 驱动 r8723bs 和树内 rtw88 系列挡住。
     #   没有这道隔离，出货镜像会**静默地用回有永久卡死路径的 staging 驱动**：
@@ -383,7 +383,7 @@ if [ -n "${QM1_RTW88_MODULE_DEB:-}" ] && [ -f "$QM1_RTW88_MODULE_DEB" ]; then
     mkdir -p "$TARGET/etc/modprobe.d"
     if [ ! -f "$_iso_conf" ]; then
         {
-            echo "# QM1 内置 RTL8723BS：出货驱动是上游 rtw88 整树回移模块（$_sdio_mod），"
+            echo "# QM1 内置 RTL8723BS：出货驱动是上游 rtw88 整树回移模块（${_sdio_mod}），"
             echo "# 树内 staging 驱动 r8723bs 必须挡住，否则它会按 SDIO modalias 抢先绑定，"
             echo "# 把我们装好的 rtw88 模块晾在一边（现象：装了根治模块却仍在用老驱动）。"
             echo "# 树内 rtw88 系列的隔离也在这个文件里 —— 出货模块导出的符号与"
@@ -437,7 +437,7 @@ install r8723bs_qm1 /bin/false"
     }
     _append_iso "$_iso_conf" "$_iso_lines"
     _append_iso "$_fb_conf" "$_fb_lines"
-    log "已补齐隔离配置：$_iso_conf（树内 rtw88）与 $_fb_conf（树内 r8723bs、树外 r8723bs_qm1；删掉它即可回退）"
+    log "已补齐隔离配置：${_iso_conf}（树内 rtw88）与 ${_fb_conf}（树内 r8723bs、树外 r8723bs_qm1；删掉它即可回退）"
 
     # 模块包自带的 qm1-rtw88-8723bs.service 做的是「运行时兜底」：
     # ExecStartPre=-/sbin/modprobe -r r8723bs 把可能已经被 udev 抢先
@@ -460,7 +460,7 @@ install r8723bs_qm1 /bin/false"
         esac
         [ -e "$_rtw88_resolved" ] \
             || die "qm1-rtw88-8723bs.service 的 wants 链接悬空：$_rtw88_unit"
-        log "已启用 qm1-rtw88-8723bs.service（开机卸载树内 r8723bs 并加载 $_sdio_mod）"
+        log "已启用 qm1-rtw88-8723bs.service（开机卸载树内 r8723bs 并加载 ${_sdio_mod}）"
     else
         warn "模块包里没有 $_rtw88_unit —— 运行时兜底不可用（静态隔离仍然有效）"
     fi
@@ -545,7 +545,7 @@ if [ -f "$TARGET/boot/config-$_bt_kver" ]; then
     done
     log "内核蓝牙配置齐备（CONFIG_BT_HCIUART / SERDEV / 3WIRE / BT_RTL）"
 else
-    warn "镜像里没有 boot/config-$_bt_kver，跳过内核蓝牙配置核对"
+    warn "镜像里没有 boot/config-${_bt_kver}，跳过内核蓝牙配置核对"
 fi
 
 for _bt_mod in hci_uart btrtl; do
@@ -578,7 +578,7 @@ KVER="$(ls -1 "$TARGET/lib/modules" 2>/dev/null | sort -V | tail -1)"
 log "镜像内核版本：$KVER"
 
 KCFG="$TARGET/boot/config-$KVER"
-[ -f "$KCFG" ] || warn "没有 $KCFG（内核 config 缺失，驱动状态只能靠 modinfo 判定）"
+[ -f "$KCFG" ] || warn "没有 ${KCFG}（内核 config 缺失，驱动状态只能靠 modinfo 判定）"
 
 # 关键内核 config 基线核对（Debian 13 / 6.12.113 实测值，随镜像记录进清单）
 #   CONFIG_IOSF_MBI=y          —— Bay Trail 的 sdhci-acpi 挂死修复（上游 6e1c7d6103fe）
@@ -691,7 +691,7 @@ done
 mkdir -p "$TARGET/usr/local/share/qm1"
 MANIFEST="$TARGET/usr/local/share/qm1/driver-manifest.txt"
 {
-    echo "# QM1 驱动清单（生成于 rootfs 构建期，arch=$ARCH profile=$PROFILE kernel=$KVER）"
+    echo "# QM1 驱动清单（生成于 rootfs 构建期，arch=$ARCH profile=$PROFILE kernel=${KVER}）"
     echo "# 字段：模块名 状态( module/builtin/absent ) 服务的硬件"
     echo ""
     echo "--- 期望驱动与实际状态 ---"

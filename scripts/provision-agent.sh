@@ -96,7 +96,7 @@ if [ -z "$RUN_AS" ] || [ "$RUN_AS" = "root" ]; then
 fi
 [ -n "$RUN_AS" ] || RUN_AS="root"
 RUN_HOME="$(getent passwd "$RUN_AS" 2>/dev/null | cut -d: -f6)"
-log "运行时部署身份：$RUN_AS（家目录 ${RUN_HOME:-未知}）"
+log "运行时部署身份：${RUN_AS}（家目录 ${RUN_HOME:-未知}）"
 
 # ---------- 1. Wi-Fi（必须最先做）----------
 # ★ 顺序原来反了：先 apt-get update 再写 Wi-Fi 配置。
@@ -205,7 +205,7 @@ else
         sudo -u "$RUN_AS" -H bash -c "$HERMES_CMD"
         rc=$?
         set -e
-        [ "$rc" -eq 0 ] || warn "Hermes 官方安装器返回 $rc；可联网后重跑本脚本"
+        [ "$rc" -eq 0 ] || warn "Hermes 官方安装器返回 ${rc}；可联网后重跑本脚本"
     else
         warn "无法访问 hermes-agent.nousresearch.com（离线？）——联网后重跑本脚本"
     fi

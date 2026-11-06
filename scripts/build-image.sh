@@ -98,7 +98,7 @@ if [ -f "$ROOTFS/etc/fstab" ]; then
             echo "# 根分区：由内核 root=UUID= 挂载，这里补一条让 systemd 也能按 fstab 管理"
             echo "UUID=$ROOT_UUID / ext4 defaults,noatime 0 1"
         } >> "$ROOTFS/etc/fstab"
-        log "已向 fstab 补上根分区条目（UUID=$ROOT_UUID）"
+        log "已向 fstab 补上根分区条目（UUID=${ROOT_UUID}）"
     fi
     # ★ 补上 ESP 的挂载点。
     # 原来 fstab 里只有 "/" 一条 ⇒ 装进 eMMC 之后系统不挂 /boot/efi，
@@ -137,7 +137,7 @@ esac
 # ---------- 4. ESP ----------
 ESP_IMG="$OUT_DIR/esp.img"
 NORMAL_CFG="$OUT_DIR/grub-normal.cfg"
-log "组装 ESP（arch=$ARCH suite=$SUITE_LABEL）"
+log "组装 ESP（arch=$ARCH suite=${SUITE_LABEL}）"
 bash "$SCRIPT_DIR/make-esp.sh" \
     --out "$ESP_IMG" \
     --size-mib "$ESP_SIZE_MIB" \
@@ -236,4 +236,4 @@ MANIFEST="$OUT_DIR/manifest.txt"
     ( cd "$OUT_DIR" && sha256sum esp.img rootfs.img )
 } > "$MANIFEST"
 cat "$MANIFEST" >&2
-log "完成：$ESP_IMG + $ROOT_IMG（用 scripts/assemble-disk.sh 合成整盘镜像）"
+log "完成：$ESP_IMG + ${ROOT_IMG}（用 scripts/assemble-disk.sh 合成整盘镜像）"

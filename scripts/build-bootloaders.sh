@@ -102,7 +102,7 @@ build_one() {   # $1=平台 $2=模块目录 $3=输出文件
     local args=() m f
     if [ "$ALL_MODULES" = "1" ]; then
         while IFS= read -r f; do args+=("$f"); done < <(find "$moddir" -maxdepth 1 -name '*.mod' | sort)
-        log "内嵌整平台模块集：${#args[@]} 个（$plat）"
+        log "内嵌整平台模块集：${#args[@]} 个（${plat}）"
     else
         for m in $MODS; do
             f="$moddir/$m.mod"

@@ -56,7 +56,7 @@ WORK="$OUT_DIR/.work"
 rm -rf "$WORK"
 mkdir -p "$WORK"
 
-log "从 $SUITE 的 $PKG 取 RTL8723BS 固件（$MIRROR）"
+log "从 $SUITE 的 $PKG 取 RTL8723BS 固件（${MIRROR}）"
 
 # ---------------------------------------------------------------------------
 # 1) 从 apt 索引里定位 .deb 的路径与哈希
@@ -77,7 +77,7 @@ for comp in $COMPONENTS; do
         else
             warn "$url 解压失败，换下一个组件"
         fi
-        log "$comp 组件里没有 $PKG，换下一个组件"
+        log "$comp 组件里没有 ${PKG}，换下一个组件"
     fi
 done
 [ -n "$IDX" ] || die "在 $SUITE 的 [$COMPONENTS] 组件里都找不到 $PKG"
@@ -96,7 +96,7 @@ _stanza="$(awk -v pkg="$PKG" '
 ' "$IDX")"
 read -r DEB_PATH DEB_SHA DEB_VER <<<"$_stanza"
 
-[ -n "$DEB_PATH" ] || die "在 $SUITE 索引里找不到 $PKG（组件可能变了，检查 --suite/--mirror）"
+[ -n "$DEB_PATH" ] || die "在 $SUITE 索引里找不到 ${PKG}（组件可能变了，检查 --suite/--mirror）"
 [ -n "$DEB_SHA" ]  || die "$PKG 在索引里没有 SHA256（索引异常）"
 log "$PKG $DEB_VER → $DEB_PATH"
 
@@ -109,7 +109,7 @@ curl -fsSL --max-time 600 "$MIRROR/$DEB_PATH" -o "$DEB"
 
 GOT_SHA="$(sha256sum "$DEB" | cut -d' ' -f1)"
 if [ "$GOT_SHA" != "$DEB_SHA" ]; then
-    die ".deb 校验失败：期望 $DEB_SHA，实际 $GOT_SHA"
+    die ".deb 校验失败：期望 ${DEB_SHA}，实际 $GOT_SHA"
 fi
 log ".deb sha256 校验通过"
 
@@ -126,7 +126,7 @@ BLOB_SRC=""
 for _cand in "$EXDIR/usr/$BLOB_REL" "$EXDIR/$BLOB_REL"; do
     if [ -f "$_cand" ]; then BLOB_SRC="$_cand"; break; fi
 done
-[ -n "$BLOB_SRC" ] || die "$PKG 里没有 $BLOB_REL（包内容变了？）"
+[ -n "$BLOB_SRC" ] || die "$PKG 里没有 ${BLOB_REL}（包内容变了？）"
 install -m 0644 "$BLOB_SRC" "$OUT_DIR/rtw8723b_fw.bin"
 
 for _wow in "$EXDIR/usr/$BLOB_REL_WOW" "$EXDIR/$BLOB_REL_WOW"; do

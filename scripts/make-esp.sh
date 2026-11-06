@@ -141,7 +141,7 @@ sed -e "s|@ROOT_UUID@|$SLOT64_UUID|g" \
 # 自检：GRUB 用来定位引导分区的 search 行必须指向实际建卷时的卷标。
 # 卷标对不上 = GRUB 找不到引导分区 = 机器根本起不来，而且没有任何报错提示。
 if ! grep -q "^search --label $LABEL --set=root" "$CFG"; then
-    die "grub.cfg 里没有 'search --label $LABEL --set=root'（实际卷标 $LABEL）—— GRUB 会找不到引导分区，拒绝写出一个起不来的 ESP"
+    die "grub.cfg 里没有 'search --label $LABEL --set=root'（实际卷标 ${LABEL}）—— GRUB 会找不到引导分区，拒绝写出一个起不来的 ESP"
 fi
 
 # 删除"内核/UUID 缺失"那一侧的菜单项（64 位侧与 32 位侧互相独立）

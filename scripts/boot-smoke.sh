@@ -159,7 +159,7 @@ OVMF_CODE.fd:OVMF_VARS.fd"
         echo "BOOT-SMOKE: Debian 上装 ovmf（x86_64）和 ovmf-ia32（32 位）就有。" >&2
         exit 77
     fi
-    log "OVMF 固件：$OVMF_CODE（变量存储：$OVMF_VARS）"
+    log "OVMF 固件：${OVMF_CODE}（变量存储：${OVMF_VARS}）"
 
     DISK_COPY="$WORK/qm1-disk-boot.img"
     # 整盘镜像是稀疏的（30 GiB 盘只写了几百 MB）⇒ 拷贝时保持稀疏，

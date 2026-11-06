@@ -58,8 +58,8 @@ IMG_SIZE_MIB=$(( IMG_SIZE / 1048576 ))
 BACKUP_BYTES=$(( BACKUP_GIB * 1024 * 1024 * 1024 ))
 NEEDED=$(( IMG_SIZE + BACKUP_BYTES + 16 * 1048576 ))
 
-log "镜像      ：$IMAGE（${IMG_SIZE_MIB} MiB）"
-log "目标设备  ：$TARGET（${TGT_SIZE_MIB} MiB，$(lsblk -ndo MODEL "$TARGET" 2>/dev/null || echo '型号未知')）"
+log "镜像      ：${IMAGE}（${IMG_SIZE_MIB} MiB）"
+log "目标设备  ：${TARGET}（${TGT_SIZE_MIB} MiB，$(lsblk -ndo MODEL "$TARGET" 2>/dev/null || echo '型号未知')）"
 log "备份预留  ：${BACKUP_GIB} GiB"
 
 # 可移动性：能读出 removable 就以它为准，读不出就当固定盘处理
@@ -68,7 +68,7 @@ if [ -r "/sys/block/$TGT_NAME/removable" ]; then
     REMOVABLE="$(cat "/sys/block/$TGT_NAME/removable")"
 fi
 if [ "$REMOVABLE" != "1" ] && [ "$FORCE" -ne 1 ]; then
-    fail "$TARGET 不是可移动设备（/sys/block/$TGT_NAME/removable = $REMOVABLE）。
+    fail "$TARGET 不是可移动设备（/sys/block/$TGT_NAME/removable = ${REMOVABLE}）。
 写盘会把这块盘上的一切抹掉。确认这就是你要清空的盘，就加 --force 再跑一次。"
 fi
 [ "$REMOVABLE" = "1" ] || log "注意：$TARGET 被当作固定盘处理（--force）"

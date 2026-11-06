@@ -78,7 +78,7 @@ enable_unit() {
         mkdir -p "$TARGET/etc/systemd/system/$_dir"
         ln -sf "/lib/systemd/system/$_unit" \
                "$TARGET/etc/systemd/system/$_dir/$_unit"
-        echo "[hook01] 已启用 $_unit（$_dir）: $(ls -l "$TARGET/etc/systemd/system/$_dir/$_unit" 2>&1)"
+        echo "[hook01] 已启用 ${_unit}（${_dir}）: $(ls -l "$TARGET/etc/systemd/system/$_dir/$_unit" 2>&1)"
     fi
     # ★ 启用失败必须响亮地失败，不能悄悄跳过。
     #   这六个单元（ssh / oomd / networkd / resolved / timesyncd / bluetooth）
@@ -87,7 +87,7 @@ enable_unit() {
     #   没有 timesyncd 时钟停在 1970、TLS 全废。
     #   原来这里失败只留一句"没打印已启用"，构建照样绿 ⇒ 刷上去才发现。
     if [ ! -f "$TARGET/lib/systemd/system/$_unit" ]; then
-        echo "[hook01][fail] 镜像里没有 $_unit 的单元文件（/lib/systemd/system/$_unit）" >&2
+        echo "[hook01][fail] 镜像里没有 $_unit 的单元文件（/lib/systemd/system/${_unit}）" >&2
         exit 1
     fi
     if ! link_target_ok "$TARGET/etc/systemd/system/$_dir/$_unit"; then

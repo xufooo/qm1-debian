@@ -343,7 +343,7 @@ jobs:
           if [ -n "$_fw_list" ]; then
             for _fw in $_fw_list; do
               [ -f "$ROOT/lib/firmware/$_fw" ] \
-                || { echo "::error::出货模块 $MOD 要用固件 $_fw，镜像里却没有 /lib/firmware/$_fw"; exit 1; }
+                || { echo "::error::出货模块 $MOD 要用固件 ${_fw}，镜像里却没有 /lib/firmware/$_fw"; exit 1; }
             done
           elif [ "$MOD" = "rtw88_qm1" ]; then
             echo "::error::出货模块 $MOD 没有声明任何固件（MODULE_FIRMWARE 为空）"
@@ -362,7 +362,7 @@ jobs:
           #                                （现场没网时删掉它就能回退到 staging 模块）
           FB="$ROOT/etc/modprobe.d/qm1-rtl8723bs-fallback.conf"
           [ -f "$FB" ] \
-            || { echo "::error::没有 $FB（现场没网时就没有退路了）"; exit 1; }
+            || { echo "::error::没有 ${FB}（现场没网时就没有退路了）"; exit 1; }
           grep -q 'rm /etc/modprobe.d/qm1-rtl8723bs-fallback.conf' "$FB" \
             || { echo "::error::$FB 里没写怎么切回 staging（现场唯一提示）"; exit 1; }
           # ★ 隔离必须有两道：blacklist 挡 udev 的 modalias 自动加载，
@@ -387,7 +387,7 @@ jobs:
                      rtw88_usb rtw88_pci; do
               [ "$m" = "$MOD" ] && continue
               grep -qx "blacklist $m" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
-                || { echo "::error::modprobe 配置里没有 blacklist $m（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
+                || { echo "::error::modprobe 配置里没有 blacklist ${m}（会与单模块 rtw88_qm1 符号冲突）"; exit 1; }
               grep -qx "install $m /bin/false" "$ROOT/etc/modprobe.d/qm1-rtw88-8723bs.conf" \
                 || { echo "::error::modprobe 配置里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
             done
@@ -398,7 +398,7 @@ jobs:
           #   永久卡死路径一条没少（现象：装了根治模块却仍在用老驱动）。
           for m in r8723bs_qm1; do
             grep -qx "blacklist $m" "$FB" \
-              || { echo "::error::回退开关文件里没有 blacklist $m（树外 staging 模块会抢 SDIO 设备）"; exit 1; }
+              || { echo "::error::回退开关文件里没有 blacklist ${m}（树外 staging 模块会抢 SDIO 设备）"; exit 1; }
             grep -qx "install $m /bin/false" "$FB" \
               || { echo "::error::回退开关文件里没有 install $m /bin/false（隔离只有一道）"; exit 1; }
           done
@@ -430,7 +430,7 @@ jobs:
           # 用户态 rtk_hciattach 路线已删除（与内核抢同一个串口，两边都没有 hci0）。
           for f in rtl8723bs_fw.bin rtl8723bs_config-OBDA8723.bin rtl8723bs_config-OBDA0623.bin; do
             [ -f "$ROOT/lib/firmware/rtl_bt/$f" ] \
-              || { echo "::error::镜像里缺少蓝牙固件 rtl_bt/$f（需要 firmware-realtek）"; exit 1; }
+              || { echo "::error::镜像里缺少蓝牙固件 rtl_bt/${f}（需要 firmware-realtek）"; exit 1; }
           done
           [ -f "$ROOT/etc/systemd/system/qm1-bluetooth.service" ] \
             || { echo "::error::镜像里没有 qm1-bluetooth.service"; exit 1; }
@@ -553,7 +553,7 @@ jobs:
           QM1_SHADOW="$(getent shadow qm1 2>/dev/null | cut -d: -f2 || echo '')"
           case "$QM1_SHADOW" in
             '!'*|'*'|'')
-              echo "OK   qm1 账号存在且口令已锁定（$QM1_SHADOW）" ;;
+              echo "OK   qm1 账号存在且口令已锁定（${QM1_SHADOW}）" ;;
             *)
               echo "::error::镜像里的 qm1 账号带着可用口令 —— 公开分发的镜像不能有通用口令"; exit 1 ;;
           esac
@@ -672,7 +672,7 @@ jobs:
           # 开机第一次读根盘发生在 initramfs 阶段，任何 service 都来不及。
           # 关掉 eMMC 主机的 runtime suspend 必须靠 udev 规则。
           [ -f "$RULE" ] \
-            || { echo "::error::镜像里缺少 $RULE（eMMC 会在读写中掉卡）"; exit 1; }
+            || { echo "::error::镜像里缺少 ${RULE}（eMMC 会在读写中掉卡）"; exit 1; }
           grep -q 'ATTR{power/control}="on"' "$RULE" \
             || { echo "::error::udev 规则没有把 power/control 设成 on"; exit 1; }
           grep -q 'ATTR{power/autosuspend_delay_ms}="-1"' "$RULE" \
@@ -818,7 +818,7 @@ jobs:
           # 源与目标必须能由参数给定（CI 里没有真的 SDIO 卡 / ACPI eMMC）
           for opt in --source-root --source-esp --source-disk --lib --no-login-account; do
             grep -q -- "$opt" "$DEV" \
-              || { echo "::error::设备侧安装器缺少参数 $opt（没法在环设备上验证）"; exit 1; }
+              || { echo "::error::设备侧安装器缺少参数 ${opt}（没法在环设备上验证）"; exit 1; }
           done
           # EFI 登记结果必须**有明确交代**（登记成功或明说没登记），
           # 而且登记不上时不能报成功 —— 固件里没有启动项，机器就开不了机。
@@ -892,33 +892,49 @@ jobs:
           # 一起吃进变量名（"$TARGET（" 被当成变量 "TARGET（"）⇒ set -u 直接
           # 报 unbound variable 把脚本打断 —— 而且往往正好打断在装机流程中间。
           # 一律写成 "${TARGET}（"。
-          python3 - "$DEV" "$HOST" scripts/lib/common.sh scripts/test-install-lib.sh \
-                    scripts/test-installer-e2e.sh scripts/boot-smoke.sh \
-                    overlay/usr/local/lib/qm1/install-lib.sh <<'PY'
-          import re, sys
+          # ★ 这里扫的是"全仓所有会被 shell 执行的文件"，不是一份固定名单。
+          #   之前的守卫只查 7 个文件，结果同一个坑在 drv-selfcheck.sh、
+          #   hooks/*.sh、overlay/usr/local/sbin/* 里又长出来 92 处 ——
+          #   只要名单是手写的，它就一定会在名单之外复发。
+          #   （DELIVERY.md 里那一处是文档在解释这个坑，不算。）
+          python3 <<'PYGUARD'
+          import re, subprocess, sys
           pat = re.compile(r'\$[A-Za-z_][A-Za-z0-9_]*[^\x00-\x7F]')
-          bad = []
           # U+FFFD = 编码坏掉的字符。中文注释一旦被写坏，
           # 读的人会以为是自己看花了眼 —— 而且它通常是整段文字被截断，
           # 意思全丢了。宁可让 CI 报出来。
           fffd = []
-          for f in sys.argv[1:]:
-              for i, line in enumerate(open(f, encoding='utf-8'), 1):
-                  if '�' in line:
-                      fffd.append("%s:%d: %s" % (f, i, line.rstrip()))
+          bad = []
+          files = subprocess.run(['git', 'ls-files'], capture_output=True, text=True).stdout.split()
+          for f in files:
+              if f.startswith('.git/') or f.endswith(('.md', '.txt')):
+                  continue
+              is_sh = f.endswith(('.sh', '.yml', '.yaml'))
+              # overlay 下那些没有扩展名的可执行脚本同样是 shell
+              is_ovl = f.startswith('overlay/') and not f.endswith(('.conf', '.service', '.timer', '.rules', '.list', '.cfg'))
+              if not (is_sh or is_ovl):
+                  continue
+              try:
+                  lines = open(f, encoding='utf-8').read().split('\n')
+              except Exception:
+                  continue
+              for i, line in enumerate(lines, 1):
+                  if '\ufffd' in line:
+                      fffd.append('%s:%d: %s' % (f, i, line.rstrip()))
                   if line.lstrip().startswith('#'):
                       continue
                   for m in pat.finditer(line):
-                      bad.append("%s:%d: %s" % (f, i, m.group(0)))
+                      bad.append('%s:%d: %s' % (f, i, m.group(0)))
           if fffd:
-              print("::error::文件里有编码坏掉的字符（U+FFFD）：")
-              print("\n".join(fffd))
+              print('::error::文件里有编码坏掉的字符（U+FFFD）：')
+              print('\n'.join(fffd))
               sys.exit(1)
           if bad:
-              print("::error::变量名后面直接跟了中文标点（bash 会把标点吃进变量名）：")
-              print("\n".join(bad))
+              print('::error::变量名后面直接跟了中文标点（bash 会把标点吃进变量名）：')
+              print('\n'.join(bad))
               sys.exit(1)
-          PY
+          print('OK   全仓 shell 文件：变量名后面没有紧跟中文标点，也没有编码坏字')
+          PYGUARD
           echo "OK   两个安装器都不会悄悄跳过：EFI 登记失败即失败、写盘校验用目标侧证据"
 
       - name: Assert QM1 hardware driver & firmware coverage
@@ -934,7 +950,7 @@ jobs:
             if grep -qE "^${m}[[:space:]]+(module|builtin)([[:space:]]|$)" build/out/driver-manifest.txt; then
               echo "OK   关键驱动 $m"
             else
-              echo "::error::启动关键驱动缺失：$m（QM1 会认不到 eMMC/ESP，插电起不来）"
+              echo "::error::启动关键驱动缺失：${m}（QM1 会认不到 eMMC/ESP，插电起不来）"
               rc=1
             fi
           done
@@ -980,7 +996,7 @@ jobs:
             if grep -qE "^${m}[[:space:]]+(module|builtin)([[:space:]]|$)" build/out/driver-manifest.txt; then
               echo "OK   硬件驱动 $m"
             else
-              echo "::warning::硬件驱动缺失：$m（不影响启动，但对应外设不可用）"
+              echo "::warning::硬件驱动缺失：${m}（不影响启动，但对应外设不可用）"
             fi
           done
 
@@ -996,9 +1012,9 @@ jobs:
                 *) sym="CONFIG_$(echo "$m" | tr 'a-z-' 'A-Z_')" ;;
               esac
               if grep -qE "^${sym}=y$" "$kcfg"; then
-                echo "OK   内置驱动 $m（$sym=y）"
+                echo "OK   内置驱动 ${m}（$sym=y）"
               else
-                echo "::warning::内置驱动未确认：$m（$sym 不是 y）"
+                echo "::warning::内置驱动未确认：${m}（$sym 不是 y）"
               fi
             done
           fi
@@ -1195,7 +1211,7 @@ jobs:
             | tee build/out/prov-listing.txt
           for f in wpa_supplicant.conf ssh ssh_user; do
             grep -q "$f" build/out/prov-listing.txt \
-              || { echo "::error::注入后 ESP 里没有 $f（/qm1/provision/ 不完整）"; exit 1; }
+              || { echo "::error::注入后 ESP 里没有 ${f}（/qm1/provision/ 不完整）"; exit 1; }
           done
           # b) 整盘镜像：脚本要能自己认出 GPT 里的 ESP 分区并写进去
           cp build/out/qm1-installer.img build/out/qm1-installer.provisioned.img

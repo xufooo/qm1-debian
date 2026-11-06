@@ -53,9 +53,9 @@ trap cleanup EXIT
 
 if [ "$FORCE" = 1 ]; then
     rm -f "$MARKER"
-    log "--force：已清掉标记 $MARKER，强制重跑"
+    log "--force：已清掉标记 ${MARKER}，强制重跑"
 elif [ -f "$MARKER" ]; then
-    log "已完成过首启配置（$MARKER），跳过"
+    log "已完成过首启配置（${MARKER}），跳过"
     log "要重跑：sudo qm1-firstboot --force"
     exit 0
 fi
@@ -73,7 +73,7 @@ else
         if [ -z "$esp_dev" ]; then
             esp_dev="$(lsblk -no PARTTYPE,PATH 2>/dev/null \
                 | awk -v t="$ESP_PARTTYPE" '$1==t{print $2; exit}' || true)"
-            [ -n "$esp_dev" ] && log "没找到卷标 $ESP_LABEL，改按分区类型找到启动分区：$esp_dev"
+            [ -n "$esp_dev" ] && log "没找到卷标 ${ESP_LABEL}，改按分区类型找到启动分区：$esp_dev"
         fi
     fi
     if [ -n "$esp_dev" ]; then
@@ -185,7 +185,7 @@ if [ -f "$SRC/authorized_keys" ]; then
             chmod 0600 "$UHOME/.ssh/authorized_keys"
             if ! grep -qFf "$SRC/authorized_keys" "$UHOME/.ssh/authorized_keys" 2>/dev/null; then
                 cat "$SRC/authorized_keys" >> "$UHOME/.ssh/authorized_keys"
-                log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 $SSH_USER）"
+                log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 ${SSH_USER}）"
             fi
         elif [ -n "$SSH_USER" ]; then
             warn "ssh_user 指定的用户 $SSH_USER 不存在 —— 只装了 root 的公钥"
@@ -214,7 +214,7 @@ if [ "$CHANGED" = 1 ]; then
         echo "source=$SRC"
         echo "changed=$CHANGED"
     } > "$MARKER"
-    log "首启配置完成（标记：$MARKER）"
+    log "首启配置完成（标记：${MARKER}）"
 else
     log "provisioning 目录里没有可应用的项目 —— 不写标记，下次开机继续检查"
 fi

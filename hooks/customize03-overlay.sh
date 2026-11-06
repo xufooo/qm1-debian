@@ -134,7 +134,7 @@ enable_overlay_unit() {
         echo "[hook03][fail] wants 链接悬空：$_wants.wants/$_link_name -> $_tgt"
         exit 1
     fi
-    echo "[hook03] 已启用 $_link_name（$_wants.wants -> $_src）"
+    echo "[hook03] 已启用 ${_link_name}（$_wants.wants -> ${_src}）"
 }
 
 # Wi-Fi 是这台机器唯一的主联网链路（没有 RJ45）→ 开机自启。

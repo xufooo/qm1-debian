@@ -260,7 +260,7 @@ if [ -n "$rtw88_ko" ]; then
     #   模块名不能死写：出货模块有三种可能的来源（rtw88_qm1 整树单模块 /
     #   rtw88_8723bs 芯片回移 / rtw_8723bs vendor 树）。
     check_content "/lib/modules/$KVER/modules.dep" "${_ship_mod}\.ko" \
-        "模块索引 modules.dep 里有 $_ship_mod（否则 modprobe 找不到它）"
+        "模块索引 modules.dep 里有 ${_ship_mod}（否则 modprobe 找不到它）"
     # ★ 隔离配置必须查**内容**，不能只查文件在不在。
     #   本项目最怕的失败模式恰恰全落在这些行上：镜像里装了根治模块，
     #   却因为隔离行缺失或被覆盖，树内 staging 驱动照样按 SDIO modalias
@@ -437,7 +437,7 @@ if [ -n "$KVER" ]; then
         fi
     else
         printf '  FAIL %-46s (%s)\n' "initramfs 里的 eMMC 规则" \
-            "读不出 /boot/initrd.img-$KVER，没法确认规则在不在里面"
+            "读不出 /boot/initrd.img-${KVER}，没法确认规则在不在里面"
         fail=$((fail + 1))
     fi
 fi

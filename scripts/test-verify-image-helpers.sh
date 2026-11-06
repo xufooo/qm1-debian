@@ -56,7 +56,7 @@ expect() {   # expect <说明> <期望输出片段> <实际输出>
 #   父进程的 fail 纹丝不动 ⇒ 计数断言永远失败（这个坑本仓库踩过好几次：
 #   printf | while 也是同一类 —— 子 shell 里丢状态）。
 #   所以输出重定向到文件，函数在当前 shell 里跑。
-call() {   # call <helper> <参数…>；输出在 $OUT，计数在 $fail
+call() {   # call <helper> <参数…>；输出在 ${OUT}，计数在 $fail
     : > "$OUT"
     "$@" > "$OUT"
 }

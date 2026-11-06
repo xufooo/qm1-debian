@@ -14,7 +14,7 @@ AGENT="/usr/local/share/qm1/provision-agent.sh"
 MARKER="/var/lib/qm1/provision-done"
 
 if [ ! -x "$AGENT" ]; then
-    echo "qm1-provision: 镜像里没有 $AGENT，跳过运行时部署" >&2
+    echo "qm1-provision: 镜像里没有 ${AGENT}，跳过运行时部署" >&2
     exit 0
 fi
 
@@ -22,9 +22,9 @@ mkdir -p "$(dirname "$MARKER")"
 
 if bash "$AGENT"; then
     : > "$MARKER"
-    echo "qm1-provision: 运行时部署完成（标记 $MARKER）"
+    echo "qm1-provision: 运行时部署完成（标记 ${MARKER}）"
 else
     rc=$?
-    echo "qm1-provision: 运行时部署失败（rc=$rc），下次开机自动重试" >&2
+    echo "qm1-provision: 运行时部署失败（rc=${rc}），下次开机自动重试" >&2
     exit "$rc"
 fi

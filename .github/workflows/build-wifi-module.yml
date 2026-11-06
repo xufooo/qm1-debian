@@ -316,7 +316,7 @@ jobs:
               | tar -xO "./lib/modules/$KVER/extra/rtw88/$mod.ko" > "build/rtw88-module/$mod.ko"
             modinfo -p "build/rtw88-module/$mod.ko" | awk -F: '{print $1}' > "build/rtw88-module/$mod.params"
             grep -qw "$param" "build/rtw88-module/$mod.params" \
-              || { echo "::error::模块 $mod 没有参数 $param，modprobe 会拒绝加载"; exit 1; }
+              || { echo "::error::模块 $mod 没有参数 ${param}，modprobe 会拒绝加载"; exit 1; }
             echo "OK  $mod $param"
           done < <(grep '^options ' build/rtw88-module/modprobe.conf)
           echo "包内容校验通过"

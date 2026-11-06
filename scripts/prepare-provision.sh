@@ -89,7 +89,7 @@ fi
 if [ -e "$OUT" ] && [ "$FORCE" != 1 ]; then
     [ -d "$OUT" ] || die "输出路径已存在且不是目录：$OUT"
     if [ -n "$(ls -A "$OUT" 2>/dev/null || true)" ]; then
-        die "输出目录非空：$OUT（加 --force 覆盖）"
+        die "输出目录非空：${OUT}（加 --force 覆盖）"
     fi
 fi
 

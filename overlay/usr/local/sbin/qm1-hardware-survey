@@ -107,7 +107,7 @@ collect() {
             cp /sys/firmware/acpi/tables/DSDT "$tmp/DSDT" 2>/dev/null \
                 && (cd "$tmp" && iasl -d DSDT >/dev/null 2>&1) \
                 && say "已反汇编到 $tmp/DSDT.dsl" \
-                || say "iasl 反汇编失败（$tmp）"
+                || say "iasl 反汇编失败（${tmp}）"
         else
             say "(没有 iasl：apt install acpica-tools 后重跑本脚本就能拿到 DSDT.dsl)"
         fi
