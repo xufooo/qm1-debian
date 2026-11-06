@@ -1133,6 +1133,46 @@ jobs:
             exit "$rc"
           fi
 
+      - name: Boot the assembled disk image under 32-bit UEFI (QEMU)
+        run: |
+          set -eu
+          # ★ 这一条测的是**真机走的那条路**。
+          #
+          # 上面那次用的是 x86_64 的 OVMF ⇒ 固件加载 \EFI\BOOT\BOOTX64.EFI
+          # ⇒ grubx64 ⇒ amd64 内核。可这台机器（Z3735F，Bay Trail-T）的
+          # 固件是 **32 位 IA32 UEFI**，它加载不了 PE32+ 的 BOOTX64.EFI，
+          # 只会去加载 \EFI\BOOT\BOOTIA32.EFI ⇒ grub2ia32 ⇒ 再去带 amd64 内核。
+          #
+          # 也就是说：出货形态真正要走的那条引导链（32 位固件 → IA32 的 GRUB
+          # → 64 位内核），在 CI 里从来没被验过 —— 跟上一轮 OVMF 文件名那次
+          # 一模一样的盲区，只是藏得更深（那次至少有个 SKIP 提示，这次连
+          # 提示都没有，因为我们压根没起过 IA32 固件）。
+          #
+          # 32 位固件能不能带 64 位内核，是个真问题：Debian 的内核是
+          # PE32+ 的 EFI-stub 映像，32 位 UEFI 的 LoadImage 按规范只认 PE32。
+          # GRUB 有没有绕过去的办法，只有真起一次才知道。
+          # 所以这里必须真跑，不许跳过 —— 跑挂就是真缺陷，得改出货形态。
+          apt-get update -qq
+          apt-get install -y --no-install-recommends ovmf ovmf-ia32
+          rc=0
+          QM1_OVMF_CODE=/usr/share/OVMF/OVMF32_CODE_4M.fd \
+          QM1_OVMF_VARS=/usr/share/OVMF/OVMF32_VARS_4M.fd \
+          bash scripts/boot-smoke.sh \
+            --disk build/out/qm1-disk.img \
+            --timeout 420 \
+            --log build/out/boot-disk-smoke-ia32.log || rc=$?
+          if [ "$rc" = "77" ]; then
+            if [ "${QM1_ALLOW_BOOT_SKIP:-0}" = "1" ]; then
+              echo "::warning::32 位 UEFI 下的整盘启动测试被显式跳过（QM1_ALLOW_BOOT_SKIP=1）"
+            else
+              echo "::error::32 位 UEFI 下的整盘启动测试被跳过（找不到 IA32 的 OVMF 固件）—— 真机走的就是这条路，不许静默跳过"
+              exit 1
+            fi
+          elif [ "$rc" != "0" ]; then
+            tail -60 build/out/boot-disk-smoke-ia32.log || true
+            exit "$rc"
+          fi
+
       - name: Assert the installer image is self-contained
         run: |
           set -eu

@@ -230,8 +230,8 @@ wpa_case "含引号与反斜杠的口令" "MySSID" 'pa"ss\word' '"MySSID"|"pa\"s
 # 把 SSID 截断或读成别的名字。
 SSID_TRICKY='My "Net"\'
 wpa_case "含空格与引号的 SSID" "$SSID_TRICKY" "passphrase" '"My \"Net\"\\"|"passphrase"|"passphrase"|WPA-PSK SAE|0'
-wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"||WPA-PSK|1'
-wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"||WPA-PSK|1'
+wpa_case "太短的口令被拒绝" "MySSID" "short" '"MySSID"|||WPA-PSK|1'
+wpa_case "太长的口令被拒绝" "MySSID" "$(printf 'b%.0s' $(seq 1 64))x" '"MySSID"|||WPA-PSK|1'
 wpa_case "开放网络没有 psk" "OpenNet" "" '"OpenNet"|||NONE|0'
 
 echo "== 磁盘辅助函数（两份实现必须一致） =="
