@@ -198,7 +198,7 @@ check_exists /etc/systemd/system/timers.target.wants/systemd-timesyncd.service \
 check_absent /var/lib/qm1/firstboot-done \
     "首启标记没有随镜像出厂（否则首启配置会被条件跳过，永远不执行）"
 check_absent /var/lib/qm1/provision-done \
-    "运行时部署标记没有随镜像出厂（否则 Hermes/Chrome 永远不会被铺上）"
+    "镜像不包含历史应用部署标记"
 # 这份是**回退**参数（发行版树内 staging r8723bs），不是出货配置。
 # 出货配置是 qm1-rtw88-8723bs.conf（在下面的 rtw88 段里按内容校验）。
 # 留着这份是为了"rtw88 起不来、需要临时回退"时不用重踩省电的坑。
@@ -392,7 +392,7 @@ check_attr /usr/local/sbin/qm1-wifi-start 'Mode: *0[57][0-45][0-45]' \
     "qm1-wifi-start 可执行且组/其他人不可写"
 check_no_group_writable /usr/local/sbin "overlay 带来的脚本没有组/其他人可写的"
 check_no_group_writable /usr/local/bin "overlay 带来的脚本没有组/其他人可写的"
-check_content /etc/systemd/system.conf.d/quick-boot.conf '^TimeoutStartSec=120' \
+check_content /etc/systemd/system.conf.d/quick-boot.conf '^DefaultTimeoutStartSec=120' \
     "全局单元超时 120s（30s 会在接口出现前把 Wi-Fi 单元掐掉）"
 check_content /etc/systemd/journald.conf.d/qm1.conf '^Storage=persistent' \
     "journal 落盘持久化（默认 auto 写 /run，重启即失，现场没法翻日志）"
@@ -442,36 +442,19 @@ if [ -n "$KVER" ]; then
     fi
 fi
 check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
-# ★ sshd 没有主机密钥就起不来 ⇒ "SSH 可登"这条交付口径直接断。
-#   Debian 的 openssh-server postinst 会 ssh-keygen -A 生成，但那是
-#   "正常情况下"——这里显式查一次，缺了当场红，别等到刷完机才发现。
-check_exists /etc/ssh/ssh_host_ed25519_key "SSH 主机密钥（缺了 sshd 起不来）"
+check_absent /etc/ssh/ssh_host_ed25519_key "镜像不克隆 SSH 私钥"
+check_exists /etc/systemd/system/qm1-ssh-hostkeys.service "首启生成 SSH 主机密钥"
+check_content /etc/systemd/system/ssh.service.d/qm1-hostkeys.conf '^Requires=qm1-ssh-hostkeys.service' "SSH 启动前必须生成主机密钥"
 check_exists /etc/ssh/sshd_config.d/qm1.conf "sshd 的 QM1 定制片段（PermitRootLogin no 等）"
 check_exists /usr/local/sbin/qm1-bluetooth-up "蓝牙初始化辅助脚本（失败要留痕）"
 check_exists /usr/local/lib/qm1/install-lib.sh "安装器共用的磁盘/凭据函数库"
-check_exists /usr/local/sbin/qm1-provision "首启运行时部署的包装脚本（跑 provision-agent.sh）"
-check_exists /usr/local/share/qm1/provision-agent.sh "Hermes + headless Chrome 的部署脚本"
-check_exists /etc/systemd/system/qm1-provision.service "首启运行时部署单元（没有它刷完机不会自动铺 Hermes）"
-# ★ 运行时部署必须由 timer 触发，而且服务本身不能 After=multi-user.target。
-#   target 会给 Wants= 成员隐式补 After=，所以服务挂在 multi-user.target 上
-#   又要等 network-online，就等于"整机开机必须等网络就绪"—— Wi-Fi 没起来时
-#   整机到不了 multi-user.target，没有 SSH、看起来像砖了。
-check_exists /etc/systemd/system/qm1-provision.timer "运行时部署的定时器（把铺运行时移出开机关键路径）"
-check_content /etc/systemd/system/qm1-provision.timer '^Unit=qm1-provision.service' \
-    "定时器指向 qm1-provision.service"
-check_absent_content /etc/systemd/system/qm1-provision.service '^After=.*multi-user\.target' \
-    "部署单元不能 After=multi-user.target（会和 target 的隐式 After= 撞成排序环）"
-# ★ 失败必须真的会重试。
-#   原来靠 timer 的 OnUnitInactiveSec=10min —— 那是不成立的：
-#   失败的 oneshot 落到的是 failed，不是 inactive ⇒ 定时器永远不会
-#   因为失败而再次触发 ⇒ 铺运行时失败一次就再也不试（只能等下次开机）。
-#   重试必须由服务自己的 Restart=on-failure 承担（Type=oneshot 允许）。
-check_content /etc/systemd/system/qm1-provision.service '^Restart=on-failure' \
-    "部署单元失败后必须会重试（Restart=on-failure）"
-check_content /etc/systemd/system/qm1-provision.service '^RestartSec=' \
-    "部署单元的重试间隔必须写明（RestartSec=）"
-check_absent_content /etc/systemd/system/qm1-provision.timer '^OnUnitInactiveSec=' \
-    "部署定时器不该用 OnUnitInactiveSec 做重试（失败态是 failed 不是 inactive，永远不会触发）"
+for _p in /usr/local/sbin/qm1-provision /usr/local/share/qm1/provision-agent.sh \
+          /etc/systemd/system/qm1-provision.service /etc/systemd/system/qm1-provision.timer \
+          /usr/bin/chromium /opt/qm1/python; do
+    check_absent "$_p" "系统镜像不预装应用，也不在首启时部署应用"
+done
+check_content /etc/systemd/oomd.conf.d/qm1.conf '^DefaultMemoryPressureLimit=60%' "有效的 OOM 压力阈值"
+check_content /etc/systemd/system/user@.service.d/60-qm1-oomd.conf '^ManagedOOMMemoryPressure=kill' "用户负载的 OOM 监控"
 
 # ★ 开机自检：必须由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
 #   不该被当成"单元起不来"（那会让整机变 degraded，把真故障淹没在噪声里）。

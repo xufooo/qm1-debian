@@ -1,0 +1,9 @@
+[Unit]
+Description=Generate SSH host keys for this installation
+After=local-fs.target
+Before=ssh.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/bin/ssh-keygen -A

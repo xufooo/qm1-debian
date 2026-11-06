@@ -21,12 +21,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 ROOTFS=""
 OUT_DIR="build"
 ARCH="amd64"
-# 默认 runtime：交付口径是"装进 eMMC、开机即用"，而 Hermes/Chrome 这套
-# agent 运行时只出现在 runtime profile 里（hook04 按 QM1_PROFILE 决定装不装）。
-# 默认曾经是 base ⇒ 谁按文档直接跑构建，谁就得到一个没有运行时、
-# qm1-provision 单元的条件恒为假的镜像 ⇒ "开机即用"从一开始就不成立。
-# 要最小系统请显式 --profile base。
-PROFILE="runtime"
+# 应用负载是系统能力的验收目标，不是镜像内置内容。
+PROFILE="base"
 ESP_SIZE_MIB=256
 ROOT_SIZE_GIB=6
 BOOTLOADERS=""
@@ -53,6 +49,8 @@ while [ $# -gt 0 ]; do
         *) die "未知参数：$1" ;;
     esac
 done
+
+[ "$PROFILE" = base ] || die "只支持 --profile base；镜像不预装应用"
 
 [ -n "$ROOTFS" ] || die "缺少 --rootfs"
 [ -d "$ROOTFS/boot" ] || die "$ROOTFS 不像根文件系统（缺 /boot）"

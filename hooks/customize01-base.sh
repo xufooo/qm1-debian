@@ -98,6 +98,7 @@ enable_unit() {
 
 enable_unit ssh.service multi-user.target
 enable_unit systemd-oomd.service multi-user.target
+enable_unit zramswap.service multi-user.target
 # 这台机器没有板载 RJ45，内置 Wi-Fi 是唯一的主联网链路 → 必须有 DHCP 客户端。
 # 用 systemd-networkd 负责链路与 DHCP，systemd-resolved 负责 DNS。
 #
@@ -165,17 +166,7 @@ enable_unit systemd-timesyncd.service timers.target
 # 它依赖 overlay 的 bluetooth.service.d/qm1.conf 排在 qm1-bluetooth.service 之后。
 enable_unit bluetooth.service multi-user.target
 
-# --- 首次启动不要在硬件随机数池上等太久 ------------------------------------
-# 这台机器没有电池、没有 RTC，系统冷启动时时钟从 1970 年开始；
-# 同时 /dev/random 在启动早期可能阻塞（没有熵就出不来 random-seed）。
-# 解法不是"信任 CPU 的 RNG"（random.trust_cpu=on 会降低安全性），
-# 而是在**构建期**就播种一份随机种子，开机就不用等熵。
-mkdir -p "$TARGET/var/lib/systemd"
-if [ ! -s "$TARGET/var/lib/systemd/random-seed" ]; then
-    dd if=/dev/urandom of="$TARGET/var/lib/systemd/random-seed" bs=512 count=1 \
-       status=none 2>/dev/null || true
-    chmod 0600 "$TARGET/var/lib/systemd/random-seed" 2>/dev/null || true
-fi
+# 机器身份和随机种子由设备启动时生成，构建收尾时清除克隆身份。
 
 # 全局默认启动超时：原来是 30s。
 # ★ 30s 太短，会**直接把慢单元杀掉**，而且是在它还没来得及报错的时候：
@@ -184,7 +175,7 @@ fi
 #   单元自己的 TimeoutStartSec 会覆盖这个默认值（qm1-firstboot 是 180s），
 #   但没写这一项的单元就按 30s 算，取证日志也会被截断。
 mkdir -p "$TARGET/etc/systemd/system.conf.d"
-printf '[Service]\nTimeoutStartSec=120s\n' > "$TARGET/etc/systemd/system.conf.d/quick-boot.conf"
+printf '[Manager]\nDefaultTimeoutStartSec=120s\n' > "$TARGET/etc/systemd/system.conf.d/quick-boot.conf"
 
 # --- 可用账号 --------------------------------------------------------------
 # 原来整个仓库没有 useradd/adduser/chpasswd ⇒ 装完之后**没有任何账号能登进**：

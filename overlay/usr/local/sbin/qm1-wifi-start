@@ -28,6 +28,7 @@ CONF="${2:-/etc/wpa_supplicant/wpa_supplicant.conf}"
 LOG_TAG=qm1-wifi
 # 每隔多久打一条"还在等"的日志（秒）
 LOG_EVERY="${QM1_WIFI_LOG_EVERY:-15}"
+case "$LOG_EVERY" in ''|*[!0-9]*|0) LOG_EVERY=15 ;; esac
 
 log() {
     logger -t "$LOG_TAG" -- "$*" 2>/dev/null || true
@@ -65,7 +66,9 @@ module_state() {
 sdio_card_present() {
     for _d in /sys/bus/sdio/devices/*; do
         [ -e "$_d" ] || continue
-        if grep -qs 'MODALIAS=sdio:c\*v024CdB723\*' "$_d/uevent" 2>/dev/null; then
+        # uevent 是具体设备值（如 c00v024CdB723），没有 modinfo alias 的通配符。
+        if grep -Eiqs '^MODALIAS=sdio:c[0-9a-f]{2}v024cdB723$' "$_d/uevent" 2>/dev/null \
+           || grep -Eiqs '^sdio:c[0-9a-f]{2}v024cdB723$' "$_d/modalias" 2>/dev/null; then
             return 0
         fi
     done

@@ -46,7 +46,7 @@ for dev in /sys/bus/acpi/devices/*; do
     case "$(printf '%s' "$hid" | tr 'a-z' 'A-Z')" in
         OBDA8723|OBDA0623)
             acpi_hid="$hid"
-            acpi_owner="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")"
+            acpi_owner="$(basename "$(readlink -f "$dev/physical_node/driver" 2>/dev/null || readlink -f "$dev/driver" 2>/dev/null || echo none)")"
             ;;
     esac
 done
@@ -57,7 +57,7 @@ write_marker() {
         echo "acpi_hid=${acpi_hid:-none}"
         echo "acpi_owner=${acpi_owner:-none}"
         echo "firmware=$( [ -f /lib/firmware/rtl_bt/rtl8723bs_fw.bin ] && echo present || echo missing )"
-        echo "serdev_driver=$( [ -d /sys/bus/serio/drivers/hci_uart_h5 ] && echo registered || echo absent )"
+        echo "serdev_driver=$( [ -d /sys/bus/serial/drivers/hci_uart_h5 ] && echo registered || echo absent )"
         echo "hint=$1"
     } >"$MARKER_PERSIST"
     chmod 0644 "$MARKER_PERSIST" 2>/dev/null || true
@@ -89,6 +89,7 @@ modprobe btrtl 2>/dev/null || true
 i=0
 while [ "$i" -lt 30 ]; do
     if [ -d /sys/class/bluetooth/hci0 ]; then
+        rm -f "$MARKER_PERSIST" "$MARKER"
         log "hci0 is up"
         exit 0
     fi

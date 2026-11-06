@@ -205,6 +205,7 @@ cat > "$TARGET/etc/modules-load.d/qm1-hardware.conf" <<'EOF'
 # QM1 硬件模块（缺哪个会在 drv-selfcheck.sh 里里报出来）
 i915
 snd_hda_intel
+snd_hdmi_lpe_audio
 btusb
 # 内置蓝牙（Realtek RTL8723BS 的 BT 部分，ACPI UART）。
 # hci_uart 里编进了 hci_h5（3WIRE 协议），btrtl 负责按名字取厂商固件
@@ -631,6 +632,18 @@ driver_state() {
     echo "absent"
 }
 
+# 这些是目标板的功能要求，不应只作为可选驱动写一条 WARN。
+[ -f "$KCFG" ] || die "缺少内核配置，无法校验目标板功能"
+for _required in EFI_MIXED IOSF_MBI DRM_I915 HDMI_LPE_AUDIO; do
+    grep -qE "^CONFIG_${_required}=(y|m)$" "$KCFG" \
+        || die "目标内核缺少 CONFIG_${_required}"
+done
+for _pair in i915:DRM_I915 snd-hdmi-lpe-audio:HDMI_LPE_AUDIO; do
+    _name="${_pair%%:*}"; _symbol="${_pair#*:}"
+    [ "$(driver_state "$_name" "$_symbol")" != absent ] \
+        || die "目标镜像缺少 $_name 驱动"
+done
+
 # 期望驱动清单：模块名 | 内核 config 符号 | 服务的硬件 | 启动关键
 # (config 符号为 6.12 的实际命名：I915 在 6.2+ 改名 DRM_I915，rtc_cmos 改名 RTC_DRV_CMOS)
 DRIVER_TABLE="
@@ -649,6 +662,8 @@ asix|USB_NET_ASIX|ASIX USB 网卡|
 cdc_ether|USB_NET_CDC_ETHER|USB 网卡（CDC-ECM）|
 ax8817x|USB_NET_AX8817X|ASIX USB 网卡（8817x）|
 i915|DRM_I915|Intel HD Graphics Gen7（HDMI 输出）|
+snd-hdmi-lpe-audio|HDMI_LPE_AUDIO|Bay Trail / Cherry Trail HDMI LPE 音频|
+snd-hda-codec-hdmi|SND_HDA_CODEC_HDMI|HDA HDMI 编解码器（HDA 枚举路径）|
 snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|

@@ -467,6 +467,7 @@ write_wifi_conf() {
             # 64 位十六进制是 PMK，不能当 SAE 口令 ⇒ 那情况下不给。
             _ww_sae_value="$(qm1_wpa_sae_value "$_ww_psk" || true)"
             [ -n "$_ww_sae_value" ] && echo "    sae_password=$_ww_sae_value"
+            [ -n "$_ww_sae_value" ] && echo "    ieee80211w=1"
         fi
         # key_mgmt 里 PSK 在前，wpa_supplicant 先试 PSK ⇒ 纯 WPA2 不受影响；
         # 没有口令时必须是 NONE（否则 wpa_supplicant 拒收整段 network 块）。

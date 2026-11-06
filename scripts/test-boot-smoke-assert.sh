@@ -116,6 +116,32 @@ else
     ok "Wi-Fi 驱动单元起失败的日志应当挂"
 fi
 
+cp "$WORK/good.log" "$WORK/trial.log"
+printf 'Kernel command line: root=UUID=test ro console=ttyS0\n' >> "$WORK/trial.log"
+if bash "$ASSERT" --console "$WORK/trial.log" --require-trial-boot >/dev/null 2>&1; then
+    ok "安装介质的实际内核命令行确认默认不写盘"
+else
+    bad "安全试用的安装介质没有通过"
+fi
+if bash "$ASSERT" --console "$WORK/good.log" --require-trial-boot >/dev/null 2>&1; then
+    bad "没有内核命令行证据仍宣称默认项安全"
+else
+    ok "缺少实际命令行证据时拒绝宣称安全"
+fi
+printf 'Kernel command line: root=UUID=test qm1.install=1\n' >> "$WORK/trial.log"
+if bash "$ASSERT" --console "$WORK/trial.log" --require-trial-boot >/dev/null 2>&1; then
+    bad "安装介质默认写盘的命令行被放行"
+else
+    ok "安装介质默认写盘的命令行被拒绝"
+fi
+cp "$WORK/good.log" "$WORK/config-bad.log"
+printf '/etc/systemd/network/30-wifi.network: Unknown key Priority in section Network\n' >> "$WORK/config-bad.log"
+if bash "$ASSERT" --console "$WORK/config-bad.log" >/dev/null 2>&1; then
+    bad "systemd 丢弃的无效配置被放行"
+else
+    ok "即使 target 达成，配置解析错误也会失败"
+fi
+
 # ---------- journal 断言 ----------
 cat > "$WORK/j-ok.txt" <<'EOF'
 Startup finished in 12s.

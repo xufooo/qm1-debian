@@ -124,6 +124,8 @@ fi
     echo "    ssid=$(qm1_wpa_ssid_value "$SSID")"
     [ -n "$PSK_LINE" ] && echo "$PSK_LINE"
     [ -n "$SAE_LINE" ] && echo "$SAE_LINE"
+    # SAE 需要管理帧保护；optional 保留对纯 WPA2 AP 的兼容。
+    [ -n "$SAE_LINE" ] && echo "    ieee80211w=1"
     # 没有 psk 就是开放网络 ⇒ key_mgmt 必须是 NONE。
     # 写成 WPA-PSK 又不带 psk，wpa_supplicant 会拒绝整段 network 块
     # （而且是"连不上"这种看不出原因的现象）。

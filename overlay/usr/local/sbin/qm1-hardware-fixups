@@ -61,21 +61,18 @@ emmc_host_platform() {
         [ -n "$card" ] || continue
         type="$(cat "$card/type" 2>/dev/null || true)"
         [ "$type" = "MMC" ] || continue
-        # .../platform/80860F14:00/mmc_host/mmc1/mmc1:0001  ->  the bus and
-        # the device below it are the platform device that owns the host.
-        rel="${card#/sys/devices/}"
-        case "$rel" in
-            */*) : ;;
-            *) continue ;;
-        esac
-        bus="${rel%%/*}"
-        rest="${rel#*/}"
-        case "$rest" in
-            */*) dev="${rest%%/*}" ;;
-            *) continue ;;
-        esac
-        printf '/sys/devices/%s/%s' "$bus" "$dev"
-        return 0
+        # Follow driver ownership rather than assuming a fixed sysfs depth.
+        # Firmware can put the controller below an ACPI or PCI parent.
+        host="$card"
+        while [ "$host" != /sys/devices ] && [ "$host" != / ]; do
+            owner="$(basename "$(readlink -f "$host/driver" 2>/dev/null || echo none)")"
+            case "$owner" in
+                sdhci-acpi|sdhci-pci|sdhci_acpi|sdhci_pci)
+                    printf '%s' "$host"
+                    return 0 ;;
+            esac
+            host="${host%/*}"
+        done
     done
     return 1
 }
@@ -99,7 +96,10 @@ emmc_fixup() {
         before="$(cat "$host/power/control" 2>/dev/null || echo unknown)"
         if echo on >"$host/power/control" 2>/dev/null; then
             after="$(cat "$host/power/control" 2>/dev/null || echo unknown)"
-            if [ "$before" != "$after" ]; then
+            if [ "$after" != on ]; then
+                logboth "eMMC runtime PM: control readback is $after (expected on)"
+                rc=1
+            elif [ "$before" != "$after" ]; then
                 logboth "eMMC runtime PM: control $before -> $after"
             else
                 log "eMMC runtime PM: already $after"
@@ -152,13 +152,29 @@ cpufreq_fixup() {
     fi
     cur=$(cat "$gov_path/scaling_governor" 2>/dev/null || echo unknown)
     log "cpufreq: governor=$cur"
-    if [ -w "$gov_path/scaling_governor" ] && [ "$cur" != "powersave" ]; then
-        echo powersave >"$gov_path/scaling_governor" 2>/dev/null \
-            && log "cpufreq: governor set to powersave" \
+    driver="$(cat "$gov_path/scaling_driver" 2>/dev/null || echo unknown)"
+    # intel_pstate 的 powersave 是动态调频；通用 cpufreq 的 powersave 则锁最低频率。
+    # 后者选 schedutil/ondemand，避免误把整机固定在最低频。
+    available="$(cat "$gov_path/scaling_available_governors" 2>/dev/null || true)"
+    desired=""
+    case "$driver" in
+        intel_pstate) candidates="powersave" ;;
+        *) candidates="schedutil ondemand" ;;
+    esac
+    for candidate in $candidates; do
+        case " $available " in *" $candidate "*) desired="$candidate"; break ;; esac
+    done
+    if [ -n "$desired" ] && [ -w "$gov_path/scaling_governor" ] && [ "$cur" != "$desired" ]; then
+        echo "$desired" >"$gov_path/scaling_governor" 2>/dev/null \
+            && log "cpufreq: governor set to $desired ($driver)" \
             || log "cpufreq: could not change the governor"
     fi
-    if [ -n "$Qm1_MAX_FREQ_PERC" ] && [ -w /sys/devices/system/cpu/intel_pstate/max_freq_perc_pct ]; then
-        echo "$Qm1_MAX_FREQ_PERC" >/sys/devices/system/cpu/intel_pstate/max_freq_perc_pct 2>/dev/null \
+    if [ -n "$Qm1_MAX_FREQ_PERC" ] && [ -w /sys/devices/system/cpu/intel_pstate/max_perf_pct ]; then
+        case "$Qm1_MAX_FREQ_PERC" in
+            *[!0-9]*|0|'') logboth "intel_pstate: invalid frequency cap"; return 0 ;;
+        esac
+        [ "$Qm1_MAX_FREQ_PERC" -le 100 ] || { logboth "intel_pstate: cap must be 1..100"; return 0; }
+        echo "$Qm1_MAX_FREQ_PERC" >/sys/devices/system/cpu/intel_pstate/max_perf_pct 2>/dev/null \
             && log "intel_pstate: max frequency capped at ${Qm1_MAX_FREQ_PERC}%" \
             || log "intel_pstate: could not cap the frequency"
     fi
@@ -167,13 +183,18 @@ cpufreq_fixup() {
 # ---------------------------------------------------------------------------
 # 3. HDMI audio: load the codec the display driver needs
 #
-# Bay Trail routes the HDMI audio through the i915 LPE path, so the HDMI codec
-# has to be present; without it the display works but there is no sound.
+# i915 creates an hdmi-lpe-audio platform device on Bay Trail without an HDA
+# controller. It needs snd_hdmi_lpe_audio, not an HDA codec. Keep the HDA path
+# as well for hardware that actually exposes HDA.
 # ---------------------------------------------------------------------------
 audio_fixup() {
     if grep -qw i915 /proc/modules 2>/dev/null; then
-        for m in snd-hda-codec-hdmi snd-hda-codec-realtek; do
-            modprobe "$m" 2>/dev/null && log "audio: loaded $m"
+        for m in snd-hdmi-lpe-audio snd-hda-codec-hdmi; do
+            if modprobe "$m" 2>/dev/null; then
+                log "audio: loaded $m"
+            else
+                logboth "audio: could not load $m"
+            fi
         done
     fi
 }
@@ -194,7 +215,7 @@ audio_fixup() {
 # ---------------------------------------------------------------------------
 bluetooth_fixup() {
     modprobe hci_uart 2>/dev/null || true
-    if [ -d /sys/class/bluetooth ]; then
+    if [ -d /sys/class/bluetooth/hci0 ]; then
         log "bluetooth: $(ls /sys/class/bluetooth | tr '\n' ' ')"
         return 0
     fi
@@ -206,7 +227,7 @@ bluetooth_fixup() {
         [ -e "$dev" ] || continue
         hid="$(cat "$dev/hid" 2>/dev/null || true)"
         case "$hid" in
-            OBDA8723|OBDA0623) bt_acpi="$dev"; bt_driver="$(basename "$(readlink -f "$dev/driver" 2>/dev/null || echo none)")" ;;
+            OBDA8723|OBDA0623) bt_acpi="$dev"; bt_driver="$(basename "$(readlink -f "$dev/physical_node/driver" 2>/dev/null || readlink -f "$dev/driver" 2>/dev/null || echo none)")" ;;
         esac
     done
 
@@ -230,7 +251,7 @@ bluetooth_fixup() {
         logboth "bluetooth: no hci device and no OBDA8723/OBDA0623 ACPI node -- the DSDT does not expose the Bluetooth UART"
     fi
 
-    if [ -d /sys/bus/serio/drivers/hci_uart_h5 ]; then
+    if [ -d /sys/bus/serial/drivers/hci_uart_h5 ]; then
         log "bluetooth: the hci_uart_h5 serdev driver is registered"
     fi
 }

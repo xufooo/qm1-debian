@@ -115,15 +115,9 @@ if [ -n "$DISK" ]; then
     #   ⇒ 探测改成按实际存在的文件名找；找不到时把目录内容打出来，
     #      下次排查不用再猜。
     OVMF_DIRS="/usr/share/OVMF /usr/share/ovmf /usr/share/qemu"
-    # ★ 顺序：先 x86_64 固件，再 IA32。
-    #   这台机器的固件确实是 32 位 IA32（加载不了 PE32+ 的 BOOTX64.EFI），
-    #   但 **CI 这一条链上构建的是 amd64 镜像**，它的 ESP 里只有 64 位槽
-    #   （vmlinuz / initrd.img）；32 位槽（vmlinuz32 / initrd32.img）只有
-    #   i386 变体才有（scripts/build-image.sh:149 只在 KERNEL32 非空时才传）。
-    #   用 IA32 固件去起这个 amd64 镜像，一定会失败在"GRUB(ia32) 找不到
-    #   vmlinuz32"上 —— 那个失败不是我们要找的问题，是测错了对象。
-    #   ⇒ 用 x64 固件（它会走 \EFI\BOOT\BOOTX64.EFI → vmlinuz，正是这个
-    #   镜像里唯一完整的槽）。IA32 固件留作退路，以后给 i386 变体用。
+    # 默认优先 x64；CI 另以环境变量显式选择 IA32，覆盖两种固件。
+    # 两者都引导 /vmlinuz 的 amd64 内核；IA32 GRUB 使用混合模式引导，
+    # 不需要 vmlinuz32。固件位宽与 Linux 内核位宽不能混为一谈。
     OVMF_PAIRS="OVMF_CODE_4M.fd:OVMF_VARS_4M.fd
 OVMF32_CODE_4M.fd:OVMF32_VARS_4M.fd
 OVMF_CODE_IA32.fd:OVMF_VARS_IA32.fd

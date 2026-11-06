@@ -9,16 +9,25 @@
 #
 # 退出码：
 #   0 = 无 BLOCK 级失败（可能有 WARN）
-#   1 = 存在 BLOCK 级失败（启动关键路径缺失）
+#   1 = 存在 FAIL（--strict 同时把必需功能缺失的 WARN 计为 FAIL）
 #
 # 用法：
 #   sudo bash drv-selfcheck.sh            # 表格输出
 #   sudo bash drv-selfcheck.sh --json     # 追加机读 JSON
+#   sudo bash drv-selfcheck.sh --strict   # 整机验收模式；不是启动阻断单元
 set -uo pipefail
 
 JSON=0
-[ "${1:-}" = "--json" ] && JSON=1
+STRICT=0
+for arg in "$@"; do
+    case "$arg" in
+        --json) JSON=1 ;;
+        --strict) STRICT=1 ;;
+        *) printf '用法：%s [--json] [--strict]\n' "$0" >&2; exit 2 ;;
+    esac
+done
 
+WLAN_IF=""
 PASS=0; WARN=0; FAIL=0
 declare -a ROWS=()
 
@@ -26,6 +35,12 @@ GREEN=$'\033[1;32m'; YELLOW=$'\033[1;33m'; RED=$'\033[1;31m'; CYAN=$'\033[1;36m'
 
 row() {  # $1=状态(PASS/WARN/FAIL/INFO) $2=检查项 $3=实测值
     local st="$1" item="$2" val="${3:-}"
+    # 日常体检保持启动容错；整机验收模式把必需功能的缺失计为失败。
+    if [ "$STRICT" = 1 ] && [ "$st" = WARN ]; then
+        case "$item" in
+            蓝牙|蓝牙栈|时间同步|SSH|声卡|HDMI\ 音频|eMMC\ runtime\ PM|microSD\ 卡|TLS\ 可用|wpa_supplicant|"$WLAN_IF 地址") st=FAIL ;;
+        esac
+    fi
     case "$st" in
         PASS) PASS=$((PASS+1)) ;;
         WARN) WARN=$((WARN+1)) ;;
@@ -47,11 +62,12 @@ json_escape() {  # json_escape <原文>
     s="${s//\"/\\\"}"
     s="${s//$'\n'/ }"
     s="${s//$'\r'/ }"
+    s="${s//$'\t'/ }"
     printf '%s' "$s"
 }
 
 have() { command -v "$1" >/dev/null 2>&1; }
-mod_loaded() { grep -qw "$1" /proc/modules 2>/dev/null; }
+mod_loaded() { grep -qw "${1//-/_}" /proc/modules 2>/dev/null; }
 
 # 一次性把 dmesg 收进变量。
 #
@@ -78,8 +94,8 @@ if findmnt -no SOURCE / >/dev/null 2>&1; then
     src="$(findmnt -no SOURCE /)"
     fstype="$(findmnt -no FSTYPE /)"
     opts="$(findmnt -no OPTIONS /)"
-    case "$opts" in
-        *ro*) row FAIL "根文件系统可写" "$src 只读挂载" ;;
+    case ",$opts," in
+        *,ro,*) row FAIL "根文件系统可写" "$src 只读挂载" ;;
         *)     row PASS "根文件系统可写" "$src ($fstype)" ;;
     esac
 else
@@ -593,19 +609,7 @@ else
     row FAIL "可登录账号" "没有 qm1 账号 —— 刷完机没人能登"
 fi
 
-# 铺运行时的入口是 qm1-provision.timer（service 由它触发）。
-# 早先查的是 service 本身是否 enabled；改成 timer 之后 service 不再被 enable，
-# 这条检查必须跟着改，否则永远判成"未启用"。
-if systemctl is-enabled --quiet qm1-provision.timer 2>/dev/null; then
-    row PASS "qm1-provision" "定时器已启用（开机后自动铺 Hermes + headless Chrome）"
-else
-    row WARN "qm1-provision" "定时器未启用 —— 运行时不会自动铺，需手工跑 /usr/local/share/qm1/provision-agent.sh"
-fi
-if [ -f /var/lib/qm1/provision-done ]; then
-    row PASS "运行时部署" "已完成（标记 /var/lib/qm1/provision-done）"
-else
-    row WARN "运行时部署" "尚未完成（没有 /var/lib/qm1/provision-done）"
-fi
+row INFO "应用安装" "镜像仅提供系统底座；应用由用户自行安装，未安装应用不算系统适配故障"
 
 if pgrep -x wpa_supplicant >/dev/null 2>&1; then
     row PASS "wpa_supplicant" "运行中"
@@ -761,10 +765,10 @@ if have aplay; then
 else
     row WARN "声卡" "没有 aply（alsa-utils 未安装）"
 fi
-if mod_loaded snd-hda-codec-hdmi; then
-    row PASS "HDMI 音频" "snd-hda-codec-hdmi 已加载"
+if [ -d /sys/module/snd_hdmi_lpe_audio ] || [ -d /sys/module/snd_hda_codec_hdmi ]; then
+    row PASS "HDMI 音频" "LPE 或 HDA HDMI 驱动已加载（实际发声仍需验证）"
 else
-    row WARN "HDMI 音频" "snd-hda-codec-hdmi 未加载（HDMI 可能没有声音）"
+    row WARN "HDMI 音频" "LPE 与 HDA HDMI 驱动均未加载"
 fi
 
 # CPU 调频
@@ -781,20 +785,14 @@ fi
 # 「这台机器根本没开 runtime PM（无风险）」和「开关没关（有掉卡风险）」。
 emmc_host=""
 if [ -n "$emmc_card_dev" ]; then
-    _rel="${emmc_card_dev#/sys/devices/}"
-    case "$_rel" in
-        */*) : ;;
-        *) _rel="" ;;
-    esac
-    if [ -n "$_rel" ]; then
-        _bus="${_rel%%/*}"
-        _rest="${_rel#*/}"
-        case "$_rest" in
-            */*) _devname="${_rest%%/*}" ;;
-            *) _devname="" ;;
+    _host="$emmc_card_dev"
+    while [ "$_host" != /sys/devices ] && [ "$_host" != / ]; do
+        _owner="$(basename "$(readlink -f "$_host/driver" 2>/dev/null || echo none)")"
+        case "$_owner" in
+            sdhci-acpi|sdhci-pci|sdhci_acpi|sdhci_pci) emmc_host="$_host"; break ;;
         esac
-        [ -n "$_devname" ] && emmc_host="/sys/devices/$_bus/$_devname"
-    fi
+        _host="${_host%/*}"
+    done
 fi
 if [ -z "$emmc_host" ]; then
     row WARN "eMMC runtime PM" "找不到 eMMC 的平台设备（无法确认是否已退出 runtime suspend）"
@@ -906,11 +904,8 @@ fi
 #   （模块装上了却绑不上设备）—— 两者的现场现象一样（没有 wlan0），
 #   但修法完全不同，必须分开报。
 #   modalias 从 uevent 里取（设备核心一定写 MODALIAS=），modalias 文件作为兜底。
-#   ★ modalias 的格式是内核定的 "sdio:c*v%04Xd%04X*"：vendor 四位大写十六进制、
-#     中间一个**小写 d** 分隔、device 四位大写十六进制 —— 所以这张卡
-#     （0x024c:0xb723）在真机上长成 "sdio:c*v024CdB723*"（CI 里 modinfo
-#     打印出来的就是这个原样）。按 "024CB723" 去匹配是匹配不上的，
-#     那样连正常的机器都会被报成"没有枚举到这张卡"。
+#   设备 uevent 是 sdio:c%02Xv%04Xd%04X（如 c00v024CdB723）；
+#   modinfo 打印的 sdio:c*v024CdB723* 是驱动匹配规则，不是设备的原文。
 _sdio_our=""
 for _sd in /sys/bus/sdio/devices/*; do
     [ -e "$_sd" ] || continue
@@ -943,7 +938,7 @@ else
         _hid="$(cat "$_dev/hid" 2>/dev/null || true)"
         case "$_hid" in
             OBDA8723|OBDA0623)
-                bt_owner="$(basename "$(readlink -f "$_dev/driver" 2>/dev/null || echo none)")"
+                bt_owner="$(basename "$(readlink -f "$_dev/physical_node/driver" 2>/dev/null || readlink -f "$_dev/driver" 2>/dev/null || echo none)")"
                 ;;
         esac
     done
@@ -1106,25 +1101,9 @@ else
     row PASS "模块符号版本" "没有版本不匹配的抱怨"
 fi
 
-# --- 8.9 SQLite 版本（清单 6.2）---
-# Debian 13 的 3.46.1 有 WAL 损坏 bug ⇒ 必须钉 3.53.4。
-if ! command -v sqlite3 >/dev/null 2>&1; then
-    row WARN "SQLite 版本" "没有 sqlite3（运行时部署还没铺好？）"
-else
-    _sqlite_ver="$(sqlite3 --version 2>/dev/null | awk '{print $1}' || true)"
-    case "$_sqlite_ver" in
-        3.53.4) row PASS "SQLite 版本" "${_sqlite_ver}（已钉到没有 WAL 损坏 bug 的版本）" ;;
-        3.46.*) row FAIL "SQLite 版本" "${_sqlite_ver} —— 这是 Debian 13 自带的有 WAL 损坏 bug 的版本" ;;
-        *)      row WARN "SQLite 版本" "${_sqlite_ver:-读不到}" ;;
-    esac
-fi
-
-# --- 8.10 headless Chrome（清单 6.3）---
-if command -v chromium >/dev/null 2>&1 || command -v chromium-browser >/dev/null 2>&1; then
-    row PASS "headless Chrome" "$(command -v chromium 2>/dev/null || command -v chromium-browser)"
-else
-    row WARN "headless Chrome" "没有 chromium（运行时部署还没铺好？）"
-fi
+# 应用自身的 Python / SQLite / 浏览器版本由其安装方式管理。
+# 不用系统 sqlite3 命令推断其他解释器所链接的库，也不用 command -v
+# 把“浏览器文件存在”误报为“浏览器能运行”。
 
 # --- 8.11 /dev/shm 够用（清单 6.5）---
 # Chrome 用 /dev/shm 放共享内存，太小会报 "Small ... shared memory"。

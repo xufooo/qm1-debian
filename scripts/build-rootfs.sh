@@ -9,7 +9,7 @@
 #     "解包 + mke2fs -d" 一次完成，避免逐个文件复制导致的权限漂移。
 #
 # 用法：
-#   bash scripts/build-rootfs.sh --out build/rootfs --arch amd64 --profile runtime
+#   bash scripts/build-rootfs.sh --out build/rootfs --arch amd64
 #
 # 常用可选参数：
 #   --kernel-version 6.12.113   固定内核 point release（不装发行版元包，由 hook 精确安装）
@@ -23,8 +23,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 OUT="build/rootfs"
 ARCH="amd64"
-# 默认 runtime（与 build-image.sh 一致）：base profile 不装 agent 运行时。
-PROFILE="runtime"
+# 只交付系统底座；应用由用户在系统验收后自行安装。
+PROFILE="base"
 SUITE=""
 MIRROR="http://deb.debian.org/debian"
 COMPONENTS="main,non-free-firmware"
@@ -51,6 +51,8 @@ while [ $# -gt 0 ]; do
         *) die "未知参数：$1" ;;
     esac
 done
+
+[ "$PROFILE" = base ] || die "只支持 --profile base；镜像不预装应用或在首启时下载应用"
 
 # 只做 64 位系统（32 位系统变体已取消；32 位 EFI 引导器照旧保留）。
 [ -n "$SUITE" ] || SUITE="$(default_suite_for_arch "$ARCH")"
@@ -93,7 +95,7 @@ mkdir -p "$OUT"
 
 # ---------- 包清单 ----------
 # 基础系统：systemd + 网络 + SSH + 无线 + 存储工具 + agent 运行时前置
-BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-oomd,openssh-server,sudo,\
+BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-timesyncd,systemd-oomd,openssh-server,sudo,\
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\
@@ -104,19 +106,6 @@ kmod,initramfs-tools,zstd,apt-transport-https,fdisk,efibootmgr,passwd"
 # （安装环境就是这套根文件系统 —— U 盘里的 ext4 分区直接被引导）。
 # passwd：提供 useradd / chpasswd。设备侧安装器要用它们建登录账号，
 # 少了这个包装机会在 [3/6] 直接中止（这是故意的：不能"装完却没人能登录"）。
-
-# 运行时（Hermes CLI + headless Chrome）
-# 说明（实测）：Debian 的 chromium 确实有 i386 包（trixie 150.x / bookworm 同款），
-# 所以"32 位没有浏览器"并不成立。32 位变体不装 runtime profile 的真正原因是：
-#   * Hermes 要求 Python 3.14，而 uv 托管的 standalone CPython 只提供
-#     x86_64-unknown-linux-gnu 产物（pm/lock.json 里 python.artifacts 只有 linux-x64）；
-#   * 上游 Node.js 把 32 位 x86 标为 Experimental（Debian 自己构建了 nodejs 20.x i386，
-#     但不追主线）；
-#   * Debian 13 起不再提供 i386 内核。
-# 因此 i386 变体的定位是"救援兜底系统"：能起机、能上网、能维护，但承不了 agent 运行时。
-RUNTIME_PKGS_AMD64="chromium,chromium-driver,fonts-liberation,fonts-noto-cjk,\
-libnss3,libgbm1,libasound2,libasound2-plugins,libatk-bridge2.0-0,libgtk-3-0,\
-libx11-xcb1,libdrm2,libxshmfence1,libxkbcommon0,libpango-1.0-0,libcairo2"
 
 KERNEL_PKGS="$(kernel_pkgs_for_arch "$ARCH")"
 if [ -n "$KERNEL_VERSION" ]; then
@@ -132,11 +121,6 @@ PKGS="$BASE_PKGS"
 if [ -n "$KERNEL_PKGS" ]; then
     PKGS="$PKGS,$KERNEL_PKGS"
 fi
-if [ "$PROFILE" = "runtime" ] && [ "$ARCH" = "amd64" ]; then
-    PKGS="$PKGS,$RUNTIME_PKGS_AMD64"
-elif [ "$PROFILE" = "runtime" ]; then
-    warn "profile=runtime 但 $ARCH 承不了 agent 运行时（无 Python 3.14 standalone 构建）—— $ARCH 变体按救援兜底系统构建"
-fi
 
 log "suite=$SUITE arch=$ARCH profile=$PROFILE components=$COMPONENTS"
 log "包清单：$(echo "$PKGS" | tr ',' '\n' | wc -l) 个"
@@ -149,7 +133,6 @@ export QM1_PROFILE="$PROFILE"
 export QM1_OVERLAY_DIR="$REPO_ROOT/overlay"
 export QM1_SELFCHECK_SRC="$SCRIPT_DIR/drv-selfcheck.sh"
 export QM1_LIB_DIR="$SCRIPT_DIR/lib"
-export QM1_PROVISION_SRC="$SCRIPT_DIR/provision-agent.sh"
 # hook 需要知道用哪个发行版/镜像源，才能拼出 <suite>-proposed-updates 的临时 apt 源
 export QM1_SUITE="$SUITE"
 export QM1_MIRROR="$MIRROR"
@@ -210,6 +193,11 @@ for d in dev proc sys run; do
     fi
 done
 mkdir -p "$OUT"/{dev,proc,sys,run}
+
+# 每台安装实例首次启动时生成身份；不得复用构建机的 SSH 私钥或随机种子。
+rm -f "$OUT"/etc/ssh/ssh_host_* "$OUT/var/lib/systemd/random-seed" \
+      "$OUT/var/lib/dbus/machine-id" "$OUT/etc/machine-id"
+: > "$OUT/etc/machine-id"
 
 # ---------- DNS：/etc/resolv.conf 指向 systemd-resolved 的 stub ----------
 # ★ 为什么这一步放在这里，而不是 hooks/customize01-base.sh：

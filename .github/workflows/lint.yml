@@ -60,7 +60,6 @@ jobs:
             overlay/usr/local/sbin/qm1-hardware-fixups \
             overlay/usr/local/sbin/qm1-health-collect \
             overlay/usr/local/sbin/qm1-bluetooth-up \
-            overlay/usr/local/sbin/qm1-provision \
             overlay/usr/local/sbin/qm1-wifi-start \
             overlay/usr/local/bin/qm1-selftest \
             overlay/usr/local/bin/qm1-selftest-report \
@@ -179,6 +178,13 @@ jobs:
           # 规则不一致当场红，不用等真机。
           bash scripts/test-wpa-conf.sh
 
+      - name: Hardware fixups and base-only build policy
+        run: |
+          set -euo pipefail
+          bash scripts/test-hardware-fixups.sh
+          bash scripts/test-base-policy.sh
+          bash scripts/test-selfcheck-policy.sh
+
       - name: Upstream rtw88 patch set (applies to the pinned tree)
         run: |
           set -euo pipefail
@@ -249,9 +255,6 @@ jobs:
             overlay/etc/systemd/system/qm1-install.service \
             overlay/usr/local/sbin/qm1-bluetooth-up \
             overlay/usr/local/sbin/qm1-hardware-survey \
-            overlay/usr/local/sbin/qm1-provision \
-            overlay/etc/systemd/system/qm1-provision.service \
-            overlay/etc/systemd/system/qm1-provision.timer \
             overlay/usr/local/sbin/qm1-wifi-start \
             overlay/usr/local/lib/qm1/install-lib.sh \
             overlay/etc/udev/rules.d/60-qm1-emmc-power.rules \

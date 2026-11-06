@@ -1,5 +1,9 @@
 # 交付手册：从 CI 产物到一台开箱即用的 QM1
 
+本项目只交付 Debian 系统底座，不内置 Hermes、Chromium、额外 Python，
+也没有首启自动下载应用的服务。Hermes + Chrome 是后续验证系统承载能力的负载，
+应用版本、安装和服务由用户管理。
+
 这份文档写的是**拿到 CI 产物之后，到机器真的能用**之间的每一步。
 每一步都标了「怎么验证」，因为这条链路上出过好几类"看起来成功了、
 其实没有"的问题（写好的单元没被 enable、凭据格式不对、校验比的不是
@@ -37,7 +41,6 @@ CI（`build-image` 作业，开了 `upload_images` 输入）成功后拿这些�
 | `SHA256SUMS` | 校验和 |
 | `manifest.txt` | 构建清单：内核版本、ESP 卷标、Wi-Fi 模块状态、固件列表 |
 | `install-qm1.sh` | 主机侧安装脚本（见 §4 路径 B） |
-| `provision-agent.sh` | 装 Hermes + headless Chrome 的脚本（装完系统后跑） |
 
 解压（zstd 压缩是为了上传快）：
 
@@ -295,7 +298,7 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 |---|---|
 | 系统状态 | `systemctl is-system-running` 必须是 running（degraded 只警告） |
 | 内核套数 | `/lib/modules` 下只允许有一套内核（签名版和 `-unsigned` 互 Conflicts，多一套就会让模块 vermagic 对不上） |
-| Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c*v024CdB723*`（注意 vendor 是 `024C`、device 是 `B723`，中间那个 `d` 是**小写**），且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
+| Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c00v024CdB723`（class 可变化；注意 vendor 是 `024C`、device 是 `B723`，中间那个 `d` 是**小写**），且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
 | 出货模块 | `modinfo` 的 alias 必须认领 `v024CdB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
 | Wi-Fi 信道宽度 | `iw dev <接口> link` 的 width 必须是 **20 MHz**（接口名以 `ip -br link` / `/sys/class/net/*/wireless` 看到的为准，不一定是 `wlan0`） —— 出货模块带的是"把芯片能力收窄到 20 MHz"那条策略补丁（`patches/rtw88-upstream/0006`），40 MHz 在这个芯片变体上不支持，且是社区里"随机断连"的来源 |
 | 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` ⇒ 8250 抢占了那条串口（要 DSDT 覆盖）；没有 HID ⇒ 镜像**故意**没加载 `hci_uart`（`/run/qm1-bluetooth.failed` 里写着原因） |
@@ -303,48 +306,33 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 > 为什么"网络没连上"不许拖住开机：发行版的 `systemd-networkd-wait-online`
 > 语义是"等到网络可用才让多用户目标达成"，默认超时 120 秒 —— 这台机器
 > 没有 RJ45，Wi-Fi 一旦没连上，整机就白等 120 秒。镜像把它从
-> `multi-user.target` 上摘掉了；真正该等的东西（DNS、系统时钟）由
-> `qm1-provision.service` 自己等（DNS 90 秒、时钟 120 秒）。
+> `multi-user.target` 上摘掉了；应用安装之前应另行确认 DNS、系统时钟和 HTTPS 可用。
 
 ---
 
-## 6. 装完之后（可选）
+## 6. 系统承载能力与后续应用验证
 
-Hermes CLI 与 headless Chrome 由 `qm1-provision.timer` 在开机 60 秒后
-拉起 `qm1-provision.service` 安装（需要网络 —— 它等
-`network-online.target`，也就是等 wlan0 拿到地址）。
+构建入口只接受 `--profile base`。系统提供 amd64 用户态、内置 Wi-Fi、
+DNS/TLS、SSH、768 MiB zram 和用户 cgroup 的内存压力管理。
+没有浏览器、Hermes 网关或固定的应用 MemoryMax，也不会自动下载它们。
+仓库中历史的 `scripts/provision-agent.sh` 不参与构建或镜像交付。
 
-**为什么是 timer 而不是直接挂 multi-user.target**：服务本身要等网络就绪，
-而 multi-user.target 会对它 Wants= 的成员隐式补 After= —— 直接挂上去等于
-"整机开机必须等网络"，Wi-Fi 一有问题整台机器就到不了 multi-user.target，
-表现为没有 SSH、像砖了。改成 timer 之后，机器先正常起来，安装在后台跑。
-它只在成功一次之后才会跳过（标记 `/var/lib/qm1/provision-done`），
-失败则**十分钟后自动重试**（`qm1-provision.service` 的
-`Restart=on-failure` + `RestartSec=600`；一小时里最多试 6 次，
-超过就停手，下次开机再来）。装完：
+代码侧先完成硬件驱动与配置验证，再进行上机验收。上机时先验系统：
 
 ```sh
-systemctl --user status hermes-gateway     # 常驻网关
-curl -s http://127.0.0.1:9222/json/version # headless Chrome 调试端口
-ls ~/.local/share/uv/python/*/bin/python3.14   # Hermes 用的解释器
+sudo qm1-selftest --strict --json
+systemctl status zramswap systemd-oomd
+free -m
 ```
 
-内存预算（2 GiB 的机器）：zram 768M + mem=1900M + `/dev/shm` 256M +
-`systemd-oomd`；headless Chrome 的用户单元带 `MemoryHigh/MemoryMax`
-（350M/450M）。Hermes 网关的单元由官方 CLI 安装
-（`hermes gateway install --if-missing`），带的是上游自己的重启与退出码
-语义 —— 上游在网关启动时会刷新自己的单元，我们手写的同名单元会被它
-改写并互相打架，所以不再手写。
+`--strict` 将蓝牙、时间同步、HDMI 驱动等必需功能的缺失计入 FAIL。
+没有插 SD 卡时不能凭该条失败推断卡槽损坏；需带卡完成该项验收。
+此模式仍不能替代蓝牙配对、声音输出、存储读写和长期稳定性测试。
 
-网关常驻的前提是**已经配置好消息平台凭据**：上游网关在没有平台连上
-时会自己退出（`Exit 1 if no platform connects`），这是它的设计，不是
-故障。凭据由 `hermes setup` 写入，无终端的自动安装不会替你填，首次使用
-请手工执行一次：
-
-```sh
-hermes setup                              # 选平台、填 token（交互）
-systemctl --user restart hermes-gateway
-```
+系统验收后，如用户安装 Hermes 与 Chrome，再分别验证 CLI 请求、浏览器打开页面、
+两者组合调用，以及并发运行时的 MemAvailable、PSI、memory.events 和重启次数。
+以实际安装版本的负载峰值制定应用限额，不拿“可执行文件存在”当运行成功，
+也不拿其他解释器或系统 sqlite3 的版本推断 Hermes 的实际依赖。
 
 ---
 

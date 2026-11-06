@@ -74,6 +74,11 @@ gen_conf() {  # $1=psk $2=输出目录 → 打印 wpa_supplicant.conf
 }
 
 conf_pass="$(gen_conf "passphrase" "$WORK/p1")"
+if grep -q 'ieee80211w=1' <<<"$conf_pass"; then
+    ok "SAE 配置同时启用 optional PMF"
+else
+    bad "SAE 配置缺少管理帧保护（WPA3 不能完成关联）"
+fi
 if printf '%s' "$conf_pass" | grep -q 'key_mgmt=WPA-PSK SAE'; then
     ok "明文口令生成的配置带 key_mgmt=WPA-PSK SAE"
 else

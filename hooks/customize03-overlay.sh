@@ -156,23 +156,7 @@ enable_overlay_unit "qm1-health-collect.timer" "qm1-health-collect.timer" "timer
 # 蓝牙控制器初始化（内核 hci_uart + btrtl 路线，见单元里的说明）
 enable_overlay_unit "qm1-bluetooth.service" "qm1-bluetooth.service" "multi-user.target"
 
-# 运行时部署（Hermes CLI + headless Chrome）：等 network-online 之后跑一次
-# provision-agent.sh，成功后写 /var/lib/qm1/provision-done；失败下次开机重试。
-# 没有这个单元的话，刷完机不会自动铺运行时 —— 交付口径是"开机即用"。
-#
-# ★ 这里启用的是 **timer**，不是 service 本身。
-#
-#   原因：target 会给 Wants= 成员隐式补上 After=
-#   （systemd.unit(5)：target units will implicitly complement all configured
-#   dependencies of type Wants= or Requires= with After= dependencies）。
-#   所以只要 qm1-provision.service 挂在 multi-user.target 上，而它自己
-#   After=network-online.target，就等于"整机开机必须等到网络就绪"——
-#   这台机器没有 RJ45，内置 Wi-Fi 是唯一链路，Wi-Fi 没起来时
-#   整机到不了 multi-user.target ⇒ 没有 SSH、看起来像砖了。
-#
-#   挂到 timers.target 上就没有这个问题：定时器触发服务，服务等网络，
-#   两条链互不阻塞。
-enable_overlay_unit "qm1-provision.timer" "qm1-provision.timer" "timers.target"
+# 应用的安装与启动由用户管理；首启只配置 Wi-Fi、SSH 和主机名。
 
 # 开机自检：开机后跑一遍硬件体检，报告进 journal，机读 JSON 落盘。
 #

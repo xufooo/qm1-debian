@@ -131,6 +131,7 @@ if [ -n "$WIFI_SSID" ]; then
         # 非法行，整段 network 块被丢掉 ⇒ "能看见 SSID 就是连不上"）。
         [ -n "$_psk_value" ] && printf '    psk=%s\n' "$_psk_value"
         [ -n "$_sae_value" ] && printf '    sae_password=%s\n' "$_sae_value"
+        [ -n "$_sae_value" ] && printf '    ieee80211w=1\n'
         printf '    key_mgmt=%s\n' "$(qm1_wpa_key_mgmt_value "$WIFI_PASS")"
         printf '}\n'
     } > /etc/wpa_supplicant/wpa_supplicant.conf

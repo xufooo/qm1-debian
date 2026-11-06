@@ -1,5 +1,5 @@
 # 内置 Wi-Fi 是这台机器的主联网链路（整机没有 RJ45）。
-# Priority 越小越优先 → 给它更低的 metric，让默认路由走 Wi-Fi。
+# DHCP/RA 路由 metric 越小越优先，让默认路由走 Wi-Fi。
 #
 # Name 同时收 wlan* 与 wlp*：接口名由内核与驱动决定（cfg80211 在拿到
 # 永久 MAC 时会用 wlp<后缀> 的命名法），这台机器我们还没在真机上见过
@@ -10,12 +10,18 @@ Name=wlan* wlp*
 [Network]
 DHCP=yes
 IPv6AcceptRA=yes
-Priority=10
-# ★ 故意不写 RequiredForOnline=yes（默认就是 no）。
+# 不让此接口成为 wait-online 的必需接口（RequiredForOnline 属于 Link 节）。
 #   RequiredForOnline=yes 的语义是"这条链路必须就绪，多用户目标才算达成"，
 #   它只有配合 systemd-networkd-wait-online 才起作用 —— 而那个服务我们
 #   故意从 multi-user.target 上摘掉了（这台机器没有 RJ45，Wi-Fi 一旦没连上
 #   整机会白等 120 秒；而且 Wi-Fi 失败绝不能挡开机）。
 #   如果这里留着 yes，哪天有人把 wait-online 加回来，开机就会重新变成
 #   "Wi-Fi 连不上 ⇒ 没有 SSH ⇒ 看起来像砖了"。留 no 是把这条陷阱拆掉。
+[Link]
 RequiredForOnline=no
+
+[DHCPv4]
+RouteMetric=10
+
+[IPv6AcceptRA]
+RouteMetric=10

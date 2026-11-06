@@ -24,6 +24,7 @@ set -uo pipefail
 CONSOLE=""
 JOURNAL_TEXT_FILE=""
 JOURNAL_TEXT=""
+REQUIRE_TRIAL_BOOT=0
 
 die() { echo "BOOT-SMOKE-ASSERT: $*" >&2; exit 1; }
 
@@ -31,6 +32,7 @@ while [ $# -gt 0 ]; do
     case "$1" in
         --console)         CONSOLE="$2"; shift 2 ;;
         --journal-text-file) JOURNAL_TEXT_FILE="$2"; shift 2 ;;
+        --require-trial-boot) REQUIRE_TRIAL_BOOT=1; shift ;;
         *) die "未知参数 $1" ;;
     esac
 done
@@ -126,6 +128,20 @@ assert_console_re "$MILESTONE_RE" "客户机没走到 multi-user.target"
 assert_console "Started ssh.service" "sshd 没起来（登录不进去）"
 assert_console "Started systemd-resolved.service" "systemd-resolved 没起来（DNS 没有数据源）"
 
+# 配置解析器丢弃字段时也能开机，所以不能只检查 target 和单元的退出码。
+CONFIG_ERRORS='Unknown (key|lvalue|section)|Failed to parse|Unknown section'
+if grep -E "$CONFIG_ERRORS" <<<"$OUT" | grep -qE 'qm1|30-wifi|10-ethernet|60-qm1'; then
+    fail "QM1 系统配置有未识别字段或解析错误"
+fi
+if [ "$REQUIRE_TRIAL_BOOT" = 1 ]; then
+    cmdline="$(grep -E '(Kernel command line:|Command line:)' <<<"$OUT" || true)"
+    [ -n "$cmdline" ] || fail "安装介质没有实际内核命令行证据，不能判定默认项安全"
+    grep -q 'root=UUID=' <<<"$cmdline" || fail "安装介质命令行缺少 root UUID"
+    if grep -q 'qm1\.install=1' <<<"$cmdline"; then
+        fail "安装介质默认项触发写盘"
+    fi
+fi
+
 # ★ 首启那一步到底跑没跑。
 #   判据是"行为"，不是"呈现"：控制台上 systemd 的 Finished 行**或者**
 #   journal 里脚本自己的输出，任一有就算它跑过。
@@ -155,6 +171,9 @@ assert_console "Started qm1-wifi@wlan0.service" \
 
 # journal 断言（可选）：只在拿到 journal 文本时才查。
 if [ -n "$JOURNAL_TEXT" ]; then
+    if grep -E "$CONFIG_ERRORS" <<<"$JOURNAL_TEXT" | grep -qE 'qm1|30-wifi|10-ethernet|60-qm1'; then
+        fail "（journal）QM1 系统配置有未识别字段或解析错误"
+    fi
     assert_journal() {
         grep -q -- "$1" <<<"$JOURNAL_TEXT" || fail "（journal）$2"
     }
