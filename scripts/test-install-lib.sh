@@ -44,6 +44,17 @@ fails=0
 ok() { printf '  ok   %s\n' "$*"; }
 bad() { printf '  FAIL %s\n' "$*" >&2; fails=$(( fails + 1 )); }
 
+# A fixed replacement can equal the random source byte (1/256 chance).
+# XOR one bit so every corruption fixture changes the observed byte.
+flip_byte() {
+    local path=$1 offset=$2 value escaped
+    value="$(dd if="$path" bs=1 skip="$offset" count=1 status=none | od -An -tu1 | tr -d ' \n')"
+    [[ "$value" =~ ^[0-9]+$ ]] || { echo "cannot read byte at $offset" >&2; return 1; }
+    printf -v escaped '\\%03o' "$((value ^ 1))"
+    printf '%b' "$escaped" | dd of="$path" bs=1 seek="$offset" conv=notrunc,fsync status=none
+}
+
+
 IMG="$WORK/disk.img"
 BACKUP="$WORK/backup.img"
 
@@ -113,7 +124,7 @@ fi
 #     校验"通过"了，却什么也没证明。）
 off=$(( 64 * 1024 * 1024 ))
 orig="$(dd if="$LOOP" bs=1 skip="$off" count=1 status=none | od -An -tx1 | tr -d ' \n')"
-printf 'X' | dd of="$LOOP" bs=1 seek="$off" conv=notrunc status=none
+flip_byte "$LOOP" "$off"
 if qm1_verify_backup "$LOOP" "$BACKUP" 0; then
     bad "目标盘改了一个字节，校验却通过了"
 else
@@ -121,13 +132,13 @@ else
 fi
 # 还原（后面的用例还要拿这个盘跟备份比对）
 if [ -n "$orig" ]; then
-    printf "\\x$orig" | dd of="$LOOP" bs=1 seek="$off" conv=notrunc status=none
+    printf "\\x$orig" | dd of="$LOOP" bs=1 seek="$off" conv=notrunc,fsync status=none
 fi
 
 # 还原，再改备份
 cp "$IMG" "$BACKUP"
 off=$(( 64 * 1024 * 1024 ))
-printf 'Y' | dd of="$BACKUP" bs=1 seek="$off" conv=notrunc status=none
+flip_byte "$BACKUP" "$off"
 if qm1_verify_backup "$LOOP" "$BACKUP" 0; then
     bad "备份改了一个字节，校验却通过了"
 else
@@ -146,7 +157,7 @@ else
     bad "尾部偏移位置的备份没有通过校验"
 fi
 off=$(( 64 * 1024 * 1024 ))
-printf 'Z' | dd of="$IMG" bs=1 seek="$off" conv=notrunc status=none
+flip_byte "$LOOP" "$off"
 if qm1_verify_backup "$LOOP" "$TAIL" "$TAIL_BASE"; then
     bad "目标盘改了一个字节（带偏移的备份），校验却通过了"
 else
@@ -171,7 +182,7 @@ else
     bad "镜像写进更大的分区后校验不一致：$src_hash / $dst_hash"
 fi
 # 镜像范围内改一个字节，必须被发现
-printf 'Q' | dd of="/dev/$root_name" bs=1 seek=1048576 conv=notrunc status=none
+flip_byte "/dev/$root_name" 1048576
 dst_hash="$(qm1_hash_range "/dev/$root_name" 0 "$IMG_BYTES")"
 if [ "$src_hash" != "$dst_hash" ]; then
     ok "镜像范围内改一个字节被检出"
