@@ -95,7 +95,7 @@ mkdir -p "$OUT"
 
 # ---------- 包清单 ----------
 # 基础系统：systemd + 网络 + SSH + 无线 + 存储工具 + agent 运行时前置
-BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-timesyncd,systemd-oomd,openssh-server,sudo,\
+BASE_PKGS="systemd,systemd-sysv,systemd-resolved,systemd-timesyncd,systemd-oomd,libpam-systemd,dbus-user-session,openssh-server,sudo,\
 curl,wget,ca-certificates,git,iproute2,iputils-ping,net-tools,pciutils,usbutils,\
 lm-sensors,alsa-utils,bluez,wpasupplicant,iw,rfkill,wireless-regdb,mmc-utils,\
 dosfstools,e2fsprogs,zram-tools,python3,python3-venv,ripgrep,locales,tzdata,\

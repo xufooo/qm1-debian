@@ -455,6 +455,9 @@ for _p in /usr/local/sbin/qm1-provision /usr/local/share/qm1/provision-agent.sh 
 done
 check_content /etc/systemd/oomd.conf.d/qm1.conf '^DefaultMemoryPressureLimit=60%' "有效的 OOM 压力阈值"
 check_content /etc/systemd/system/user@.service.d/60-qm1-oomd.conf '^ManagedOOMMemoryPressure=kill' "用户负载的 OOM 监控"
+check_exists /usr/lib/systemd/system/user@.service "系统支持独立用户服务管理器"
+check_exists /usr/share/pam-configs/systemd "登录会话接入 systemd 用户 cgroup"
+check_exists /usr/lib/systemd/user/dbus.service "系统提供用户 D-Bus 会话"
 
 # ★ 开机自检：必须由 timer 触发，单元要有超时，而且"报告里有 FAIL 行"
 #   不该被当成"单元起不来"（那会让整机变 degraded，把真故障淹没在噪声里）。
