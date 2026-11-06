@@ -398,17 +398,16 @@ if [ -z "$bt_state" ]; then
               | tail -4 | sed 's/^/      /')"
     if [ -n "$_btlog" ]; then
         row INFO "蓝牙线索" "$_btlog"
-        row INFO "蓝牙排查" "内核没绑定 OBDA8723 时，多半是 DSDT 把这个 ACPI 设备暴露成了普通 16550 串口（8250 抢先绑定）—— 需要 DSDT 覆盖"
+        row INFO "蓝牙排查" "检查 UART 父控制器、H5 serdev 子设备、GPIO 依赖和固件加载日志；先确定失败环节，再考虑 ACPI 修正"
     fi
 fi
 
 # 蓝牙的 ACPI HID：这台机的 BT UART 是靠它暴露的（上游 hci_h5 的
 # h5_acpi_match[] 认的就是 OBDA8723 / OBDA0623）。
 #
-# 镜像里的 qm1-bluetooth-up **只有看到这个 HID 才会 modprobe hci_uart**：
-# 没有 HID 就加载 hci_uart 没有可绑定的串口，纯属白占一个 uart 端口
-# （在 CI 的 QEMU 里它还把串口控制台搅黄了 —— 整机到不了 multi-user.target）。
-# 所以这里既要看 HID 在不在，也要看它被谁认领：8250 抢先绑定 ⇒ 内核绑不上。
+# HID、UART 父控制器和蓝牙 serdev 子设备的状态需要分开核对。
+# hci_uart 注册 H5 子设备驱动，不会自行占用所有 8250 端口；没有 hci0
+# 不能直接证明父控制器抢占或必须覆盖 DSDT。
 _bt_hid=""
 _bt_owner=""
 for _d in /sys/bus/acpi/devices/*; do
@@ -425,10 +424,10 @@ if [ -n "$_bt_hid" ]; then
     if [ -d /sys/class/bluetooth/hci0 ]; then
         row PASS "蓝牙 ACPI" "HID=$_bt_hid 已被 ${_bt_owner:-未知} 认领，hci0 已出现"
     else
-        row FAIL "蓝牙 ACPI" "HID=$_bt_hid 存在（认领者=${_bt_owner:-未知}）却没有 hci0 —— 8250 抢占了那条串口，需要 DSDT 覆盖"
+        row FAIL "蓝牙 ACPI" "HID=$_bt_hid 存在（认领者=${_bt_owner:-未知}）却没有 hci0 —— 检查 UART/H5 子设备绑定、依赖和固件日志，原因尚未确认"
     fi
 else
-    row WARN "蓝牙 ACPI" "没有 OBDA8723/OBDA0623 ⇒ DSDT 没把蓝牙 UART 暴露出来，镜像因此**故意没有**加载 hci_uart"
+    row WARN "蓝牙 ACPI" "未发现 OBDA8723/OBDA0623；检查 ACPI 状态与枚举，模块加载状态另行核对"
 fi
 # 没加载也要留痕：原因写在标记文件里，别让它悄悄消失
 # ★ 先看持久的那份（/var/lib/qm1/bluetooth-failed），再看 /run 下那个软链 ——

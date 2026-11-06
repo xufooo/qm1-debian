@@ -192,7 +192,7 @@ jobs:
           set -eu
           # 这是整条链路里唯一一处"真的启动一次"：前面的检查全是静态的
           # （文件在不在、软链指向哪、参数写对没有），全绿也不代表刷上去
-          # 能开机。QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，
+          # 能开机。QEMU 里没有 QM1 的 RTL8723BS、UART/GPIO 拓扑和真实 eMMC，
           # 所以它替代不了真机验收 —— 但"内核起不来 / initrd 找不到根 /
           # systemd 起不来 / 账号没建 / DNS 链没挂上"这一整类问题，
           # 在这里就能挡下来。
@@ -608,7 +608,7 @@ jobs:
           grep -q '/run/qm1-bluetooth.failed' "$ROOT/usr/local/sbin/qm1-bluetooth-up" \
             || { echo "::error::蓝牙辅助脚本没有写失败标记文件"; exit 1; }
           grep -q 'OBDA8723' "$ROOT/usr/local/sbin/qm1-bluetooth-up" \
-            || { echo "::error::蓝牙辅助脚本没有探测 OBDA8723（8250 抢占检测）"; exit 1; }
+            || { echo "::error::蓝牙辅助脚本没有探测 OBDA8723（ACPI/serdev 诊断）"; exit 1; }
           grep -q 'qm1-bluetooth-up' "$ROOT/etc/systemd/system/qm1-bluetooth.service" \
             || { echo "::error::qm1-bluetooth.service 没有调用 qm1-bluetooth-up"; exit 1; }
           echo "OK   蓝牙等待与失败上报就位"

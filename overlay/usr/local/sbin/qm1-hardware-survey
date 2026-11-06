@@ -115,7 +115,7 @@ collect() {
         say "(读不到 /sys/firmware/acpi/tables/DSDT —— 这台机器可能不是用 ACPI 引导的)"
     fi
 
-    section "串口与蓝牙（看 8250 有没有抢走 BT UART）"
+    section "UART 父控制器与蓝牙子设备绑定"
     say "-- tty --"
     for t in /sys/class/tty/*; do
         [ -e "$t" ] || continue

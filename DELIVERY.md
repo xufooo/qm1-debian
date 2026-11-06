@@ -275,7 +275,7 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 > `scripts/test-boot-smoke-assert.sh` 用带 ANSI 的 fixture 离线验证它：
 > 正例必须过、反例必须挂。断言串腐化了当场发现，不用烧一轮 CI。
 
-但 QEMU 里没有 RTL8723BS、没有 8250、没有真实 eMMC，所以：
+但 QEMU 里没有 QM1 的 RTL8723BS、UART/GPIO 拓扑和真实 eMMC，所以：
 
 - 第 3 条（Wi-Fi 真连上）、蓝牙、eMMC 掉卡 —— **只能真机验**；
 - 第 4 条（时钟）需要真实网络与 NTP —— QEMU 里验不了。
@@ -301,7 +301,7 @@ stub 就没有 DNS，NTP 解析不了域名 → 时钟停在 1970 → HTTPS 全�
 | Wi-Fi 卡 | `/sys/bus/sdio/devices/` 里必须枚举到 `sdio:c00v024CdB723`（class 可变化；注意 vendor 是 `024C`、device 是 `B723`，中间那个 `d` 是**小写**），且它的 `driver` 软链要指向 `rtw88_qm1` —— 「卡枚举出来了但没人认领」和「内核根本没认出这张卡」是两回事，修法完全不同 |
 | 出货模块 | `modinfo` 的 alias 必须认领 `v024CdB723`、vermagic 必须等于当前内核 ABI、`MODULE_FIRMWARE` 列出的每个固件文件都必须真的在 `/lib/firmware/` 下 |
 | Wi-Fi 信道宽度 | `iw dev <接口> link` 的 width 必须是 **20 MHz**（接口名以 `ip -br link` / `/sys/class/net/*/wireless` 看到的为准，不一定是 `wlan0`） —— 出货模块带的是"把芯片能力收窄到 20 MHz"那条策略补丁（`patches/rtw88-upstream/0006`），40 MHz 在这个芯片变体上不支持，且是社区里"随机断连"的来源 |
-| 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` ⇒ 8250 抢占了那条串口（要 DSDT 覆盖）；没有 HID ⇒ 镜像**故意**没加载 `hci_uart`（`/run/qm1-bluetooth.failed` 里写着原因） |
+| 蓝牙 | ACPI 里必须有 `OBDA8723`/`OBDA0623` 的 HID；有 HID 没 `hci0` 时检查 UART 父控制器、H5 serdev 子设备、GPIO 依赖与固件日志；没有 HID 时检查 ACPI 状态和枚举。不能直接推断抢占或要求 DSDT 覆盖；故障线索写入持久标记及 `/run/qm1-bluetooth.failed` |
 
 > 为什么"网络没连上"不许拖住开机：发行版的 `systemd-networkd-wait-online`
 > 语义是"等到网络可用才让多用户目标达成"，默认超时 120 秒 —— 这台机器

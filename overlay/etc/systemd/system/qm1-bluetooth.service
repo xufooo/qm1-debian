@@ -26,9 +26,9 @@ RemainAfterExit=yes
 # raw 造成串口乱码。所以只保留内核这一条路。
 #
 # 这里只做两件事：确保模块加载；等 hci0 出现（最多 30s）。
-# 等不到**不算失败**：内核没绑定通常是 DSDT 把 OBDA8723 暴露成了普通
-# 16550 串口设备（8250 抢先绑定），那时 bluez 只会报"没有适配器"，
-# 不该把整机启动拖住 —— 详细的排查路径见 drv-selfcheck.sh 的蓝牙段。
+# 等不到会记录故障，但不阻塞整机启动。没有 hci0 的原因需结合 UART
+# 父控制器、H5 子设备、GPIO 依赖与固件日志判断，不能直接推断串口抢占。
+# 详细排查路径见 drv-selfcheck.sh 的蓝牙段。
 ExecStart=/usr/local/sbin/qm1-bluetooth-up
 TimeoutStartSec=45
 

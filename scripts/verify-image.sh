@@ -441,7 +441,7 @@ if [ -n "$KVER" ]; then
         fail=$((fail + 1))
     fi
 fi
-check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/蓝牙 8250 判定用）"
+check_exists /usr/local/sbin/qm1-hardware-survey "真机取证工具（microSD/UART/蓝牙资源核对）"
 check_absent /etc/ssh/ssh_host_ed25519_key "镜像不克隆 SSH 私钥"
 check_exists /etc/systemd/system/qm1-ssh-hostkeys.service "首启生成 SSH 主机密钥"
 check_content /etc/systemd/system/ssh.service.d/qm1-hostkeys.conf '^Requires=qm1-ssh-hostkeys.service' "SSH 启动前必须生成主机密钥"
