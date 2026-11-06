@@ -7,12 +7,12 @@
 #
 #   1) microSD 槽插卡认不出。上游 sdhci-acpi 的 CD pull-up quirk 只匹配
 #      ASUSTeK + T100TA，本机未必匹配；sdhci-acpi 是静态表、又没有任何
-#      module_param ⇒ 运行时注入不了。要修就得改 DSDT（覆盖 ACPI 描述），
-#      而改 DSDT 前必须先看到这台机器真实的 DSDT 与 SD 主机的 ACPI 路径。
+#      module_param。应先确认实际资源、电气设计和检测失败原因，再判断
+#      是否需要驱动 quirk 或 ACPI 修正，不能仅凭 PullNone 推断缺上拉。
 #
 #   2) 内置蓝牙（ACPI HID OBDA8723）没出 hci0。上游 hci_h5 按 ACPI HID
-#      认这个设备；如果 DSDT 把它暴露成普通 16550 串口，8250 会抢先绑定，
-#      内核 hci_uart 就没戏了。判断依据是这台机器真实的 ACPI 设备表。
+#      认这个设备。UART 父控制器和 H5 serdev 子设备的绑定要分别检查；
+#      不能把正常串口控制器绑定直接视为抢占。需结合真实 ACPI 与日志。
 #
 # 所以这个脚本只做一件事：**把事实收集齐**。它不改任何配置、不写任何
 # 设备节点、不会让系统变得不稳定。

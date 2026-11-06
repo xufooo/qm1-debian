@@ -943,7 +943,7 @@ else
         esac
     done
     if [ -n "$bt_owner" ]; then
-        row WARN "蓝牙" "没有 hci0（蓝牙 ACPI 节点被 '$bt_owner' 占用；若是 8250 需 blacklist 8250_generic/8250_serial）"
+        row WARN "蓝牙" "没有 hci0（观察到驱动 '$bt_owner'；需分别检查 UART 父控制器与 H5 子设备、依赖及固件日志，不能据此拉黑串口驱动）"
     else
         row WARN "蓝牙" "没有 hci0（固件未下发成功或 DSDT 未把 OBDA8723 暴露成 serdev 口）"
     fi

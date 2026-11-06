@@ -14,13 +14,9 @@
 # is missing" and nobody knows where to look.  So we leave a marker file and
 # a journal entry with the likely cause.
 #
-# ★ 只在这台机真的暴露了蓝牙的 ACPI HID 时才加载 hci_uart。
-#   上游 v6.12 的 drivers/bluetooth/hci_h5.c 里 h5_acpi_match[] 认的就是
-#   OBDA8723 / OBDA0623 这两个 HID；没有这个 HID ⇒ hci_uart 没有任何可绑定
-#   的串口，加载它只有一个坏处：hci_uart 是 uart 驱动，会去够所有 8250
-#   端口，在没有对应硬件的机器上有可能把别的东西（尤其是 ttyS0 控制台）
-#   搅黄。所以"没有 HID"时我们不加载它，只如实记一笔。
-#   —— 这也是冒烟测试能跑通的前提：QEMU 里没有这个 HID。
+# 只在固件暴露匹配 HID 时尝试晚期加载；模块本身注册 H5 serdev
+# 驱动，不会自行接管所有 8250 端口。UART 父控制器与蓝牙子设备必须
+# 分别检查；父控制器绑定串口驱动是正常枚举路径的一部分。
 
 set -u
 
@@ -65,19 +61,9 @@ write_marker() {
 }
 
 if [ -z "$acpi_hid" ] && [ ! -e /etc/qm1/bluetooth-force ]; then
-    # 没有 HID ⇒ 没有可绑定的串口 ⇒ 不加载 hci_uart（加载了也绑不上，
-    # 只会白占一个 uart 端口）。这不是故障，是这台机本来就没有这个控制器。
-    # 需要强行加载时（万一 DSDT 用了别的 HID）：touch /etc/qm1/bluetooth-force
-    #
-    # ★ 与 modules-load.d 里那两行并不矛盾，说明一下：
-    #   /etc/modules-load.d/qm1-hardware.conf 里的 hci_uart/btrtl 是
-    #   **开机早期**的加载 —— serdev 驱动必须在 ACPI 把蓝牙 UART 枚举出来
-    #   之前就注册好，否则 8250 会先把那个口抢走，hci_h5 再也绑不上。
-    #   那条早加载路径是**故意不设 HID 守卫**的（守卫在这里加，反而会在
-    #   DSDT 不规范时把蓝牙彻底关掉）。
-    #   这里守的是**晚期**路径：模块已经因为别的原因没加载上时，别再去
-    #   硬加载一个根本绑不上的驱动。两种路径的分工写在这里，免得以后
-    #   有人看到"守卫"就把早加载也一起去掉。
+    # 此处只表示没有发现这两个匹配 HID，不能据此断言硬件不存在。
+    # 早期 modules-load 和此晚期守卫都不应靠禁用 UART 父驱动来排障。
+    # bluetooth-force 只允许尝试模块加载，不改变 ACPI 描述或设备绑定。
     log "这台机没有暴露蓝牙的 ACPI HID（OBDA8723/OBDA0623）⇒ hci_uart 没有可绑定的串口，不加载它"
     write_marker "no Bluetooth ACPI HID (OBDA8723/OBDA0623) on this machine; hci_uart was not loaded on purpose"
     exit 0
@@ -97,9 +83,8 @@ while [ "$i" -lt 30 ]; do
     sleep 1
 done
 
-# No hci0.  Find out who owns the Bluetooth ACPI node: if 8250 claimed it,
-# the port is a plain 16550 and hci_uart can never bind it.
-write_marker "if acpi_owner is 8250*, blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf"
+# No hci0: record the observation without guessing a board-specific remedy.
+write_marker "inspect UART parent and Bluetooth serdev child bindings, probe/dependency errors and firmware logs; do not blacklist a UART controller solely because hci0 is absent"
 
 log "no hci0 after 30s; ACPI owner=${acpi_owner:-none} (details in $MARKER)"
 exit 0

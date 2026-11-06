@@ -208,10 +208,9 @@ audio_fixup() {
 # and is pushed by the kernel btrtl driver -- qm1-bluetooth.service only waits
 # for hci0.
 #
-# The failure mode to watch for: if 8250_generic claimed the same ACPI node
-# first, hci_uart never gets the port and the Bluetooth function is simply
-# missing (no error, just no hci0).  Detect that and say so: the ACPI device
-# directory carries the HID and a driver symlink, so we can tell who won.
+# UART controller binding and Bluetooth serdev child binding are distinct.
+# A serial controller driver can be required to enumerate the H5 child;
+# missing hci0 alone does not justify blacklisting or a DSDT override.
 # ---------------------------------------------------------------------------
 bluetooth_fixup() {
     modprobe hci_uart 2>/dev/null || true
@@ -235,13 +234,13 @@ bluetooth_fixup() {
         logboth "bluetooth: NO hci device; ACPI node $bt_acpi is bound to driver '$bt_driver'"
         case "$bt_driver" in
             8250*|serial*)
-                logboth "bluetooth: remedy = blacklist 8250_generic and 8250_serial in /etc/modprobe.d/qm1-hardware.conf, then reload hci_uart"
+                logboth "bluetooth: inspect the UART parent and H5 serdev child separately; do not blacklist a controller based only on this owner"
                 ;;
             hci_uart*)
                 logboth "bluetooth: hci_uart owns the node but no hci device appeared -- check 'dmesg | grep -i hci_uart' and the firmware blob"
                 ;;
             none)
-                logboth "bluetooth: the ACPI node has no driver at all -- the port is probably not exposed as a serdev port (a DSDT override is needed)"
+                logboth "bluetooth: no bound driver observed; inspect serdev enumeration, UART/GPIO dependencies and probe errors before considering ACPI changes"
                 ;;
             *)
                 logboth "bluetooth: unexpected owner '$bt_driver' on the Bluetooth ACPI node"
