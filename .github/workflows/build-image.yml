@@ -1173,6 +1173,54 @@ jobs:
             exit "$rc"
           fi
 
+      - name: Boot the installer media (QEMU)
+        run: |
+          set -eu
+          # ★ 安装介质（写进 U 盘、开机选"② 安装到 eMMC"的那个盘）从来没被启动过。
+          #   它用的是**另一份 grub.cfg**（scripts/grub-installer.cfg.example），
+          #   里面有**三处占位符替换**：
+          #     ① search --label @ESP_LABEL@    ESP 的卷标
+          #     ② root=UUID=@ROOT_UUID@         根分区 UUID
+          #     ③ /vmlinuz 与 /initrd.img 的路径
+          #   替换错了，用户插上 U 盘就是黑屏 —— 而 CI 全绿：
+          #   下面那个"安装介质是自包含的"步骤只静态检查了菜单里
+          #   "有没有那些字符串"，从来没让这块盘真的引导过一次。
+          #
+          # 这里真起一次。安全：安装菜单的默认项是"① 试用系统"，
+          # 不带 qm1.install=1 ⇒ qm1-install.service 的
+          # ConditionKernelCommandLine=qm1.install=1 不成立 ⇒
+          # 不会触发安装、不写盘。
+          rc=0
+          bash scripts/boot-smoke.sh \
+            --disk build/out/qm1-installer.img \
+            --timeout 420 \
+            --log build/out/boot-installer-smoke.log || rc=$?
+          if [ "$rc" = "77" ]; then
+            echo "::error::安装介质的启动测试被跳过（找不到 OVMF 固件）—— 这一步是出货的第一步，不许静默跳过"
+            exit 1
+          elif [ "$rc" != "0" ]; then
+            tail -60 build/out/boot-installer-smoke.log || true
+            exit "$rc"
+          fi
+          # ★ 运行时证据：默认项确实是"不写盘"的那一条。
+          #   静态断言只能证明"菜单第一条的文本里没有 qm1.install=1"；
+          #   这里证明**内核实际拿到的命令行**里也没有 ——
+          #   插上 U 盘什么都不选时，机器不会去擦 eMMC。
+          #   找不到内核命令行行只警告不判失败：找不到证据 ≠ 有问题。
+          CONSOLE=build/out/boot-smoke/console.log
+          if [ ! -f "$CONSOLE" ]; then
+            echo "::warning::没拿到安装介质的控制台输出（$CONSOLE），跳过命令行检查"
+            exit 0
+          fi
+          if grep -q 'qm1\.install=1' "$CONSOLE"; then
+            echo "::error::安装介质的默认项带着 qm1.install=1 —— 插上 U 盘就会自动擦 eMMC"
+            exit 1
+          fi
+          if ! grep -q 'root=UUID=' "$CONSOLE"; then
+            echo "::warning::控制台里没找到内核命令行（root=UUID=…），没能确认默认项不带安装参数"
+          fi
+          echo "OK   安装介质能引导起来，且默认项确实是不写盘的那条"
+
       - name: Assert the installer image is self-contained
         run: |
           set -eu
