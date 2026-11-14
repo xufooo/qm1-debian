@@ -12,6 +12,10 @@ SSHD_PID=""
 proc_mounted=0
 pts_mounted=0
 cleanup() {
+    local test_exit_code=$?
+    if [ "$test_exit_code" -ne 0 ] && [ -f "$WORK/sshd.log" ]; then
+        cat "$WORK/sshd.log" >&2
+    fi
     if [ -n "$SSHD_PID" ]; then
         kill "$SSHD_PID" 2>/dev/null || true
         wait "$SSHD_PID" 2>/dev/null || true

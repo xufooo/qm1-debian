@@ -29,13 +29,16 @@ cat > "$FIXTURE_CHPASSWD_LOG"
 SH
 printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/systemctl"
 printf '#!/bin/sh\nexit 1\n' > "$WORK/bin/mountpoint"
+printf '#!/bin/sh\nexit 0\n' > "$WORK/bin/lsblk"
+printf '#!/bin/sh\necho unexpected-mount-in-fixture >&2; exit 99\n' > "$WORK/bin/mount"
 chmod +x "$WORK/bin/"*
 python3 - "$SCRIPT_DIR/../overlay/usr/local/sbin/qm1-firstboot" "$WORK" <<'PY'
 from pathlib import Path
-import sys
+import re, sys
 text=Path(sys.argv[1]).read_text()
-for prefix in ['/etc/', '/root/', '/run/', '/var/lib/']:
-    text=text.replace(prefix, sys.argv[2]+'/root'+prefix)
+text=re.sub(r'/(?:etc|root|run|var/lib)/', lambda m: sys.argv[2]+'/root'+m.group(0), text)
+assert 'PROV_DIR="'+sys.argv[2]+'/root/etc/qm1/provision"' in text
+assert 'MARKER="'+sys.argv[2]+'/root/var/lib/qm1/firstboot-done"' in text
 Path(sys.argv[2]+'/firstboot').write_text(text)
 PY
 export PATH="$WORK/bin:$PATH"

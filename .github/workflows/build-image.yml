@@ -23,7 +23,7 @@ on:
         type: string
         default: "30"
       upload_images:
-        description: "是否上传镜像产物（体积大，分钟级）"
+        description: "手动构建是否上传完整镜像（main 推送始终上传）"
         type: boolean
         default: false
   push:
@@ -1311,7 +1311,7 @@ jobs:
             build/out/bootloaders/
 
       - name: Upload image artifacts (opt-in)
-        if: inputs.upload_images == true
+        if: github.event_name == 'push' || inputs.upload_images == true
         uses: actions/upload-artifact@v4
         with:
           name: qm1-images-${{ inputs.arch || 'amd64' }}
