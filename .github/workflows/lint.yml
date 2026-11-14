@@ -215,6 +215,12 @@ jobs:
           sudo apt-get install -y -qq zstd
           bash scripts/test-image-package.sh
 
+      - name: Firstboot identity and private configuration (isolated paths)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq openssl util-linux
+          sudo bash scripts/test-firstboot-identity.sh
+
       - name: modversions CRC comparison (synthetic symbol tables)
         run: |
           set -euo pipefail

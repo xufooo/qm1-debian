@@ -180,6 +180,9 @@ jobs:
       - name: Verify target ACPI aliases and module dependencies
         run: bash scripts/verify-board-modules.sh build/rootfs
 
+      - name: Verify private bootstrap SSH and sudo in disposable rootfs
+        run: bash scripts/test-rootfs-ssh.sh build/rootfs
+
       - name: Build image artifacts (ESP + rootfs + manifest)
         run: |
           bash scripts/build-image.sh \
@@ -481,7 +484,7 @@ jobs:
           #    （口令由安装器装机时随机生成并打印）。
           grep -q '^qm1:' "$ROOT/etc/passwd" \
             || { echo "::error::镜像里没有 qm1 账号 —— 装完之后没人能登进去"; exit 1; }
-          QM1_SHADOW="$(getent shadow qm1 2>/dev/null | cut -d: -f2 || echo '')"
+          QM1_SHADOW="$(chroot "$ROOT" getent shadow qm1 | cut -d: -f2)"
           case "$QM1_SHADOW" in
             '!'*|'*'|'')
               echo "OK   qm1 账号存在且口令已锁定（${QM1_SHADOW}）" ;;
@@ -1319,6 +1322,8 @@ jobs:
             build/out/SHA256SUMS
             build/out/manifest.txt
             build/out/install-qm1.sh
+            build/out/prepare-provision.sh
+            build/out/inject-provision.sh
             build/out/lib/common.sh
             build/out/BUILD-INFO.txt
             build/out/IMAGE-README.txt

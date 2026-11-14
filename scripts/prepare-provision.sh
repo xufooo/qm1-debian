@@ -10,6 +10,7 @@
 #   authorized_keys       可选：SSH 公钥
 #   ssh_user              可选：公钥同时装给哪个普通用户
 #   hostname              可选：主机名
+#   ssh_password_hash     可选：SHA512-crypt 本地密码哈希（供 sudo；--ssh-password-hash-file）
 #
 # 用法：
 #   # 交互式（会提示输入 SSID 与密码）
@@ -38,6 +39,7 @@ HOSTNAME=""
 ENABLE_SSH=0
 SSH_USER=""
 SSH_PUBKEY=""
+SSH_PASSWORD_HASH_FILE=""
 FORCE=0
 
 usage() {
@@ -56,6 +58,7 @@ while [ $# -gt 0 ]; do
         --enable-ssh) ENABLE_SSH=1; shift ;;
         --ssh-user) SSH_USER="$2"; shift 2 ;;
         --ssh-pubkey) SSH_PUBKEY="$2"; shift 2 ;;
+        --ssh-password-hash-file) SSH_PASSWORD_HASH_FILE="$2"; shift 2 ;;
         --force) FORCE=1; shift ;;
         -h|--help) usage 0 ;;
         *) die "未知参数：$1（--help 看用法）" ;;
@@ -72,6 +75,14 @@ fi
 if [ -n "$SSH_PUBKEY" ]; then
     [ -f "$SSH_PUBKEY" ] || die "找不到公钥文件：$SSH_PUBKEY"
     ENABLE_SSH=1
+fi
+
+if [ -n "$SSH_PASSWORD_HASH_FILE" ]; then
+    [ -f "$SSH_PASSWORD_HASH_FILE" ] || die "找不到本地密码哈希文件"
+    HASH="$(cat "$SSH_PASSWORD_HASH_FILE")"
+    HASH_PATTERN='^\$6\$(rounds=[0-9]+\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$'
+    [[ "$HASH" =~ $HASH_PATTERN ]] || die "需要有效的 SHA512-crypt 密码哈希"
+    unset HASH
 fi
 
 # 交互式补齐缺失的 SSID / 密码
@@ -137,6 +148,11 @@ fi
 chmod 0600 "$OUT/wpa_supplicant.conf"
 
 # ---------- SSH ----------
+if [ -n "$SSH_PASSWORD_HASH_FILE" ]; then
+    cp "$SSH_PASSWORD_HASH_FILE" "$OUT/ssh_password_hash"
+    chmod 0600 "$OUT/ssh_password_hash"
+    [ -z "$SSH_USER" ] || printf '%s\n' "$SSH_USER" > "$OUT/ssh_user"
+fi
 if [ "$ENABLE_SSH" = 1 ]; then
     : > "$OUT/ssh"
     chmod 0600 "$OUT/ssh"

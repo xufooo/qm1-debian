@@ -432,9 +432,8 @@ cat <<EOF
   1. 关机取出安装介质（或拔掉 U 盘），上电启动。
   2. 固件若不扫描内部存储的 \\EFI\\BOOT，用 U 盘跳板引导（见 README 的救援一节）。
   3. 首次开机后执行自检：
-         sudo /usr/local/bin/qm1-selftest
-  4. 装 agent 运行时（Hermes 官方安装方式 + Chrome 依赖）：
-         sudo bash /usr/local/share/qm1/provision-agent.sh
+         sudo /usr/local/bin/qm1-selftest --strict
+  4. 应用由用户按官方安装方式另行安装；系统镜像不内置应用。
 
   EFI 启动项：$EFI_ENTRY_DONE
 EOF

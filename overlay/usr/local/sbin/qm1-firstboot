@@ -154,7 +154,7 @@ if [ -f "$SRC/authorized_keys" ]; then
     # 结果是公钥永远装不上去。这里先数一下真正的公钥行。
     KEY_COUNT="$(grep -cve '^[[:space:]]*$' "$SRC/authorized_keys" 2>/dev/null || true)"
     if [ "${KEY_COUNT:-0}" -eq 0 ]; then
-        warn "authorized_keys 里没有有效公钥 —— 跳过"
+        warn "authorized_keys 为空，首启配置未完成"; exit 1
     else
         if ! grep -qFf "$SRC/authorized_keys" "$KEYFILE" 2>/dev/null; then
             cat "$SRC/authorized_keys" >> "$KEYFILE"
@@ -174,7 +174,7 @@ if [ -f "$SRC/authorized_keys" ]; then
                 SSH_USER=qm1
                 log "provision 里没写 ssh_user —— 公钥改装到默认登录账号 qm1"
             else
-                warn "provision 里没写 ssh_user，镜像里也没有 qm1 账号 —— 公钥只装到 root，登不进来"
+                warn "默认 qm1 用户不存在，首启配置未完成"; exit 1
             fi
         fi
         if [ -n "$SSH_USER" ] && id "$SSH_USER" >/dev/null 2>&1; then
@@ -187,11 +187,27 @@ if [ -f "$SRC/authorized_keys" ]; then
                 cat "$SRC/authorized_keys" >> "$UHOME/.ssh/authorized_keys"
                 log "已把公钥写入 $UHOME/.ssh/authorized_keys（用户 ${SSH_USER}）"
             fi
+            chown "$SSH_USER:" "$UHOME/.ssh" "$UHOME/.ssh/authorized_keys"
         elif [ -n "$SSH_USER" ]; then
-            warn "ssh_user 指定的用户 $SSH_USER 不存在 —— 只装了 root 的公钥"
+            warn "ssh_user 指定的用户 $SSH_USER 不存在，首启配置未完成"; exit 1
         fi
     fi
     CHANGED=1
+fi
+
+# Optional private SHA512-crypt hash: enables the user's local password/sudo,
+# without distributing a universal password or enabling SSH password auth.
+if [ -f "$SRC/ssh_password_hash" ]; then
+    LOGIN_USER=qm1
+    [ ! -f "$SRC/ssh_user" ] || LOGIN_USER="$(tr -d '[:space:]' < "$SRC/ssh_user")"
+    id "$LOGIN_USER" >/dev/null 2>&1 || { warn "password target user is absent"; exit 1; }
+    PASSWORD_HASH="$(cat "$SRC/ssh_password_hash")"
+    HASH_PATTERN='^\$6\$(rounds=[0-9]+\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$'
+    [[ "$PASSWORD_HASH" =~ $HASH_PATTERN ]] || { warn "invalid SHA512-crypt hash"; exit 1; }
+    printf '%s:%s\n' "$LOGIN_USER" "$PASSWORD_HASH" | chpasswd --encrypted
+    unset PASSWORD_HASH
+    CHANGED=1
+    log "已配置 ${LOGIN_USER} 的本地密码（未启用 SSH 密码认证）"
 fi
 
 # ---------- 5. 主机名 ----------
