@@ -19,7 +19,7 @@ on:
         options: [base]
         default: base
       disk_size_gib:
-        description: "整机镜像大小（GiB），应略小于 eMMC 容量（32GB eMMC 建议 30）"
+        description: "镜像容量上限（GiB）；实际按内容大小生成，写盘前须检查目标容量"
         type: string
         default: "30"
       upload_images:
@@ -177,6 +177,9 @@ jobs:
       - name: Validate shipped systemd units
         run: bash scripts/verify-systemd-units.sh build/rootfs
 
+      - name: Verify target ACPI aliases and module dependencies
+        run: bash scripts/verify-board-modules.sh build/rootfs
+
       - name: Build image artifacts (ESP + rootfs + manifest)
         run: |
           bash scripts/build-image.sh \
@@ -186,6 +189,16 @@ jobs:
             --profile "${{ inputs.profile || 'base' }}" \
             --installer \
             --disk-size-gib "${{ inputs.disk_size_gib || 30 }}"
+
+      - name: Verify production UART isolation
+        run: |
+          set -euo pipefail
+          for esp in build/out/esp.img build/out/esp-installer.img; do
+            cfg="$(mtype -i "$esp" ::/EFI/BOOT/grub.cfg)"
+            if grep -Eq '^[[:space:]]*linux[[:space:]].*console=ttyS' <<<"$cfg"; then
+              echo "::error::Production ESP reserves a serial console: $esp"; exit 1
+            fi
+          done
 
       - name: Boot the image once under QEMU (smoke test)
         run: |
@@ -1010,7 +1023,6 @@ jobs:
           # -19 在 6.25GiB 镜像上要跑 ~9.5 分钟，-12 明显更快而体积只大一点
           zstd -12 -T0 --long=27 -f build/out/qm1-disk.img -o build/out/qm1-disk.img.zst
           ls -lh build/out/qm1-disk.img.zst
-          sha256sum build/out/qm1-disk.img.zst >> build/out/SHA256SUMS
 
       - name: Boot the assembled disk image under UEFI (QEMU)
         run: |
@@ -1205,7 +1217,6 @@ jobs:
           echo "OK   安装介质（安装菜单 + 正常菜单 + 安装脚本 + sfdisk + efibootmgr）齐备"
           zstd -12 -T0 --long=27 -f build/out/qm1-installer.img -o build/out/qm1-installer.img.zst
           ls -lh build/out/qm1-installer.img.zst
-          sha256sum build/out/qm1-installer.img.zst >> build/out/SHA256SUMS
 
       - name: Assert the provisioning injection works (no secrets needed)
         run: |
@@ -1268,6 +1279,9 @@ jobs:
           fi
           echo "OK   系统底座不预装应用，也不在首启时下载应用"
 
+      - name: Verify downloadable image bundle
+        run: bash scripts/package-images.sh build/out
+
       - name: Upload build log on failure
         if: failure()
         uses: actions/upload-artifact@v4
@@ -1305,5 +1319,8 @@ jobs:
             build/out/SHA256SUMS
             build/out/manifest.txt
             build/out/install-qm1.sh
+            build/out/lib/common.sh
+            build/out/BUILD-INFO.txt
+            build/out/IMAGE-README.txt
           compression-level: 6
           retention-days: 7

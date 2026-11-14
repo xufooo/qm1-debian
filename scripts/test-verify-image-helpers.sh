@@ -31,6 +31,21 @@ trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/src"
 printf 'hello\n' > "$TMP/src/hello.txt"
 mkdir -p "$TMP/src/dir"
+# Fixtures for actual packaged module/index/config closure and mode parsing.
+for version in present stale noindex disabled builtin; do
+    mkdir -p "$TMP/src/boot" "$TMP/src/lib/modules/$version/kernel/drivers"
+    printf 'CONFIG_SERIAL_8250_DW=m\n' > "$TMP/src/boot/config-$version"
+    printf 'kernel/drivers/8250_dw.ko.zst:\n' > "$TMP/src/lib/modules/$version/modules.dep"
+done
+for version in present noindex; do
+    printf 'fixture\n' > "$TMP/src/lib/modules/$version/kernel/drivers/8250_dw.ko.zst"
+done
+: > "$TMP/src/lib/modules/noindex/modules.dep"
+printf '# CONFIG_SERIAL_8250_DW is not set\n' > "$TMP/src/boot/config-disabled"
+printf 'CONFIG_SERIAL_8250_DW=y\n' > "$TMP/src/boot/config-builtin"
+mkdir "$TMP/src/unsafe"
+printf 'script\n' > "$TMP/src/unsafe/tool"
+chmod 0775 "$TMP/src/unsafe/tool"
 truncate -s 16M "$TMP/img"
 mkfs.ext4 -q -F -d "$TMP/src" "$TMP/img"
 
@@ -94,6 +109,24 @@ expect "存在的文件 ⇒ check_absent 说 FAIL" "FAIL" "$(cat "$OUT")"
 
 call check_absent /dir "目录"
 expect "目录也能认出来（不是只认普通文件）" "FAIL" "$(cat "$OUT")"
+
+echo "== packaged board drivers and permissions =="
+for version in present builtin; do
+    before="$fail"
+    call check_kernel_driver "$version" 8250_dw SERIAL_8250_DW "UART parent"
+    [ "$fail" = "$before" ] || { echo "FAIL valid $version driver"; rc=1; }
+done
+for version in stale noindex disabled; do
+    before="$fail"
+    call check_kernel_driver "$version" 8250_dw SERIAL_8250_DW "UART parent"
+    [ "$fail" -eq $((before + 1)) ] || { echo "FAIL missing $version driver accepted"; rc=1; }
+done
+before="$fail"
+call check_no_group_writable /unsafe "writable script"
+[ "$fail" -eq $((before + 1)) ] || { echo "FAIL writable packaged script accepted"; rc=1; }
+before="$fail"
+call check_no_group_writable /dir "empty safe directory"
+[ "$fail" = "$before" ] || { echo "FAIL safe directory rejected"; rc=1; }
 
 if [ "$rc" -eq 0 ]; then
     echo "镜像存在性判断的语义测试全部通过"

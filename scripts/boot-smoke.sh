@@ -165,6 +165,19 @@ OVMF_CODE.fd:OVMF_VARS.fd"
     # 从 GPT 里找出 ext4 的根分区（type=0fc63daf-8483-4772-8e79-3d69d8477de4）
     need sfdisk
     need dd
+    # Test-only serial console: never put this on the physical Bluetooth UART.
+    # Modify only the ESP inside the already-created disk copy.
+    need mcopy
+    ESP_LINE="$(sfdisk -d "$DISK_COPY" | awk '!seen && index(tolower($0), "type=c12a7328-f81f-11d2-ba4b-00a0c93ec93b") {print; seen=1}')"
+    ESP_START="$(sed -n 's/.*start=[[:space:]]*\([0-9][0-9]*\).*/\1/p' <<<"$ESP_LINE")"
+    [ -n "$ESP_START" ] || die "cannot locate test ESP"
+    ESP_OFFSET=$((ESP_START * 512))
+    mcopy -o -i "$DISK_COPY@@$ESP_OFFSET" ::/EFI/BOOT/grub.cfg "$WORK/grub-original.cfg"
+    sed '/^[[:space:]]*linux[[:space:]]/s/$/ console=ttyS0,115200n8/' \
+        "$WORK/grub-original.cfg" > "$WORK/grub-qemu.cfg"
+    mcopy -o -i "$DISK_COPY@@$ESP_OFFSET" "$WORK/grub-qemu.cfg" ::/EFI/BOOT/grub.cfg
+    log "test-only serial console added to disk copy (production ESP unchanged)"
+
     # ★ 解析要落在**整行**上，不能按空白切字段再找 start=：
     #   util-linux 的 sfdisk -d 会把数值**按列对齐**打印，
     #   形如 "start=        2048, size=       131072, type=0fc63daf-…"

@@ -298,7 +298,7 @@ fetch_one() {
     rm -f "$tmp"
 
     if ! curl --fail --silent --show-error --location \
-              --retry 3 --retry-delay 2 \
+              --retry 3 --retry-delay 2 --retry-all-errors \
               --connect-timeout 30 --max-time 180 \
               -o "$tmp" "$BASE_URL/$rel"; then
         printf 'ERROR: 下载失败：%s\n' "$rel" >&2

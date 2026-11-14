@@ -11,7 +11,7 @@
 #   @SUITE_I386@   32 位系统发行版名
 #
 # 内核参数：
-#   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道
+#   console=tty0            本机显示控制台；UART 留给蓝牙，不默认启用串口控制台
 #   fsck.repair=yes         eMMC 突然掉电后开机自修复
 #   intel_idle.max_cstate=1 限制最深 C-state 到 C1 —— Z3735F 在 Bay Trail 的 C-state
 #                           冻结 bug 受影响名单内（Launchpad #1471989、AskUbuntu 803640），
@@ -44,7 +44,7 @@ search --label @ESP_LABEL@ --set=root
 
 # ① 试用：只启动，不碰 eMMC（默认项；先跑 qm1-selftest 看驱动）
 menuentry "① 试用系统（不写盘，可先跑驱动自检）" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd.img
 }
 
@@ -53,7 +53,7 @@ menuentry "① 试用系统（不写盘，可先跑驱动自检）" {
 #      备份放不下 28.5GiB 就装不成（安装器会明确告诉你怎么办）。
 menuentry "② 安装 QM1 @SUITE_AMD64@ 到 eMMC（会清空 eMMC，先整盘备份）" {
     echo "这一条会把 eMMC 上的内容全部清掉（先做整盘备份）。确定请按回车。"
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 fsck.repair=yes intel_idle.max_cstate=1 qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1
     initrd /initrd.img
 }
 
@@ -61,7 +61,7 @@ menuentry "② 安装 QM1 @SUITE_AMD64@ 到 eMMC（会清空 eMMC，先整盘备
 menuentry "③ GRUB 命令行（救援）" {
     echo "手动引导示例："
     echo "  set root=UUID=<root_uuid>"
-    echo "  linux  /vmlinuz root=UUID=<root_uuid> ro console=tty0 console=ttyS0,115200n8 intel_idle.max_cstate=1"
+    echo "  linux  /vmlinuz root=UUID=<root_uuid> ro console=tty0 intel_idle.max_cstate=1"
     echo "  initrd /initrd.img"
     echo "装到 eMMC（带备份目录）的手工示例："
     echo "  linux  /vmlinuz root=UUID=<root_uuid> ro qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1 qm1.install.backup_dir=/media/backup"

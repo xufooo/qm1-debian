@@ -16,7 +16,7 @@
 # 生成的 search 行与实际卷标是否一致。
 #
 # 内核参数说明：
-#   console=ttyS0,115200n8  串口控制台 —— 头显上没画面时的唯一救援通道（务必保留）
+#   console=tty0            本机显示控制台；UART 留给蓝牙，不默认启用串口控制台
 #   fsck.repair=yes         eMMC 突然掉电后开机自修复
 #   ro                      根以只读挂载，交给 systemd 之后 remount-rw
 #   intel_idle.max_cstate=1 把最深 C-state 限制在 C1。Z3735F 在 Bay Trail 的 C-state
@@ -35,7 +35,7 @@ search --label @ESP_LABEL@ --set=root
 # 发行版名用占位符：Debian 13 起不再提供 i386 内核，32 位系统请用 Debian 12（bookworm），
 # 两边的菜单标题要如实写清楚是哪一版。
 menuentry "QM1 @SUITE_AMD64@ (64-bit amd64)" {
-    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
+    linux  /vmlinuz    root=UUID=@ROOT_UUID@ ro console=tty0 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd.img
 }
 
@@ -43,6 +43,6 @@ menuentry "QM1 @SUITE_AMD64@ (64-bit amd64)" {
 # 文件名用 8.3 可精确表示的形式（vmlinuz32 / initrd32.img），
 # 这样即使 ESP 卷没有长文件名表（LFN）也能被 GRUB 找到。
 menuentry "QM1 @SUITE_I386@ (32-bit i386)" {
-    linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 console=ttyS0,115200n8 fsck.repair=yes intel_idle.max_cstate=1
+    linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd32.img
 }

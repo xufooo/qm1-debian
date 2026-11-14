@@ -634,11 +634,13 @@ driver_state() {
 
 # 这些是目标板的功能要求，不应只作为可选驱动写一条 WARN。
 [ -f "$KCFG" ] || die "缺少内核配置，无法校验目标板功能"
-for _required in EFI_MIXED IOSF_MBI DRM_I915 HDMI_LPE_AUDIO; do
+for _required in EFI_MIXED IOSF_MBI DRM_I915 HDMI_LPE_AUDIO \
+                 SERIAL_DEV_BUS SERIAL_DEV_CTRL_TTYPORT SERIAL_8250_DW PINCTRL_BAYTRAIL; do
     grep -qE "^CONFIG_${_required}=(y|m)$" "$KCFG" \
         || die "目标内核缺少 CONFIG_${_required}"
 done
-for _pair in i915:DRM_I915 snd-hdmi-lpe-audio:HDMI_LPE_AUDIO; do
+for _pair in i915:DRM_I915 snd-hdmi-lpe-audio:HDMI_LPE_AUDIO \
+             8250_dw:SERIAL_8250_DW pinctrl-baytrail:PINCTRL_BAYTRAIL; do
     _name="${_pair%%:*}"; _symbol="${_pair#*:}"
     [ "$(driver_state "$_name" "$_symbol")" != absent ] \
         || die "目标镜像缺少 $_name 驱动"
@@ -668,6 +670,8 @@ snd-hda-intel|SND_HDA_INTEL|Intel HD Audio（HDMI 音频 + Realtek codec）|
 snd-hda-codec-realtek|SND_HDA_CODEC_REALTEK|Realtek HDA 编解码器|
 btusb|BT_HCIBTUSB|蓝牙（USB 模组）|
 hci_uart|BT_HCIUART|蓝牙 UART 控制器（内置 RTL8723BS 的 BT 口；hci_h5 的 3WIRE 协议编在此模块里）|
+8250_dw|SERIAL_8250_DW|ACPI 80860F0A 蓝牙父 UART 控制器|
+pinctrl-baytrail|PINCTRL_BAYTRAIL|INT33FC GPIO 控制器（microSD 检测与蓝牙 GPIO）|
 btrtl|BT_RTL|Realtek 蓝牙厂商固件下发（btrtl，按 ACPI HID 取 rtl_bt/rtl8723bs_*）|
 r8723bs|RTL8723BS|Realtek RTL8723BS SDIO Wi-Fi（内置，树内 staging 驱动；装了树外模块时会被 blacklist）|
 rtw88_qm1|RTW88|Realtek RTL8723BS SDIO Wi-Fi（出货路径：上游 rtw88 整树回移成树外模块，装在 extra/rtw88/ 下）|

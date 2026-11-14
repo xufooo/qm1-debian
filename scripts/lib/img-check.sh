@@ -44,3 +44,50 @@ check_absent() {
         printf '  OK   %-46s (%s)\n' "$path" "$desc"
     fi
 }
+
+# Check the packaged module, not just the build tree or a config symbol.
+check_kernel_driver() {
+    local version="$1" module="$2" symbol="$3" description="$4"
+    local config index path
+    config="$(debugfs -R "cat /boot/config-$version" "$IMG" 2>/dev/null || true)"
+    if grep -qx "CONFIG_$symbol=y" <<<"$config"; then
+        printf '  OK   %s (builtin: %s)\n' "$description" "$symbol"
+        return
+    fi
+    if grep -qx "CONFIG_$symbol=m" <<<"$config"; then
+        index="$(debugfs -R "cat /lib/modules/$version/modules.dep" "$IMG" 2>/dev/null || true)"
+        path="$(awk -F: -v module="$module" '
+            { n=split($1, parts, "/"); name=parts[n]
+              sub(/\.ko(\.(xz|zst|gz))?$/, "", name)
+              if (name==module) { print $1; exit } }' <<<"$index")"
+        if [ -n "$path" ] && _img_has "/lib/modules/$version/$path"; then
+            printf '  OK   %s (indexed module: %s)\n' "$description" "$path"
+            return
+        fi
+    fi
+    printf '  FAIL %s (missing config, indexed module or payload: %s)\n' "$description" "$symbol"
+    fail=$((fail + 1))
+}
+
+# debugfs ls -l prints numeric modes, not Unix "-rwx" strings. Use its
+# machine-readable ls -p format: /inode/mode/uid/gid/name/size/.
+check_no_group_writable() {
+    local dir="$1" description="$2" listing bad
+    listing="$(debugfs -R "ls -p $dir" "$IMG" 2>/dev/null || true)"
+    if ! grep -qE '^/[0-9]+/[0-7]+/' <<<"$listing"; then
+        printf '  FAIL %s (cannot read directory modes: %s)\n' "$description" "$dir"
+        fail=$((fail + 1))
+        return
+    fi
+    bad="$(awk -F/ '$3 ~ /^100/ {
+        mode=$3
+        if (substr(mode,length(mode)-1,1) ~ /[2367]/ ||
+            substr(mode,length(mode),1) ~ /[2367]/) print $0
+    }' <<<"$listing")"
+    if [ -z "$bad" ]; then
+        printf '  OK   %s\n' "$description"
+    else
+        printf '  FAIL %s\n%s\n' "$description" "$bad"
+        fail=$((fail + 1))
+    fi
+}

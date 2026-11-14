@@ -44,28 +44,6 @@ check_attr() {
     fi
 }
 
-# 目录权限检查：镜像里某个目录下的普通文件不允许"组可写"或"其他人可写"。
-# 为什么要在镜像侧查，而不是信任构建机：git 只记录有没有执行位，
-# checkout 时按当前 umask 重算权限，同一个提交在不同构建机上落出来的
-# 权限不一样（CI 上 /usr/local/sbin/qm1-wifi-start 就落成过 0775）。
-# root 拥有的脚本若对组可写，等于给组里 anyone 留了一条改写系统的路。
-check_no_group_writable() {
-    local dir="$1" desc="$2"
-    local out bad
-    out="$(debugfs -R "ls -l $dir" "$IMG" 2>/dev/null || true)"
-    # ls -l 的权限串在第一列：位置 1 是类型，2-4 属主，5-7 属组，8-10 其他人。
-    # 组可写 = 位置 6；其他人可写 = 位置 9。
-    bad="$(printf '%s\n' "$out" | awk '$1 ~ /^-/ { p=$1
-              if (substr(p,6,1) == "w" || substr(p,9,1) == "w") print $0 }')"
-    if [ -z "$bad" ]; then
-        printf '  OK   %-46s (%s)\n' "$dir" "$desc"
-    else
-        printf '  FAIL %-46s (%s)\n' "$dir" "$desc"
-        printf '%s\n' "$bad" | sed 's/^/         /' >&2
-        fail=$((fail + 1))
-    fi
-}
-
 # 内容检查：debugfs -R "cat <path>"，在镜像内取文件正文
 check_content() {
     local path="$1" regex="$2" desc="$3"
@@ -169,8 +147,7 @@ check_link /etc/systemd/system/wpa_supplicant.service /dev/null \
     "发行版 wpa_supplicant.service 已屏蔽（Wi-Fi 由 qm1-wifi@.service 独占）"
 # systemd-networkd-wait-online 不许挂在 multi-user.target 上：它的语义是
 # "等到网络可用才让多用户目标达成"，默认超时 120s —— 这台机器没有 RJ45，
-# Wi-Fi 一旦没连上，整机就白等 120 秒。等待改由 provision-agent 自己
-# 做（等 DNS + 等时钟），那才是装 Hermes/Chrome 之前真正需要的。
+# Wi-Fi 一旦没连上，整机就白等 120 秒。应用由用户安装，不在首启时部署。
 check_absent /etc/systemd/system/multi-user.target.wants/systemd-networkd-wait-online.service \
     "wait-online 没有挂在 multi-user.target 上（网络不通不挡开机）"
 # ★ 这六个单元每一个没被 enable，"开机即用"就缺一条腿：
@@ -215,6 +192,16 @@ if [ -n "$KVER" ]; then
 else
     printf '  FAIL %-46s (%s)\n' "/lib/modules/<ver>" "找不到内核模块目录"
     fail=$((fail + 1))
+fi
+if [ -n "$KVER" ]; then
+    for symbol in SERIAL_DEV_BUS SERIAL_DEV_CTRL_TTYPORT; do
+        check_content "/boot/config-$KVER" "^CONFIG_${symbol}=y$" "UART serdev 基础支持 $symbol"
+    done
+    for pair in 8250_dw:SERIAL_8250_DW pinctrl-baytrail:PINCTRL_BAYTRAIL \
+                sdhci-acpi:MMC_SDHCI_ACPI hci_uart:BT_HCIUART btrtl:BT_RTL \
+                i915:DRM_I915 snd-hdmi-lpe-audio:HDMI_LPE_AUDIO; do
+        check_kernel_driver "$KVER" "${pair%%:*}" "${pair#*:}" "板级驱动 ${pair%%:*}"
+    done
 fi
 fw_listing="$(debugfs -R "ls -l /lib/firmware" "$IMG" 2>/dev/null || true)"
 for blob in brcmfmac4365-pcie.bin brcmfmac4352-pcie.bin rtl8723a_fw.bin; do

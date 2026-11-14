@@ -17,3 +17,10 @@ for script in build-rootfs.sh build-image.sh; do
     grep -q '^preserve$' "$WORK/rootfs/sentinel"
 done
 echo 'PASS application profile is refused before changing output'
+
+for cfg in "$SCRIPT_DIR/grub.cfg.example" "$SCRIPT_DIR/grub-installer.cfg.example"; do
+    if grep -Eq '^[[:space:]]*linux[[:space:]].*console=ttyS' "$cfg"; then
+        echo "FAIL production menu claims a serial console: $cfg"; exit 1
+    fi
+done
+echo 'PASS production menus leave serial UARTs available to hardware drivers'

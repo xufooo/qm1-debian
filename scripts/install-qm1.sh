@@ -22,8 +22,8 @@
 #
 # 关键约束：
 #   * 镜像自带 ESP（引导器 + 内核 + initrd + grub.cfg），写完即可脱离 U 盘自启动；
-#   * 写完会用 efibootmgr 登记 \EFI\BOOT\BOOTIA32.EFI（IA32 与 64 位固件
-#     都能加载它；BOOTX64.EFI 是 PE32+，这台机器的 32 位固件加载不了）；
+#   * 写完会用 efibootmgr 登记 \EFI\BOOT\BOOTIA32.EFI（匹配目标 QM1 的 IA32 固件；
+#     BOOTX64.EFI 是 PE32+，这台机器的 32 位固件加载不了）；
 #     固件不扫内部存储的 \EFI\BOOT 时仍需保留 U 盘跳板，见 README 的救援一节）；
 #   * 备份与 sha256 校验是硬前置，不可跳过（--no-backup 仅用于已确认无数据的盘）；
 #   * EFI 启动项登记失败 = 装机失败（机器开不了机却报成功是最坏的结果），
