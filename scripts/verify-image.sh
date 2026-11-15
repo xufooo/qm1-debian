@@ -120,8 +120,14 @@ check_attr /etc/shadow    'Group: *42'  "shadow 组仍是 42(shadow)"
 check_attr /usr/bin/sudo   'Mode: *04755' "sudo 保留 setuid 位"
 
 echo "-- 定制层是否落进镜像 --"
-_os_release="$(debugfs -R 'cat /etc/os-release' "$IMG" 2>/dev/null || true)"
+# /etc/os-release is normally a symlink; debugfs cat does not follow the
+# final symlink. Read the packaged file and refuse to silently skip the gate.
+_os_release="$(debugfs -R 'cat /usr/lib/os-release' "$IMG" 2>/dev/null || true)"
 _suite="$(sed -n 's/^VERSION_CODENAME=//p' <<<"$_os_release" | tr -d '\"')"
+if [ -z "$_suite" ]; then
+    printf '  FAIL cannot identify target Debian suite for update-source verification\n'
+    fail=$((fail + 1))
+fi
 case "$_suite" in
     trixie|bookworm)
         check_content /etc/apt/sources.list "^deb .* $_suite-security " "保留 Debian 官方安全更新源"
