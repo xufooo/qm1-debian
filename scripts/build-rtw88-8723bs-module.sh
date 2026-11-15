@@ -452,7 +452,8 @@ REQUIRED_UPSTREAM_PATCHES="0001-rtw88-adapt-the-mac80211-api-to-linux-6.12.patch
 0006-rtw88-8723b-stay-at-20mhz-until-the-chip-variant-can-be-read.patch
 0007-trigger-firmware-recovery-when-failing-to-leave-lps-state.patch
 0008-avoid-converting-rx-snr-twice.patch
-0009-allow-key-removal-when-the-cam-table-is-full.patch"
+0009-allow-key-removal-when-the-cam-table-is-full.patch
+0010-sdio-budget-the-dtim-high-queue.patch"
 
 REQUIRED_VENDOR_PATCHES="0001-rtw88-8723bs-extend-the-tx-report-purge-timeout.patch"
 
@@ -614,15 +615,14 @@ assert_modversions_crc() {   # assert_modversions_crc <ko> [<ko> ...]
     if [ ! -f "$ksymvers" ]; then
         # 没有 Module.symvers 就没法比。这一步不该静默跳过 —— 出货镜像的
         # 内核与头文件是同源的，CI 里应该有；真没有就明确说出来。
-        warn "no Module.symvers under $KSRC — the modversions CRC check is skipped"
-        return 0
+        die "no Module.symvers under $KSRC — cannot verify module symbol compatibility"
     fi
     local own_symvers="$OWN_SYMVERS"
     local table_file imports_file ko n=0
     if [ -z "$own_symvers" ] || [ ! -f "$own_symvers" ]; then
         # 我们自己的导出符号不在表里 ⇒ 模块之间互相导入的符号会被误判成
         # "没人导出"。这不是误报，是表的缺项 ⇒ 必须说出来。
-        warn "no Module.symvers for this build (own=$own_symvers) — symbols our modules export to each other cannot be checked"
+        die "no Module.symvers for this build (own=$own_symvers) — cannot verify inter-module symbols"
     fi
     table_file="$WORK/crc-table.txt"
     qm1_crc_symbol_table "$ksymvers" "$own_symvers" > "$table_file"
@@ -630,8 +630,7 @@ assert_modversions_crc() {   # assert_modversions_crc <ko> [<ko> ...]
         imports_file="$WORK/crc-imports-$(basename "$ko").txt"
         modprobe --show-modversions "$ko" > "$imports_file" 2>/dev/null || true
         if [ ! -s "$imports_file" ]; then
-            warn "modprobe --show-modversions produced nothing for $(basename "$ko") — CRC check skipped for it"
-            continue
+            die "modprobe --show-modversions produced nothing for $(basename "$ko") — cannot verify module symbol compatibility"
         fi
         if ! qm1_check_modversions_crc "$table_file" "$imports_file"; then
             die "modversions CRC mismatch for $(basename "$ko") — the kernel would reject this module at insmod time (the vermagic check cannot see this)"

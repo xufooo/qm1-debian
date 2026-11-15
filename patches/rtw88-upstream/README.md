@@ -202,8 +202,14 @@ and what we did about each one:
 | `c3ae9e68e138` | 2026-10-10 | 8703b: avoid converting RX SNR twice | not applicable (other chip) |
 | `49a8e00e0db8` | 2026-10-13 | mac80211: replace `ieee80211_iter_keys_rcu()` | not applicable (newer mac80211 API than 6.12) |
 
-Anything merged upstream *after* 2026-11-03 is unknown to us by
-construction — re-run the comparison before trusting this table.
+The comparison was refreshed on 2026-11-15. Two later merged commits are
+carried by 0010: `0bc4a591d152` moves the budgeted DTIM decision to TX, and
+`ff4d3699bf38` applies that decision to SDIO. In AP mode, multicast frames
+could otherwise retain the TX pages required by unicast traffic and DHCP.
+The backport preserves the upstream protocol, DTIM and budget checks. It
+includes the common TX helper, its state/init and the SDIO call; the USB
+relocation is omitted because the QM1 combined module builds SDIO only.
+This corrects a source-level issue; AP traffic on QM1 has not been tested.
 
 
 ## The vendor fallback tree does not have these
@@ -211,7 +217,8 @@ construction — re-run the comparison before trusting this table.
 `patches/rtw88/` holds the patches for the *vendor* tree, which is only
 used when the upstream tree cannot be built.  That tree carries the TX
 report purge timeout fix but **not** the fixes above — it is a fallback,
-not the shipping path.  The shipping module is the upstream one.
+not the shipping path. The publishing workflow now fails if the upstream
+build fails; it cannot silently publish a staging fallback image.
 
 ## Verification
 
@@ -233,5 +240,6 @@ patch does not apply, `scripts/build-rtw88-8723bs-module.sh` falls back to
 the vendor tree, the build does not fail, and the only symptom is an
 image that ships the staging driver with its known permanent-hang paths.
 
-Compiling and loading the module is covered by CI; nothing here was
-tested on real hardware yet.
+Compilation, symbol CRC checks and effective SDIO autoload/dependency
+resolution are covered by CI. They do not prove module probe or traffic
+on the physical controller; that requires device evidence.

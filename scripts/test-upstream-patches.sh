@@ -52,7 +52,7 @@ log "补丁目录：$PATCH_DIR"
 # （a/sdio.c），不能是内核树里的完整路径
 # （a/drivers/net/wireless/realtek/rtw88/sdio.c）—— 后者会被剥掉一层
 # 之后找不到文件，补丁直接打不上。
-for p in "$PATCH_DIR"/000*.patch; do
+for p in "$PATCH_DIR"/*.patch; do
     [ -f "$p" ] || continue
     if grep -qE '^(diff --git |\+\+\+ |--- )a?/?drivers/net/wireless/realtek/rtw88/' "$p"; then
         fail "$(basename "$p") 里的路径带了内核树前缀；补丁是打在平铺后的 rtw88 目录上的，路径必须相对 rtw88 根"
@@ -62,7 +62,7 @@ done
 # ---------- 2. 取钉死那棵树里补丁要碰的文件 ----------
 #
 # 只取补丁真正涉及的文件：构建脚本只需要那几个文件就能判断补丁能不能打上。
-FILES="mac80211.c rtw8723bs.c tx.c sdio.c rtw8723b.c ps.c"
+FILES="mac80211.c rtw8723bs.c tx.c tx.h main.c main.h sdio.c rtw8723b.c ps.c"
 BASE_URL="https://raw.githubusercontent.com/torvalds/linux/$SHA/drivers/net/wireless/realtek/rtw88"
 
 if [ -z "$WORK" ]; then
@@ -72,7 +72,7 @@ else
     mkdir -p "$WORK"
     CLEANUP=0
 fi
-cleanup() { [ "$CLEANUP" = "1" ] && rm -rf "$WORK"; }
+cleanup() { if [ "$CLEANUP" = "1" ]; then rm -rf "$WORK"; fi; }
 trap cleanup EXIT
 
 for f in $FILES; do
@@ -120,6 +120,13 @@ check "SDIO 的超长 RX 包守卫不在" "$WORK/sdio.c" 'oversized RX packet'
 # 固件离开低功耗失败时要能自己恢复 —— 这台机没有网口，芯片不自己爬起来
 # 就等于彻底没网。
 check "LPS 离开失败时没有触发固件恢复" "$WORK/ps.c" 'rtw_fw_recovery\(rtwdev\);'
+check "SDIO 没有限制 DTIM high queue" "$WORK/sdio.c" 'queue == RTW_TX_QUEUE_HI0 && !rtw_tx_bmc_use_hiq\(rtwdev, skb\)'
+check "DTIM high queue 没有回退到 AC 队列" "$WORK/sdio.c" 'queue = rtw_tx_ac_to_hwq\(q_map\);'
+check "high queue budget 未初始化" "$WORK/main.c" 'rtwdev->hiq_budget = RTW_TX_HIQ_BUDGET_MAX;'
+check "high queue budget 没有同步保护" "$WORK/tx.c" 'spin_lock_irqsave\(&rtwdev->hiq_lock, flags\);'
+check "high queue 未限制为 DTIM 帧" "$WORK/tx.c" 'info->flags & IEEE80211_TX_CTL_SEND_AFTER_DTIM'
+check "high queue 未限制协议" "$WORK/tx.c" 'rtw_tx_bmc_needs_dtim\(skb\)'
+check "high queue 未消耗预算" "$WORK/tx.c" 'rtw_tx_hiq_take_budget\(rtwdev\)'
 _lps_line="$(grep -n 'rtw_fw_recovery(rtwdev);' "$WORK/ps.c" | head -1 | cut -d: -f1 || true)"
 _warn_line="$(grep -n 'firmware failed to leave lps state' "$WORK/ps.c" | head -1 | cut -d: -f1 || true)"
 [ -n "$_lps_line" ] || fail "ps.c 里找不到 rtw_fw_recovery() 调用"

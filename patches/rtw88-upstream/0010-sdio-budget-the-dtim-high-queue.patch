@@ -1,0 +1,149 @@
+From: QM1 maintainers
+Subject: [PATCH] wifi: rtw88: limit SDIO high queue to budgeted DTIM delivery
+
+Backport upstream 0bc4a591d152ee59f3538a514bbe6423f09e5734 and
+ff4d3699bf386b35b3d713a59d705f0cd5a49107 by Luka Gejak.
+
+RTL8723BS AP multicast can hold the TX pages needed by unicast and DHCP.
+Carry the shared TX helper and the SDIO queue decision, preserving the
+upstream DTIM/protocol/budget conditions. The QM1 combined module builds
+SDIO only, so the unrelated USB helper relocation is not included.
+
+Upstream: https://github.com/torvalds/linux/commit/0bc4a591d152ee59f3538a514bbe6423f09e5734
+Upstream: https://github.com/torvalds/linux/commit/ff4d3699bf386b35b3d713a59d705f0cd5a49107
+
+diff --git a/main.c b/main.c
+--- a/main.c
++++ b/main.c
+@@ -2177,6 +2177,9 @@
+ 
+ 	spin_lock_init(&rtwdev->txq_lock);
+ 	spin_lock_init(&rtwdev->tx_report.q_lock);
++	spin_lock_init(&rtwdev->hiq_lock);
++	rtwdev->hiq_budget = RTW_TX_HIQ_BUDGET_MAX;
++	rtwdev->hiq_refill = jiffies;
+ 
+ 	mutex_init(&rtwdev->mutex);
+ 	mutex_init(&rtwdev->hal.tx_power_mutex);
+diff --git a/main.h b/main.h
+--- a/main.h
++++ b/main.h
+@@ -2104,6 +2104,11 @@
+ 
+ 	struct rtw_tx_report tx_report;
+ 
++	/* protects hiq_budget and hiq_refill */
++	spinlock_t hiq_lock;
++	u32 hiq_budget;
++	unsigned long hiq_refill;
++
+ 	struct {
+ 		/* indicate the mail box to use with fw */
+ 		u8 last_box_num;
+diff --git a/tx.c b/tx.c
+--- a/tx.c
++++ b/tx.c
+@@ -2,6 +2,8 @@
+ /* Copyright(c) 2018-2019  Realtek Corporation
+  */
+ 
++#include <linux/ip.h>
++#include <linux/udp.h>
+ #include "main.h"
+ #include "tx.h"
+ #include "fw.h"
+@@ -745,3 +747,60 @@
+ 	return queue;
+ }
+ EXPORT_SYMBOL(rtw_tx_queue_mapping);
++
++static bool rtw_tx_bmc_needs_dtim(struct sk_buff *skb)
++{
++	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
++	struct udphdr *udphdr;
++
++	if (info->control.flags & IEEE80211_TX_CTRL_PORT_CTRL_PROTO)
++		return true;
++
++	if (skb->protocol == htons(ETH_P_ARP))
++		return true;
++
++	if (skb->protocol == htons(ETH_P_IP) &&
++	    ip_hdr(skb)->protocol == IPPROTO_UDP) {
++		udphdr = udp_hdr(skb);
++
++		return udphdr->dest == htons(67) || udphdr->dest == htons(68);
++	}
++
++	return false;
++}
++
++static bool rtw_tx_hiq_take_budget(struct rtw_dev *rtwdev)
++{
++	unsigned long flags, elapsed, add;
++	bool ok;
++
++	spin_lock_irqsave(&rtwdev->hiq_lock, flags);
++
++	elapsed = jiffies - rtwdev->hiq_refill;
++	add = elapsed / RTW_TX_HIQ_REFILL_INTERVAL;
++	if (add) {
++		rtwdev->hiq_budget = min_t(unsigned long, rtwdev->hiq_budget + add,
++					   RTW_TX_HIQ_BUDGET_MAX);
++
++		/* keep the unfinished part of the interval for the next unit */
++		rtwdev->hiq_refill = jiffies - elapsed % RTW_TX_HIQ_REFILL_INTERVAL;
++	}
++
++	ok = rtwdev->hiq_budget > 0;
++	if (ok)
++		rtwdev->hiq_budget--;
++
++	spin_unlock_irqrestore(&rtwdev->hiq_lock, flags);
++
++	return ok;
++}
++
++bool rtw_tx_bmc_use_hiq(struct rtw_dev *rtwdev, struct sk_buff *skb)
++{
++	struct ieee80211_tx_info *info = IEEE80211_SKB_CB(skb);
++
++	return (info->flags & IEEE80211_TX_CTL_SEND_AFTER_DTIM) &&
++	       rtw_tx_bmc_needs_dtim(skb) &&
++	       rtw_tx_hiq_take_budget(rtwdev);
++}
++EXPORT_SYMBOL(rtw_tx_bmc_use_hiq);
+diff --git a/tx.h b/tx.h
+--- a/tx.h
++++ b/tx.h
+@@ -9,6 +9,9 @@
+ 
+ #define RTW_TX_PROBE_TIMEOUT_SHORT	msecs_to_jiffies(500)
+ #define RTW_TX_PROBE_TIMEOUT_LONG	msecs_to_jiffies(2500)
++
++#define RTW_TX_HIQ_REFILL_INTERVAL	(HZ / 10)
++#define RTW_TX_HIQ_BUDGET_MAX		16
+ 
+ struct rtw_tx_desc {
+ 	__le32 w0;
+@@ -115,6 +118,7 @@
+ 
+ enum rtw_tx_queue_type rtw_tx_ac_to_hwq(enum ieee80211_ac_numbers ac);
+ enum rtw_tx_queue_type rtw_tx_queue_mapping(struct sk_buff *skb);
++bool rtw_tx_bmc_use_hiq(struct rtw_dev *rtwdev, struct sk_buff *skb);
+ 
+ static inline
+ void fill_txdesc_checksum_common(u8 *txdesc, size_t words)
+diff --git a/sdio.c b/sdio.c
+--- a/sdio.c
++++ b/sdio.c
+@@ -1308,6 +1308,9 @@
+ 	u16 q_map = skb_get_queue_mapping(skb);
+ 	struct rtw_sdio_tx_data *tx_data;
+ 
++	if (queue == RTW_TX_QUEUE_HI0 && !rtw_tx_bmc_use_hiq(rtwdev, skb))
++		queue = rtw_tx_ac_to_hwq(q_map);
++
+ 	rtw_sdio_tx_skb_prepare(rtwdev, pkt_info, skb, queue);
+ 
+ 	tx_data = rtw_sdio_get_tx_data(skb);
