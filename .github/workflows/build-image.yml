@@ -124,14 +124,6 @@ jobs:
             build-essential patch kmod dpkg curl git ca-certificates
           test -d "/lib/modules/${QM1_KERNEL_ABI}/build"
 
-      - name: Build patched RTL8723BS module (r8723bs_qm1)
-        if: env.QM1_TARGET_ARCH == 'amd64'
-        run: |
-          set -eux
-          # 模块的 vermagic 写死了目标内核版本，必须与镜像里的内核完全一致
-          bash scripts/build-rtl8723bs-module.sh --kver "${QM1_KERNEL_ABI}"
-          ls -l build/wifi-module/
-
       - name: Build rtw88 RTL8723BS module (upstream backport)
         if: env.QM1_TARGET_ARCH == 'amd64'
         run: |
