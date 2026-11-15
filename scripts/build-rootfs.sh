@@ -168,6 +168,17 @@ fi
 # hooks/customize02-drivers.sh 会在镜像里核对固件与内核模块，缺了就直接失败。
 
 log "mmdebstrap 开始（这一步会下载并安装全部包，CI 里约需 10–20 分钟）"
+MIRRORS=("$MIRROR")
+# With an explicit mirror mmdebstrap does not add these suites itself.
+# Include security fixes from the first package resolution and retain the
+# same maintained sources in the installed system.
+case "$SUITE" in
+    trixie|bookworm)
+        _components="${COMPONENTS//,/ }"
+        MIRRORS+=("deb $MIRROR $SUITE-updates $_components"
+                  "deb https://security.debian.org/debian-security $SUITE-security $_components")
+        ;;
+esac
 if ! mmdebstrap \
         --variant=minbase \
         --components="$COMPONENTS" \
@@ -176,7 +187,7 @@ if ! mmdebstrap \
         --aptopt='Apt::Install-Recommends "true"' \
         --hook-dir="$HOOKS_DIR" \
         --format=tar \
-        "$SUITE" "$TAR" "$MIRROR" 2>&1 | tee "$OUT.mmdebstrap.log"; then
+        "$SUITE" "$TAR" "${MIRRORS[@]}" 2>&1 | tee "$OUT.mmdebstrap.log"; then
     die "mmdebstrap 失败，日志见 $OUT.mmdebstrap.log"
 fi
 
@@ -249,7 +260,7 @@ MANIFEST="$OUT/../rootfs-manifest.txt"
     echo "kernel=$KERNEL_INSTALLED"
     echo "size_kib=$(du -sk "$OUT" | awk '{print $1}')"
     echo "--- 已装包 ---"
-    chroot "$OUT" dpkg-query -W -f='${Package}\n' 2>/dev/null | sort || true
+    chroot "$OUT" dpkg-query -W -f='${binary:Package}\t${Version}\t${Architecture}\n' | sort
 } > "$MANIFEST"
 log "清单：${MANIFEST}（$(grep -c '' "$MANIFEST") 行）"
 log "完成：$OUT"

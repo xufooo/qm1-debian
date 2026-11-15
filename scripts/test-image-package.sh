@@ -8,9 +8,13 @@ mkdir "$WORK/payload" "$WORK/download"
 printf 'ordinary disk fixture\n' | zstd -q -o "$WORK/payload/qm1-disk.img.zst"
 printf 'installer fixture\n' | zstd -q -o "$WORK/payload/qm1-installer.img.zst"
 printf 'kernel=fixture\n' > "$WORK/payload/manifest.txt"
+for name in rootfs-manifest.txt driver-manifest.txt board-driver-check.txt; do
+    printf 'fixture evidence\n' > "$WORK/payload/$name"
+done
 bash "$SCRIPT_DIR/package-images.sh" "$WORK/payload"
 for name in qm1-disk.img.zst qm1-installer.img.zst manifest.txt install-qm1.sh \
-            prepare-provision.sh inject-provision.sh lib/common.sh BUILD-INFO.txt IMAGE-README.txt SHA256SUMS; do
+            prepare-provision.sh inject-provision.sh lib/common.sh BUILD-INFO.txt IMAGE-README.txt SHA256SUMS \
+            rootfs-manifest.txt driver-manifest.txt board-driver-check.txt; do
     mkdir -p "$WORK/download/$(dirname "$name")"
     cp "$WORK/payload/$name" "$WORK/download/$name"
 done

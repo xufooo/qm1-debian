@@ -6,6 +6,7 @@ python3 - "$SCRIPT_DIR" <<'PY'
 import gzip
 import importlib.util
 import lzma
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -63,4 +64,19 @@ with tempfile.TemporaryDirectory() as temporary:
         subprocess.run(['sh', '-c', prefix + f'chroot() {{ return {result}; }}; '
                         f'[ "$(driver_state 8250_dw SERIAL_8250_DW)" = {expected} ]', 'test', str(root)], check=True)
 print('PASS built-in/module classification, early-cpio + raw/gzip/xz/zstd initramfs, decoy and malformed rejection')
+
+builder = (scripts/'build-rootfs.sh').read_text()
+mirror_code = builder[builder.index('MIRRORS=('):builder.index('if ! mmdebstrap')]
+for suite in ['trixie', 'bookworm', 'sid']:
+    env = dict(os.environ, SUITE=suite, MIRROR='https://deb.debian.org/debian',
+               COMPONENTS='main,non-free-firmware')
+    output = subprocess.check_output(['bash', '-c', mirror_code + '\nprintf "%s\\0" "${MIRRORS[@]}"'], env=env)
+    mirrors = output.decode().strip('\0').split('\0')
+    assert mirrors[0] == env['MIRROR']
+    if suite == 'sid':
+        assert len(mirrors) == 1
+    else:
+        assert mirrors[1] == f'deb {env["MIRROR"]} {suite}-updates main non-free-firmware'
+        assert mirrors[2] == f'deb https://security.debian.org/debian-security {suite}-security main non-free-firmware'
+print('PASS stable bootstrap includes persistent security/updates sources; sid does not get invented suites')
 PY

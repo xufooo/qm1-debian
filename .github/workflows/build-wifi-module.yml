@@ -26,7 +26,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_version:
-        description: "目标内核版本：point release（6.12.113）或 ABI 名（6.12.113+deb13-amd64）；留空 = 自动跟随 Debian 13 当前内核"
+        description: "目标内核版本：point release（6.12.117）或 ABI 名（6.12.117+deb13-amd64）；留空 = 自动跟随 Debian 13 当前内核"
         type: string
         default: ""
   push:
@@ -87,13 +87,13 @@ jobs:
         id: kernel
         run: |
           set -eu
-          # 仓库钉住的 point release：与 scripts/build-rootfs.sh --kernel-version 6.12.113 对应
-          PINNED_ABI='6.12.113+deb13-amd64'
+          # 仓库钉住的 point release：与 scripts/build-rootfs.sh --kernel-version 6.12.117 对应
+          PINNED_ABI='6.12.117+deb13-amd64'
           KVER=''
 
           want="${{ inputs.kernel_version }}"
           if [ -n "$want" ]; then
-            # 允许写 point release（6.12.113）或 ABI 名（6.12.113+deb13-amd64）
+            # 允许写 point release（6.12.117）或 ABI 名（6.12.117+deb13-amd64）
             case "$want" in
               *[!0-9.+-]*) echo "::error::kernel_version 只能含数字与 . + - ：$want"; exit 1 ;;
             esac
@@ -132,7 +132,7 @@ jobs:
           # 上游 rtl8723bs 源码取自 Debian 的 linux 源包（sources.debian.org），
           # 保证与发行版内核里的那一份同源。
           # 第二个参数是目标内核：脚本据此挑对应的源包版本
-          # （6.12.113+deb13-amd64 → linux 6.12.113-1），
+          # （6.12.117+deb13-amd64 → linux 6.12.117-1），
           # 避免「用 A 的源码编 B 的头文件」。
           sh scripts/fetch-rtl8723bs-source.sh \
             "$GITHUB_WORKSPACE/build/rtl8723bs-src" \
@@ -238,7 +238,7 @@ jobs:
         id: kernel
         run: |
           set -eu
-          PINNED_ABI='6.12.113+deb13-amd64'
+          PINNED_ABI='6.12.117+deb13-amd64'
           KVER=''
           want="${{ inputs.kernel_version }}"
           if [ -n "$want" ]; then
@@ -408,7 +408,7 @@ jobs:
               *)   KVER="$want+deb13-amd64" ;;
             esac
           else
-            KVER='6.12.113+deb13-amd64'
+            KVER='6.12.117+deb13-amd64'
           fi
           if ! apt-get install -y -qq --no-install-recommends "linux-headers-$KVER"; then
             echo "::warning::linux-headers-$KVER 不在仓库里了，改用发行版元包"

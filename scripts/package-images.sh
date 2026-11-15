@@ -3,7 +3,8 @@
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 OUT="$(cd "${1:?usage: package-images.sh OUTPUT_DIR}" && pwd)"
-for name in qm1-disk.img.zst qm1-installer.img.zst manifest.txt; do
+for name in qm1-disk.img.zst qm1-installer.img.zst manifest.txt \
+            rootfs-manifest.txt driver-manifest.txt board-driver-check.txt; do
     [ -s "$OUT/$name" ] || { echo "missing image payload: $name" >&2; exit 1; }
 done
 zstd -t "$OUT/qm1-disk.img.zst" "$OUT/qm1-installer.img.zst"
@@ -18,6 +19,9 @@ cat > "$OUT/IMAGE-README.txt" <<'EOF'
 QM1 Debian amd64 system base, with IA32 and x64 EFI loaders.
 This is a preflight image; physical-device acceptance is still required.
 Applications are installed separately by the user.
+rootfs-manifest.txt records package versions and architecture.
+driver-manifest.txt records built-in/module state and required firmware.
+board-driver-check.txt records effective ACPI/SDIO aliases and dependencies.
 
 Verify the extracted download first: sha256sum -c SHA256SUMS
 Decompress the selected image: zstd -d qm1-installer.img.zst
@@ -42,6 +46,7 @@ EOF
 (
     cd "$OUT"
     sha256sum qm1-disk.img.zst qm1-installer.img.zst manifest.txt \
+        rootfs-manifest.txt driver-manifest.txt board-driver-check.txt \
         install-qm1.sh prepare-provision.sh inject-provision.sh lib/common.sh BUILD-INFO.txt IMAGE-README.txt > SHA256SUMS
     sha256sum -c SHA256SUMS
     bash install-qm1.sh --help >/dev/null

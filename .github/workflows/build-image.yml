@@ -65,10 +65,10 @@ jobs:
       # 固定内核 point release：Debian 13 元包当前给的是 6.12.107-1，
       # 而 rtl8723bs 的 2026 安全修复（kfree_sensitive、WMM IE 长度校验、
       # WPA IE 越界读、监控帧长度校验）从 6.12.111 才回移进 6.12.y。
-      # 钉死后由 hooks/customize02-drivers.sh 从 trixie-proposed-updates 精确安装，
+      # 钉死后由 hooks/customize02-drivers.sh 从 Debian 官方源精确安装，
       # 装不上直接失败，不静默回退到元包。
-      QM1_KERNEL_VERSION: 6.12.113
-      QM1_KERNEL_ABI: 6.12.113+deb13-amd64
+      QM1_KERNEL_VERSION: 6.12.117
+      QM1_KERNEL_ABI: 6.12.117+deb13-amd64
       # 启动关键路径：缺任一项都意味着 QM1 认不到 eMMC/ESP，插电起不来 → CI 必须失败
       # 名称与驱动清单（driver-manifest.txt）里的模块名一致（连字符形式）
       QM1_CRITICAL_MODULES: sdhci-pci sdhci-acpi mmc_block vfat ext4
@@ -112,7 +112,7 @@ jobs:
         if: env.QM1_TARGET_ARCH == 'amd64'
         run: |
           set -eux
-          # 6.12.113 还在 trixie-proposed-updates 里（主仓库当前是 6.12.107-1）
+          # 固定 Debian 官方安全内核；保留 proposed 源以支持明确指定的旧 ABI。
           echo 'deb http://deb.debian.org/debian trixie-proposed-updates main' \
             > /etc/apt/sources.list.d/qm1-proposed.list
           apt-get update -qq
@@ -160,7 +160,7 @@ jobs:
           ARCH="${{ inputs.arch || 'amd64' }}"
           EXTRA=()
           if [ "$ARCH" = "amd64" ]; then
-            # 钉死内核 point release（6.12.113），并装上 Wi-Fi 驱动
+            # 钉死内核 point release（6.12.117），并装上 Wi-Fi 驱动
             EXTRA+=(--kernel-version "${QM1_KERNEL_VERSION}")
             [ "${RTW88_MODULE:-}" = "ok" ] || { echo "::error::缺少已验证的上游 Wi-Fi 模块"; exit 1; }
             EXTRA+=(--rtw88-module-deb "$(ls build/rtw88-module/*.deb | head -1)")
@@ -175,7 +175,9 @@ jobs:
         run: bash scripts/verify-systemd-units.sh build/rootfs
 
       - name: Verify target ACPI aliases and module dependencies
-        run: bash scripts/verify-board-modules.sh build/rootfs
+        run: |
+          bash scripts/verify-board-modules.sh build/rootfs > build/board-driver-check.txt
+          cat build/board-driver-check.txt
 
       - name: Verify private bootstrap SSH and sudo in disposable rootfs
         run: bash scripts/test-rootfs-ssh.sh build/rootfs
@@ -431,7 +433,7 @@ jobs:
           grep -q '^SuccessExitStatus=1' "$ROOT/etc/systemd/system/qm1-selftest.service" \
             || { echo "::error::qm1-selftest.service 没有 SuccessExitStatus=1 —— 报告里有 FAIL 行会把整机标成 degraded"; exit 1; }
           # 内核侧：hci_uart（编进 hci_h5）+ btrtl（厂商固件下发）都必须可用。
-          # Debian 13 的 6.12.113+deb13-amd64 实测：
+          # Debian 13 的 6.12.117+deb13-amd64 实测：
           #   CONFIG_BT_HCIUART=m / BT_HCIUART_SERDEV=y / BT_HCIUART_3WIRE=y / BT_RTL=m
           # hci_h5 编在 hci_uart.ko 里，btrtl 是独立模块。
           KCFG=$(ls "$ROOT"/boot/config-* 2>/dev/null | head -1 || true)
@@ -536,7 +538,7 @@ jobs:
           [ -n "$KCFG" ] || { echo "::error::镜像里没有内核 config 文件"; exit 1; }
           # CONFIG_IOSF_MBI=y 是 Bay Trail 的 sdhci-acpi 挂死修复（上游 6e1c7d6103fe）
           # 真正生效的前提 —— 没有它，eMMC/SD 的挂死补丁等于没打。实测 Debian 13
-          # 的 6.12.113+deb13-amd64 为 =y。
+          # 的 6.12.117+deb13-amd64 为 =y。
           grep -qE '^CONFIG_IOSF_MBI=y$' "$KCFG" \
             || { echo "::error::CONFIG_IOSF_MBI 不是 y —— Bay Trail 的 sdhci-acpi 挂死修复不会生效"; exit 1; }
           echo "OK   CONFIG_IOSF_MBI=y（Bay Trail eMMC/SD 挂死修复生效前提满足）"
@@ -1007,6 +1009,7 @@ jobs:
       - name: Package inventory
         run: |
           cp build/rootfs-manifest.txt build/out/rootfs-manifest.txt 2>/dev/null || true
+          cp build/board-driver-check.txt build/out/board-driver-check.txt
           cp build/rootfs.mmdebstrap.log build/out/mmdebstrap.log 2>/dev/null || true
           du -sh build/rootfs | tee build/out/rootfs-size.txt
 
@@ -1300,6 +1303,7 @@ jobs:
           path: |
             build/out/manifest.txt
             build/out/driver-manifest.txt
+            build/out/board-driver-check.txt
             build/out/esp-listing.txt
             build/out/esp-installer-listing.txt
             build/out/installer-grub.cfg
@@ -1318,6 +1322,9 @@ jobs:
             build/out/qm1-installer.img.zst
             build/out/SHA256SUMS
             build/out/manifest.txt
+            build/out/rootfs-manifest.txt
+            build/out/driver-manifest.txt
+            build/out/board-driver-check.txt
             build/out/install-qm1.sh
             build/out/prepare-provision.sh
             build/out/inject-provision.sh

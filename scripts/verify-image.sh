@@ -120,6 +120,14 @@ check_attr /etc/shadow    'Group: *42'  "shadow 组仍是 42(shadow)"
 check_attr /usr/bin/sudo   'Mode: *04755' "sudo 保留 setuid 位"
 
 echo "-- 定制层是否落进镜像 --"
+_os_release="$(debugfs -R 'cat /etc/os-release' "$IMG" 2>/dev/null || true)"
+_suite="$(sed -n 's/^VERSION_CODENAME=//p' <<<"$_os_release" | tr -d '\"')"
+case "$_suite" in
+    trixie|bookworm)
+        check_content /etc/apt/sources.list "^deb .* $_suite-security " "保留 Debian 官方安全更新源"
+        check_content /etc/apt/sources.list "^deb .* $_suite-updates " "保留 Debian updates 更新源"
+        ;;
+esac
 check_exists /etc/default/zramswap                 "zram 配置（768M zstd）"
 # 配置文件在 ≠ zram 设备在跑：zramswap.service 必须被 enable（要看到
 # multi-user.target.wants 里的那个链接），否则这台 2 GiB 的机器实际零交换，
