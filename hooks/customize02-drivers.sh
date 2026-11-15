@@ -187,7 +187,10 @@ vfat
 ext4
 usb_storage
 xhci_hcd
+xhci_pci
 ehci_pci
+usbhid
+hid_generic
 EOF
 if ! grep -q '^MODULES=' "$TARGET/etc/initramfs-tools/initramfs.conf"; then
     echo 'MODULES=most' >> "$TARGET/etc/initramfs-tools/initramfs.conf"
@@ -622,12 +625,12 @@ driver_state() {
             fi
         done
     fi
-    if chroot "$TARGET" modinfo -k "$KVER" "$_mod" >/dev/null 2>&1; then
-        echo "module"; return
-    fi
+    # modinfo also succeeds for built-ins; the target config is authoritative.
     if [ -n "$_sym" ] && [ -f "$KCFG" ]; then
         if grep -qE "^CONFIG_${_sym}=y$" "$KCFG"; then echo "builtin"; return; fi
-        if grep -qE "^CONFIG_${_sym}=m$" "$KCFG"; then echo "absent"; return; fi
+    fi
+    if chroot "$TARGET" modinfo -k "$KVER" "$_mod" >/dev/null 2>&1; then
+        echo "module"; return
     fi
     echo "absent"
 }
@@ -657,6 +660,7 @@ ext4|EXT4_FS|根文件系统|critical
 usb-storage|USB_STORAGE|microSD 读卡器 / U 盘|
 ehci-pci|USB_EHCI_PCI|USB 2.0 控制器|
 xhci-hcd|USB_XHCI_HCD|USB 3.0 控制器|
+xhci-pci|USB_XHCI_PCI|Bay Trail PCI xHCI 控制器|
 ohci-hcd|USB_OHCI_HCD|USB 1.1 控制器|
 usbnet|USB_NET|USB 网卡框架|
 r8152|USB_NET_RTL8152|Realtek USB 网卡（8152/8153）|

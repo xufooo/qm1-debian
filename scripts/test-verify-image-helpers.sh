@@ -127,6 +127,14 @@ call check_no_group_writable /unsafe "writable script"
 before="$fail"
 call check_no_group_writable /dir "empty safe directory"
 [ "$fail" = "$before" ] || { echo "FAIL safe directory rejected"; rc=1; }
+before="$fail"
+call check_empty_directory /dir "empty runtime directory"
+[ "$fail" = "$before" ] || { echo "FAIL empty directory rejected"; rc=1; }
+for directory in /unsafe /definitely-not-here; do
+    before="$fail"
+    call check_empty_directory "$directory" "runtime directory"
+    [ "$fail" -eq $((before + 1)) ] || { echo "FAIL dirty/missing directory accepted"; rc=1; }
+done
 
 if [ "$rc" -eq 0 ]; then
     echo "镜像存在性判断的语义测试全部通过"

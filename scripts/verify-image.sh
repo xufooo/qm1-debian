@@ -399,20 +399,31 @@ if [ -n "$KVER" ]; then
             # lsinitramfs 自己认得各种压缩格式，最省事。
             # ★ 先把清单取到变量里再 grep：管道里 grep -q 提前退出会给上游发
             #   SIGPIPE，本脚本开了 pipefail，管道返回 141 会被误判成"没找到"。
-            _listing="$(lsinitramfs "$_initrd" 2>/dev/null || true)"
-            grep -q '60-qm1-emmc-power.rules' <<<"$_listing" && _found=1
+            if ! _listing="$(lsinitramfs "$_initrd" 2>/dev/null)"; then _listing=""; fi
         else
-            _raw="$(mktemp)"
-            if command -v zstd >/dev/null 2>&1 && zstd -dc "$_initrd" > "$_raw" 2>/dev/null; then
-                :
-            elif command -v gzip >/dev/null 2>&1 && gzip -dc "$_initrd" > "$_raw" 2>/dev/null; then
-                :
-            else
-                cat "$_initrd" > "$_raw"
-            fi
-            grep -aq '60-qm1-emmc-power.rules' "$_raw" && _found=1
-            rm -f "$_raw"
+            # An early microcode cpio can precede the compressed main archive.
+            # Decompressing from byte zero or grepping raw bytes misses it (or
+            # accepts a filename occurring only in another file's content).
+            if ! _listing="$(python3 "$SCRIPT_DIR/lib/list-initramfs.py" "$_initrd" 2>/dev/null)"; then _listing=""; fi
         fi
+        grep -qE '(^|/)(etc|usr/lib|lib)/udev/rules.d/60-qm1-emmc-power.rules$' <<<"${_listing:-}" && _found=1
+        # The USB medium's PCI host and keyboard must work before root is
+        # mounted, as must the board's eMMC controller and root filesystem.
+        _config="$(debugfs -R "cat /boot/config-$KVER" "$IMG" 2>/dev/null || true)"
+        for _pair in sdhci-acpi:MMC_SDHCI_ACPI mmc_block:MMC_BLOCK \
+                     xhci-pci:USB_XHCI_PCI xhci-hcd:USB_XHCI_HCD \
+                     usb-storage:USB_STORAGE usbhid:USB_HID \
+                     hid-generic:HID_GENERIC ext4:EXT4_FS vfat:VFAT_FS; do
+            _module="${_pair%%:*}"; _symbol="${_pair#*:}"
+            if grep -qx "CONFIG_$_symbol=y" <<<"$_config"; then
+                printf '  OK   initramfs driver %s (builtin)\n' "$_module"
+            elif grep -qE "(^|/)$_module\\.ko(\\.(xz|zst|gz))?$" <<<"$_listing"; then
+                printf '  OK   initramfs driver %s\n' "$_module"
+            else
+                printf '  FAIL initramfs missing boot driver %s\n' "$_module"
+                fail=$((fail + 1))
+            fi
+        done
         rm -f "$_initrd"
         if [ "$_found" = "1" ]; then
             printf '  OK   %-46s (%s)\n' "initramfs 里的 eMMC 规则" \
@@ -459,12 +470,7 @@ check_exists /usr/local/bin/qm1-selftest-report "开机自检的包装脚本（�
 
 echo "-- 伪文件系统应为空 --"
 for d in /dev /proc /sys /run; do
-    n="$(debugfs -R "ls -l $d" "$IMG" 2>/dev/null | grep -cv '^d' || true)"
-    if [ "${n:-0}" -le 1 ]; then
-        printf '  OK   %-46s (%s)\n' "$d" "运行时由内核挂载，镜像内为空"
-    else
-        printf '  WARN %-46s (%s)\n' "$d" "镜像内还有内容（应为运行时挂载点）"
-    fi
+    check_empty_directory "$d" "运行时挂载点必须为空"
 done
 
 if [ "$fail" -gt 0 ]; then

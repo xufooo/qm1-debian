@@ -23,6 +23,23 @@ _img_has() {    # 镜像里有这个路径吗（0 = 有）
     grep -q '^Inode:' <<<"$(_img_stat "$1")"
 }
 
+check_empty_directory() {
+    local dir="$1" description="$2" listing entries
+    listing="$(debugfs -R "ls -p $dir" "$IMG" 2>/dev/null || true)"
+    if ! grep -qE '^/[0-9]+/[0-7]+/' <<<"$listing"; then
+        printf '  FAIL %s (cannot read directory: %s)\n' "$description" "$dir"
+        fail=$((fail + 1))
+        return
+    fi
+    entries="$(awk -F/ '$6!="." && $6!=".." && $6!="" {print $6}' <<<"$listing")"
+    if [ -z "$entries" ]; then
+        printf '  OK   %-46s (%s)\n' "$dir" "$description"
+    else
+        printf '  FAIL %-46s (%s: %s)\n' "$dir" "$description" "$entries"
+        fail=$((fail + 1))
+    fi
+}
+
 # 存在性检查：debugfs -R "stat <path>"
 check_exists() {
     local path="$1" desc="$2"
