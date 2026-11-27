@@ -16,13 +16,19 @@ with (b/'calls').open('a') as f: f.write(cmd+' '+' '.join(a)+'\n')
 if cmd=='readlink': print(a[-1]); sys.exit(0)
 if cmd=='id': print('0'); sys.exit(0)
 if cmd=='findmnt': print('/dev/sda2'); sys.exit(0)
+if cmd=='blkid':
+    if a[-1]=='/dev/sda1': print('c12a7328-f81f-11d2-ba4b-00a0c93ec93b')
+    else: print('0fc63daf-8483-4772-8e79-3d69d8477de4')
+    sys.exit(0)
 if cmd=='lsblk':
     if any('PKNAME' in x for x in a):
         if os.environ['CASE']!='whole': print('/dev/sda')
     elif any(x=='TYPE' for x in a): print('disk')
     elif a[-1:] == ['/dev/sda']:
         print('/dev/sda')
-        if os.environ['CASE']!='missing': print('/dev/sda1 c12a7328-f81f-11d2-ba4b-00a0c93ec93b')
+        if os.environ['CASE']!='missing':
+            print('/dev/sda1 part' if 'PATH,TYPE' in a else '/dev/sda1')
+        print('/dev/sda2 part' if 'PATH,TYPE' in a else '/dev/sda2')
     elif any('LABEL' in x for x in a):
         if os.environ['CASE']=='duplicate': print('QM1ESP /dev/mmcblk0p1')
         else: print('VOID /dev/mmcblk0p1')
@@ -56,7 +62,7 @@ def run(case):
             shutil.copytree(shutil_source, b / 'root/etc/qm1/provision')
         commands = b / 'bin'
         commands.mkdir()
-        for cmd in ('readlink', 'id', 'findmnt', 'lsblk', 'mountpoint', 'mount', 'umount', 'chpasswd', 'systemctl'):
+        for cmd in ('readlink', 'id', 'findmnt', 'lsblk', 'blkid', 'mountpoint', 'mount', 'umount', 'chpasswd', 'systemctl'):
             f = commands / cmd
             f.write_text(MOCK)
             f.chmod(0o755)

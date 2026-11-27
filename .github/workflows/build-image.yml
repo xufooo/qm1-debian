@@ -1128,7 +1128,8 @@ jobs:
             exit "$rc"
           fi
           bash scripts/boot-smoke-assert.sh \
-            --console build/out/boot-smoke/console.log --require-trial-boot
+            --console build/out/boot-smoke/console.log \
+            --journal-text-file build/out/boot-smoke/journal.txt --require-trial-boot
 
       - name: Boot the installer media under 32-bit UEFI (QEMU)
         run: |
@@ -1140,7 +1141,8 @@ jobs:
             --timeout 420 \
             --log build/out/boot-installer-smoke-ia32.log
           bash scripts/boot-smoke-assert.sh \
-            --console build/out/boot-smoke/console.log --require-trial-boot
+            --console build/out/boot-smoke/console.log \
+            --journal-text-file build/out/boot-smoke/journal.txt --require-trial-boot
 
       - name: Assert the installer image is self-contained
         run: |
@@ -1285,6 +1287,10 @@ jobs:
           path: |
             build/rootfs.mmdebstrap.log
             build/out/manifest.txt
+            build/out/boot-*.log
+            build/out/boot-smoke/console.log
+            build/out/boot-smoke/journal.txt
+            build/out/bootloaders/
           if-no-files-found: ignore
           retention-days: 7
 

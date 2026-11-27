@@ -79,6 +79,7 @@ dump_diag() {
     if [ -n "$JOURNAL_TEXT" ]; then
         echo "BOOT-SMOKE-ASSERT: —— journal 尾部 40 行 ——" >&2
         printf '%s' "$JOURNAL_TEXT" | tail -40 >&2 || true
+        printf '%s' "$JOURNAL_TEXT" | grep -E 'qm1-firstboot|firstboot-esp' >&2 || true
     fi
 }
 fail() {
@@ -105,11 +106,11 @@ assert_console_re() {
 #   一旦它真的起失败，报出来的就是"起失败"，附带单元事件流。
 for unit in ssh.service systemd-resolved.service systemd-networkd.service \
             qm1-firstboot.service qm1-hardware-fixups.service; do
-    if grep -qF "Failed to start $unit" <<<"$OUT"; then
+    if grep -qF "Failed to start ${unit%.service}." <<<"$OUT"$'\n'"$JOURNAL_TEXT"; then
         fail "$unit 起失败了"
     fi
     # 超时被杀也算起失败（systemd 打的是 "Failed with result 'timeout'"）
-    if grep -qF "$unit: Failed with result" <<<"$OUT"; then
+    if grep -qF "$unit: Failed with result" <<<"$OUT"$'\n'"$JOURNAL_TEXT"; then
         fail "$unit 起失败了（超时或被杀掉）"
     fi
 done

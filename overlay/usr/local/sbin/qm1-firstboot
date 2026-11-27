@@ -83,14 +83,26 @@ else
         /dev/*) ;;
         *) warn "无法确定当前根分区所在磁盘，不读取其他磁盘的配置"; exit 1 ;;
     esac
-    esp_candidates="$(lsblk -nrpo PATH,PARTTYPE "$root_disk" 2>/dev/null \
-        | awk -v t="$ESP_PARTTYPE" '$2==t{print $1}' || true)"
+    log "根分区：${root_dev}，根磁盘：$root_disk"
+    # Read GPT entry types from disk, not the udev database: early boot can
+    # expose the block devices before udev has populated PARTTYPE/LABEL.
+    esp_candidates=""
+    while IFS= read -r part_dev; do
+        [ -n "$part_dev" ] || continue
+        part_type="$(blkid -p -s PART_ENTRY_TYPE -o value "$part_dev" 2>/dev/null || true)"
+        if [ "$part_type" = "$ESP_PARTTYPE" ]; then
+            esp_candidates="${esp_candidates}${part_dev}
+"
+        fi
+    done < <(lsblk -nrpo PATH,TYPE "$root_disk" 2>/dev/null | awk '$2=="part"{print $1}')
+    esp_candidates="$(printf '%s' "$esp_candidates" | awk 'NF{print}')"
     esp_count="$(printf '%s\n' "$esp_candidates" | awk 'NF{n++} END{print n+0}')"
     if [ "$esp_count" -ne 1 ]; then
         warn "根磁盘 $root_disk 上需要唯一的 EFI 分区，实际为 ${esp_count}；首启配置未完成"
         exit 1
     fi
     esp_dev="$esp_candidates"
+    log "同盘 ESP：$esp_dev"
     if [ -n "$esp_dev" ]; then
         mkdir -p "$ESP_MOUNT"
         if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then

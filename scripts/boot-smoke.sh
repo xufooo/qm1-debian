@@ -194,7 +194,7 @@ OVMF_CODE.fd:OVMF_VARS.fd"
     fi
     log "根分区：起始扇区 ${PART_START}，长度 $PART_SIZE 扇区"
     BOOT_IMG="$WORK/rootfs-from-disk.img"
-    dd if="$DISK_COPY" of="$BOOT_IMG" bs=512 skip="$PART_START" count="$PART_SIZE" conv=sparse status=none
+    dd if="$DISK_COPY" of="$BOOT_IMG" bs=4M iflag=skip_bytes,count_bytes skip="$(( PART_START * 512 ))" count="$(( PART_SIZE * 512 ))" conv=sparse status=none
     [ -s "$BOOT_IMG" ] || die "从整盘镜像里抠出根分区失败"
 else
     # ---------- 1a. 从 ext4 镜像里取出内核、initrd 与根 UUID ----------
@@ -248,7 +248,7 @@ export_journal() {
     # 整盘模式下，客户机写的是整盘副本里的根分区 ⇒ 先把副本里的分区抠回来，
     # 否则拿到的是开机前那份（没有 journal）。
     if [ -n "$DISK" ]; then
-        dd if="$DISK_COPY" of="$BOOT_IMG" bs=512 skip="$PART_START" count="$PART_SIZE" conv=sparse status=none || true
+        dd if="$DISK_COPY" of="$BOOT_IMG" bs=4M iflag=skip_bytes,count_bytes skip="$(( PART_START * 512 ))" count="$(( PART_SIZE * 512 ))" conv=sparse status=none || true
     fi
     MACHINE_ID="$(debugfs -R "ls -l /var/log/journal" "$BOOT_IMG" 2>/dev/null | awk '{print $NF}' | grep -E '^[0-9a-f]{32}$' | head -1 || true)"
     if [ -n "$MACHINE_ID" ]; then

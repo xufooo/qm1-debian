@@ -200,6 +200,22 @@ cat > "$WORK/j-firstboot.txt" <<'EOF'
 Startup finished in 12s.
 [qm1-firstboot] provisioning ok
 EOF
+# A truncated failed unit plus script output must never be accepted as success.
+cp "$WORK/no-finished.log" "$WORK/truncated-failed.log"
+printf '[FAILED] Failed to start qm1-firstboot.serv… - provisioning.\n' >> "$WORK/truncated-failed.log"
+if bash "$ASSERT" --console "$WORK/truncated-failed.log" --journal-text-file "$WORK/j-firstboot.txt" >/dev/null 2>&1; then
+    bad "truncated firstboot failure was hidden by journal output"
+else
+    ok "truncated firstboot failure is rejected even with journal output"
+fi
+cp "$WORK/j-firstboot.txt" "$WORK/j-firstboot-failed.txt"
+printf "qm1-firstboot.service: Failed with result 'exit-code'.\n" >> "$WORK/j-firstboot-failed.txt"
+if bash "$ASSERT" --console "$WORK/good.log" --journal-text-file "$WORK/j-firstboot-failed.txt" >/dev/null 2>&1; then
+    bad "journal firstboot failure was hidden by console output"
+else
+    ok "journal firstboot failure overrides apparent console success"
+fi
+
 if bash "$ASSERT" --console "$WORK/no-finished.log" --journal-text-file "$WORK/j-firstboot.txt" >/dev/null 2>&1; then
     ok "控制台缺 Finished 行但 journal 里有首启输出时，应当判为已执行"
 else
