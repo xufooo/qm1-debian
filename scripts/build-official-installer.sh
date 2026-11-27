@@ -166,7 +166,7 @@ apt-get -y --download-only --no-install-recommends \
     -o Dir::State::status=/dev/null -o Dir::Cache::archives="$TREE/qm1/packages" \
     install firmware-realtek bluez zram-tools systemd-oomd alsa-utils iw rfkill kmod iproute2 \
     pciutils usbutils python3 python3-venv curl ca-certificates openssh-server sudo init-system-helpers \
-    "linux-image-$KVER"
+    "linux-image-$KVER=$(dpkg-deb -f "${kernel_debs[0]}" Version)"
 rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"
 ( cd "$TREE/qm1/packages"; dpkg-scanpackages . /dev/null | gzip -n > Packages.gz )
 install -m 0755 "$SCRIPT_DIR/official-installer-target.sh" "$TREE/qm1/install-target.sh"
@@ -194,6 +194,6 @@ xorriso -indev "$ISO" -outdev "$OUTPUT" -map "$TREE" / \
     -boot_image any replay -append_partition 2 0xef "$TREE/boot/grub/efi.img" \
     -commit -end > "$OUT/remaster.log" 2>&1
 xorriso -indev "$OUTPUT" -report_el_torito plain -report_system_area plain > "$OUT/boot-layout.txt" 2>&1
-sha512sum "$OUTPUT" > "$OUT/SHA512SUMS"
+( cd "$OUT"; sha512sum "$(basename "$OUTPUT")" > SHA512SUMS )
 printf '%s\n' "$WORK" > "$OUT/work-tree.txt"
 echo "Built complete official-based installer: $OUTPUT"

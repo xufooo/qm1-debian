@@ -4,7 +4,7 @@
 set -eu
 TARGET=/target
 MEDIA=/cdrom
-mountpoint -q "$TARGET" || { echo 'target root is not mounted' >&2; exit 1; }
+grep -qs " $TARGET " /proc/mounts || { echo 'target root is not mounted' >&2; exit 1; }
 test -f "$MEDIA/qm1/installer-version" || exit 1
 mkdir -p "$TARGET/media/qm1-installer"
 mount --bind "$MEDIA" "$TARGET/media/qm1-installer"
