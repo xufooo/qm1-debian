@@ -151,6 +151,7 @@ else
 fi
 EOF
     chmod 0755 "$ram/lib/debian-installer-startup.d/S55qm1-wifi"
+    cp "$MODULE_ROOT/modules.builtin" "$MODULE_ROOT/modules.builtin.modinfo" "$ram/usr/lib/modules/$KVER/"
     depmod -b "$ram" "$KVER"
     ( cd "$ram"; find . -print0 | cpio --null -o -H newc --quiet | gzip -n -9 ) > "$image.new"
     mv "$image.new" "$image"
@@ -190,8 +191,11 @@ done
 ! grep -Eq 'partman/(confirm|confirm_nooverwrite)|partman-auto/disk|passwd/.*password' "$TREE/qm1/preseed.cfg"
 ( cd "$TREE"; find . -type f ! -path './md5sum.txt' ! -path './md5sum.txt.new' ! -path './isolinux/boot.cat' -print0 | sort -z | xargs -0 md5sum > md5sum.txt.new; mv md5sum.txt.new md5sum.txt )
 OUTPUT="$OUT/qm1-debian-installer-amd64.iso"
-xorriso -indev "$ISO" -outdev "$OUTPUT" -map "$TREE" / \
-    -boot_image any replay -append_partition 2 0xef "$TREE/boot/grub/efi.img" \
+# The official netinst exposes its in-ISO EFI image through hybrid GPT; it
+# does not append an EFI partition. Preserve the BIOS boot inode and replay
+# the original layout after updating changed files, including the larger FAT.
+xorriso -indev "$ISO" -outdev "$OUTPUT" -update_r "$TREE" / \
+    -boot_image any replay \
     -commit -end > "$OUT/remaster.log" 2>&1
 xorriso -indev "$OUTPUT" -report_el_torito plain -report_system_area plain > "$OUT/boot-layout.txt" 2>&1
 ( cd "$OUT"; sha512sum "$(basename "$OUTPUT")" > SHA512SUMS )
