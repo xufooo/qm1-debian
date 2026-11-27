@@ -8,6 +8,7 @@
 #
 # 用法：
 #   bash scripts/verify-image.sh build/out/rootfs.img
+#   QM1_LOGIN_HASH_FILE=/private/login.hash bash scripts/verify-image.sh private-rootfs.img
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -361,7 +362,24 @@ echo "-- 开机即用基线（DNS / 账号 / Wi-Fi 单元 / fstab / 超时）--"
 check_link /etc/resolv.conf /usr/lib/systemd/resolv.conf \
     "DNS 数据源指向 systemd-resolved 的 stub（Debian 13 的包不带 /etc/resolv.conf）"
 check_exists /usr/lib/systemd/resolv.conf "systemd-resolved 的 stub 文件本体"
-check_content /etc/passwd '^qm1:' "有可登录账号 qm1（口令由安装器装机时生成）"
+check_content /etc/passwd '^qm1:' "默认账号 qm1 存在（公共镜像初始锁定，存在不代表能登录）"
+# Private delivery can require a usable password before first boot. Never log
+# the expected or actual hash. Public build artifacts keep the account locked.
+if [ -n "${QM1_LOGIN_HASH_FILE:-}" ]; then
+    [ -r "$QM1_LOGIN_HASH_FILE" ] || die "无法读取私有登录密码哈希文件"
+    expected_login_hash="$(cat "$QM1_LOGIN_HASH_FILE")"
+    actual_login_hash="$(debugfs -R 'cat /etc/shadow' "$IMG" 2>/dev/null \
+        | awk -F: '$1=="qm1"{print $2}')"
+    login_hash_pattern='^\$6\$(rounds=[0-9]+\$)?[./A-Za-z0-9]{1,16}\$[./A-Za-z0-9]{86}$'
+    if [[ "$expected_login_hash" =~ $login_hash_pattern ]] \
+        && [ "$actual_login_hash" = "$expected_login_hash" ]; then
+        printf '  OK   qm1 私有密码已应用到根文件系统\n'
+    else
+        printf '  FAIL qm1 私有密码未应用到根文件系统（不能保证本地登录）\n'
+        fail=$((fail + 1))
+    fi
+    unset expected_login_hash actual_login_hash login_hash_pattern
+fi
 check_content /etc/fstab '^[^#]*[[:space:]]/[[:space:]]' "fstab 里有根分区条目（systemd 才能按 fstab 管理根、fsck-root 才有意义）"
 # ★ ESP 的挂载条目：装进 eMMC 之后系统自己就能挂上引导分区。
 #   nofail + device-timeout 是要害 —— ESP 挂不上绝不能挡开机
