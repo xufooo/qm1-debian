@@ -28,6 +28,7 @@
 # 用法：
 #   bash scripts/boot-smoke.sh --rootfs build/out/rootfs.img [--timeout 420]
 #   bash scripts/boot-smoke.sh --disk   build/out/qm1-disk.img [--timeout 420]
+#   Add --verify-esp-login to test fixture password application via ESP on the disk copy.
 #
 # 两种模式的区别：
 #   --rootfs 直接用 -kernel/-initrd 起，只验证"根文件系统 + systemd"这一层；
@@ -50,6 +51,7 @@ TIMEOUT=420
 LOG="build/out/boot-smoke.log"
 WORK="build/out/boot-smoke"
 SETTLE=25
+VERIFY_ESP_LOGIN=0
 
 die() { echo "BOOT-SMOKE: $*" >&2; exit 1; }
 log() { echo "BOOT-SMOKE: $*"; }
@@ -64,6 +66,7 @@ while [ $# -gt 0 ]; do
         --timeout) TIMEOUT="$2"; shift 2 ;;
         --log)     LOG="$2"; shift 2 ;;
         --settle)  SETTLE="$2"; shift 2 ;;
+        --verify-esp-login) VERIFY_ESP_LOGIN=1; shift ;;
         *) die "未知参数 $1" ;;
     esac
 done
@@ -79,6 +82,9 @@ if [ -n "$ROOTFS" ] && [ ! -f "$ROOTFS" ]; then
 fi
 if [ -n "$DISK" ] && [ ! -f "$DISK" ]; then
     die "找不到整盘镜像 $DISK"
+fi
+if [ "$VERIFY_ESP_LOGIN" = 1 ] && [ -z "$DISK" ]; then
+    die "--verify-esp-login requires --disk"
 fi
 [ -f "$ASSERT_SCRIPT" ] || die "找不到断言脚本 $ASSERT_SCRIPT"
 need qemu-system-x86_64
@@ -178,6 +184,21 @@ OVMF_CODE.fd:OVMF_VARS.fd"
     mcopy -o -i "$DISK_COPY@@$ESP_OFFSET" "$WORK/grub-qemu.cfg" ::/EFI/BOOT/grub.cfg
     log "test-only serial console added to disk copy (production ESP unchanged)"
 
+    if [ "$VERIFY_ESP_LOGIN" = 1 ]; then
+        need openssl
+        need mmd
+        mkdir -p "$WORK/login-fixture"
+        # Public CI fixture only; modify DISK_COPY, never the deliverable disk.
+        printf 'qm1-ci-esp-fixture\n' | openssl passwd -6 -stdin > "$WORK/login-fixture/ssh_password_hash"
+        printf 'qm1\n' > "$WORK/login-fixture/ssh_user"
+        mmd -i "$DISK_COPY@@$ESP_OFFSET" ::/qm1 2>/dev/null || true
+        mmd -i "$DISK_COPY@@$ESP_OFFSET" ::/qm1/provision 2>/dev/null || true
+        for item in ssh_user ssh_password_hash; do
+            mcopy -o -i "$DISK_COPY@@$ESP_OFFSET" "$WORK/login-fixture/$item" "::/qm1/provision/$item"
+        done
+        log "public login fixture injected into test-copy ESP only"
+    fi
+
     # ★ 解析要落在**整行**上，不能按空白切字段再找 start=：
     #   util-linux 的 sfdisk -d 会把数值**按列对齐**打印，
     #   形如 "start=        2048, size=       131072, type=0fc63daf-…"
@@ -222,6 +243,13 @@ else
     debugfs -R "dump /boot/$INITRD $WORK/initrd" "$ROOTFS" >/dev/null 2>&1 || die "取出 initrd 失败"
     [ -s "$WORK/vmlinuz" ] || die "内核文件为空"
     [ -s "$WORK/initrd" ] || die "initrd 文件为空"
+fi
+
+if [ "$VERIFY_ESP_LOGIN" = 1 ]; then
+    before_hash="$(debugfs -R 'cat /etc/shadow' "$BOOT_IMG" 2>/dev/null | awk -F: '$1=="qm1"{print $2}')"
+    [[ "$before_hash" == '!'* || "$before_hash" == '*'* ]] \
+        || die "public source rootfs qm1 account was not locked before the test"
+    unset before_hash
 fi
 
 ROOT_UUID="$(debugfs -R "cat /etc/fstab" "$BOOT_IMG" 2>/dev/null \
@@ -403,6 +431,17 @@ if [ "$JOURNAL_OK" = "yes" ]; then
     log "已导出客户机的 journal（$(ls -A "$JOURNAL_DIR" 2>/dev/null | wc -l | tr -d ' ') 个文件）"
 else
     log "警告：没能读到客户机的 journal（可能它写在了 /run/log/journal），只按控制台日志断言"
+fi
+
+if [ "$VERIFY_ESP_LOGIN" = 1 ]; then
+    expected_hash="$(cat "$WORK/login-fixture/ssh_password_hash")"
+    after_hash="$(debugfs -R 'cat /etc/shadow' "$BOOT_IMG" 2>/dev/null | awk -F: '$1=="qm1"{print $2}')"
+    if [ "$after_hash" != "$expected_hash" ]; then
+        dump_diagnostics
+        die "ESP firstboot password was not applied to qm1 in the booted rootfs"
+    fi
+    unset expected_hash after_hash
+    log "PASS real UEFI boot applied ESP password to qm1; source image unchanged"
 fi
 
 # ---------- 6. 断言 ----------

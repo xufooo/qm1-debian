@@ -1038,7 +1038,7 @@ jobs:
           apt-get install -y --no-install-recommends ovmf ovmf-ia32
           rc=0
           bash scripts/boot-smoke.sh \
-            --disk build/out/qm1-disk.img \
+            --disk build/out/qm1-disk.img --verify-esp-login \
             --timeout 420 \
             --log build/out/boot-disk-smoke.log || rc=$?
           if [ "$rc" = "77" ]; then
@@ -1083,7 +1083,7 @@ jobs:
           QM1_OVMF_CODE=/usr/share/OVMF/OVMF32_CODE_4M.fd \
           QM1_OVMF_VARS=/usr/share/OVMF/OVMF32_VARS_4M.fd \
           bash scripts/boot-smoke.sh \
-            --disk build/out/qm1-disk.img \
+            --disk build/out/qm1-disk.img --verify-esp-login \
             --timeout 420 \
             --log build/out/boot-disk-smoke-ia32.log || rc=$?
           if [ "$rc" = "77" ]; then
@@ -1117,7 +1117,7 @@ jobs:
           # 不会触发安装、不写盘。
           rc=0
           bash scripts/boot-smoke.sh \
-            --disk build/out/qm1-installer.img \
+            --disk build/out/qm1-installer.img --verify-esp-login \
             --timeout 420 \
             --log build/out/boot-installer-smoke.log || rc=$?
           if [ "$rc" = "77" ]; then
@@ -1137,7 +1137,7 @@ jobs:
           QM1_OVMF_CODE=/usr/share/OVMF/OVMF32_CODE_4M.fd \
           QM1_OVMF_VARS=/usr/share/OVMF/OVMF32_VARS_4M.fd \
           bash scripts/boot-smoke.sh \
-            --disk build/out/qm1-installer.img \
+            --disk build/out/qm1-installer.img --verify-esp-login \
             --timeout 420 \
             --log build/out/boot-installer-smoke-ia32.log
           bash scripts/boot-smoke-assert.sh \

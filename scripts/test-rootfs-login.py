@@ -54,12 +54,20 @@ try:
     output.clear()
     wait_for(rb'(?m)^qm1\r?$')
     os.write(fd, b'exit\n')
-    print('PASS real console password login as qm1 on a PTY')
 finally:
     os.close(fd)
     if not child_reaped:
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os.waitpid(pid, 0)
+        # Let login finish its PAM/session cleanup after the terminal closes.
+        for _ in range(100):
+            finished, _ = os.waitpid(pid, os.WNOHANG)
+            if finished:
+                child_reaped = True
+                break
+            time.sleep(0.02)
+        if not child_reaped:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            os.waitpid(pid, 0)
+print('PASS real console password login as qm1 on a PTY')
