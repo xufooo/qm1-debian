@@ -26,6 +26,9 @@ WORK="$(mktemp -d "$OUT/work.XXXXXX")"
 TREE="$WORK/tree"
 mkdir "$TREE"
 xorriso -osirrox on -indev "$ISO" -extract / "$TREE" > "$OUT/extract.log" 2>&1
+# Capture upstream path-based boot commands before replacing any EFI inode.
+# xorriso 1.5.6 replay may otherwise retain the old FAT extent as a hidden image.
+xorriso -indev "$ISO" -report_el_torito cmd > "$OUT/upstream-boot-commands.txt" 2> "$OUT/upstream-boot-report.log"
 chmod -R u+w "$TREE"
 KVER="$(file -b "$TREE/install.amd/vmlinuz" | sed -nE 's/.*version ([^ ]+).*/\1/p')"
 [[ "$KVER" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+deb[0-9]+-amd64$ ]] || { echo 'unsupported installer kernel ABI' >&2; exit 1; }
@@ -92,6 +95,10 @@ kernel_debs=("$TREE"/pool/main/l/linux-signed-amd64/linux-image-"$KVER"_*_amd64.
 mkdir "$WORK/kernel" "$WORK/wifi"
 dpkg-deb -x "${kernel_debs[0]}" "$WORK/kernel"
 dpkg-deb -x "$WIFI_DEB" "$WORK/wifi"
+realtek_debs=("$TREE"/pool/non-free-firmware/f/firmware-nonfree/firmware-realtek_*_all.deb)
+[ "${#realtek_debs[@]}" = 1 ]
+mkdir "$WORK/realtek"
+dpkg-deb -x "${realtek_debs[0]}" "$WORK/realtek"
 MODULE="$WORK/wifi/lib/modules/$KVER/extra/rtw88/rtw88_qm1.ko"
 [ -f "$MODULE" ]
 [ "$(modinfo -F vermagic "$MODULE" | cut -d' ' -f1)" = "$KVER" ]
@@ -114,7 +121,12 @@ MODULE_ROOT="$WORK/kernel/lib/modules/$KVER"
 mkdir -p "$MODULE_ROOT/extra/rtw88"
 cp "$MODULE" "$MODULE_ROOT/extra/rtw88/"
 depmod -b "$WORK/kernel" "$KVER"
-modprobe -d "$WORK/kernel" -S "$KVER" --show-depends rtw88_qm1 > "$OUT/installer-module-closure.txt"
+# The official text installer omits i915. Include native graphics so a
+# firmware without a usable GOP framebuffer still gains a Linux console.
+: > "$OUT/installer-module-closure.txt"
+for module in rtw88_qm1 i915 sdhci_acpi sdhci_pci mmc_block 8250_dw hci_uart btrtl snd_hdmi_lpe_audio snd_hda_intel; do
+    modprobe -d "$WORK/kernel" -S "$KVER" --show-depends "$module" >> "$OUT/installer-module-closure.txt"
+done
 
 # Add the same driver and firmware to both text and GTK installer RAM disks.
 for image in "$TREE/install.amd/initrd.gz" "$TREE/install.amd/gtk/initrd.gz"; do
@@ -140,8 +152,15 @@ for image in "$TREE/install.amd/initrd.gz" "$TREE/install.amd/gtk/initrd.gz"; do
     mkdir -p "$ram/usr/lib/firmware/rtw88" "$ram/etc/modprobe.d" "$ram/usr/lib/udev/rules.d"
     cp "$WORK/wifi/lib/firmware/rtw88/"* "$ram/usr/lib/firmware/rtw88/"
     cp "$WORK/wifi/etc/modprobe.d/"* "$ram/etc/modprobe.d/"
+    bt_firmware="$(find "$WORK/realtek" -type d -path '*/firmware/rtl_bt' -print -quit)"
+    test -n "$bt_firmware"
+    cp -a "$bt_firmware" "$ram/usr/lib/firmware/"
+    test -f "$ram/usr/lib/firmware/rtl_bt/rtl8723bs_fw.bin"
+    test -f "$ram/usr/lib/firmware/rtl_bt/rtl8723bs_config-OBDA8723.bin"
     cp "$REPO/overlay/etc/udev/rules.d/60-qm1-emmc-power.rules" "$ram/usr/lib/udev/rules.d/"
     mkdir -p "$ram/lib/debian-installer-startup.d"
+    printf '#!/bin/sh\nmodprobe i915 || true\n' > "$ram/lib/debian-installer-startup.d/S39qm1-display"
+    chmod 0755 "$ram/lib/debian-installer-startup.d/S39qm1-display"
     cat > "$ram/lib/debian-installer-startup.d/S55qm1-wifi" <<'EOF'
 #!/bin/sh
 if modprobe rtw88_qm1; then
@@ -195,9 +214,32 @@ OUTPUT="$OUT/qm1-debian-installer-amd64.iso"
 # does not append an EFI partition. Preserve the BIOS boot inode and replay
 # the original layout after updating changed files, including the larger FAT.
 xorriso -indev "$ISO" -outdev "$OUTPUT" -update_r "$TREE" / \
-    -boot_image any replay \
+    -options_from_file "$OUT/upstream-boot-commands.txt" -volid QM1_DEBIAN_INSTALLER \
     -commit -end > "$OUT/remaster.log" 2>&1
 xorriso -indev "$OUTPUT" -report_el_torito plain -report_system_area plain > "$OUT/boot-layout.txt" 2>&1
+python3 - "$OUTPUT" "$TREE/boot/grub/efi.img" "$OUT/boot-layout.txt" <<'PYBOOT'
+import pathlib,re,struct,sys
+iso,fat,report=map(pathlib.Path,sys.argv[1:])
+layout=report.read_text()
+assert re.search(r'El Torito boot img :\s+1\s+BIOS',layout)
+assert re.search(r'El Torito img path :\s+2\s+/boot/grub/efi.img',layout)
+m=re.search(r'El Torito boot img :\s+2\s+UEFI\s+y\s+none\s+0x0000\s+0x00\s+(\d+)\s+(\d+)',layout)
+assert m and int(m[1])*512==fat.stat().st_size, 'EFI boot catalog has stale FAT extent'
+expected=fat.read_bytes()
+with iso.open('rb') as f:
+    mbr=f.read(512)
+    assert mbr[510:]==b'\x55\xaa'
+    entries=[mbr[446+i*16:462+i*16] for i in range(4)]
+    efi=[e for e in entries if e[4]==0xef]
+    assert len(efi)==1, 'missing unique EFI USB partition'
+    start,count=struct.unpack_from('<II',efi[0],8)
+    assert count*512==len(expected)
+    f.seek(start*512)
+    assert f.read(len(expected))==expected, 'USB EFI partition does not expose the new FAT'
+    f.seek(int(m[2])*2048)
+    assert f.read(len(expected))==expected, 'El Torito EFI and USB FAT differ'
+print('PASS official hybrid BIOS/UEFI metadata exposes the complete updated EFI filesystem')
+PYBOOT
 ( cd "$OUT"; sha512sum "$(basename "$OUTPUT")" > SHA512SUMS )
 printf '%s\n' "$WORK" > "$OUT/work-tree.txt"
 echo "Built complete official-based installer: $OUTPUT"

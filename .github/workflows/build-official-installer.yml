@@ -40,7 +40,7 @@ jobs:
           printf 'deb http://deb.debian.org/debian trixie main non-free-firmware\ndeb http://deb.debian.org/debian trixie-proposed-updates main non-free-firmware\n' \
             > /etc/apt/sources.list.d/qm1-installer.list
           apt-get update -qq
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: build/source
           key: debian-installer-source-${{ github.run_id }}
@@ -55,16 +55,25 @@ jobs:
           [[ "$abi" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+deb[0-9]+-amd64$ ]]
           echo "QM1_INSTALLER_ABI=$abi" >> "$GITHUB_ENV"
           apt-get install -y -qq --no-install-recommends "linux-headers-$abi"
-      - uses: actions/cache@v4
+      - uses: actions/cache/save@v4
+        with:
+          path: build/source
+          key: debian-installer-source-${{ github.run_id }}
+      - uses: actions/cache/restore@v4
         id: wifi-cache
         with:
           path: build/wifi/*.deb
           key: qm1-official-wifi-${{ env.QM1_INSTALLER_ABI }}-${{ hashFiles('scripts/build-rtw88-8723bs-module.sh', 'patches/**') }}
       - name: Build the reviewed driver for the official installer kernel
-        if: steps.wifi-cache.outputs.cache-hit != 'true' 
+        if: steps.wifi-cache.outputs.cache-hit != 'true'
         run: |
           bash scripts/build-rtw88-8723bs-module.sh --kver "$QM1_INSTALLER_ABI" \
             --out-dir build/wifi --source upstream-full
+      - uses: actions/cache/save@v4
+        if: steps.wifi-cache.outputs.cache-hit != 'true'
+        with:
+          path: build/wifi/*.deb
+          key: qm1-official-wifi-${{ env.QM1_INSTALLER_ABI }}-${{ hashFiles('scripts/build-rtw88-8723bs-module.sh', 'patches/**') }}
       - name: Build the full Debian installer with QM1 board support
         run: |
           bash scripts/build-official-installer.sh --source-dir build/source \

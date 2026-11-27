@@ -107,7 +107,7 @@ EOF
         -drive "if=pflash,format=raw,readonly=on,file=$code"
         -drive "if=pflash,format=raw,file=$work/vars.fd"
         -drive "if=virtio,format=qcow2,file=$work/target.qcow2"
-        -device qemu-xhci -netdev user,id=n0 -device "virtio-net-pci,netdev=n0")
+        -device qemu-xhci -netdev "user,id=n0" -device "virtio-net-pci,netdev=n0")
     # A removable USB disk, not QEMU's easier CD-ROM boot route.
     timeout --signal=TERM 2400 "${vm[@]}" -serial "file:$work/install.log" \
         -drive "if=none,id=install,format=raw,readonly=on,file=$work/test.iso" \
