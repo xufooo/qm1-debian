@@ -15,9 +15,9 @@ cleanup() {
 trap cleanup EXIT
 printf 'deb [trusted=yes] file:/media/qm1-installer/qm1/packages ./\n' \
     > "$TARGET/etc/apt/sources.list.d/qm1-installer-local.list"
-in-target apt-get -o Dir::Etc::sourcelist=sources.list.d/qm1-installer-local.list \
+in-target --pass-stdout apt-get -o Dir::Etc::sourcelist=sources.list.d/qm1-installer-local.list \
     -o Dir::Etc::sourceparts=- update
-in-target env DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends \
+in-target --pass-stdout env DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends \
     -o Dir::Etc::sourcelist=sources.list.d/qm1-installer-local.list \
     -o Dir::Etc::sourceparts=- install qm1-board-support
 if [ -s "$MEDIA/qm1/private/authorized_keys" ]; then

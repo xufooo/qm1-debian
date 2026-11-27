@@ -56,7 +56,12 @@ EOF
 #!/bin/sh
 set -eu
 install -m 0755 /cdrom/qm1/verify-board-modules.sh /target/usr/local/sbin/qm1-ci-static
-/bin/sh /cdrom/qm1/install-target.sh
+if ! /bin/sh /cdrom/qm1/install-target.sh > /var/log/qm1-target.log 2>&1; then
+    cat /var/log/qm1-target.log > /dev/console
+    tail -n 180 /var/log/syslog > /dev/console
+    exit 1
+fi
+cat /var/log/qm1-target.log > /dev/console
 # VM-only serial console; production UART stays available for Bluetooth.
 mkdir -p /target/etc/default/grub.d
 printf 'GRUB_CMDLINE_LINUX="console=ttyS0,115200n8"\nGRUB_TIMEOUT=1\n' > /target/etc/default/grub.d/99-qm1-ci.cfg
@@ -119,6 +124,12 @@ EOF
     previous_size=0
     while kill -0 "$install_pid" 2>/dev/null; do
         sleep 15
+        if grep -qE 'Failed to run preseeded command|Failed to install the base system|No root file system is defined' "$work/install.log"; then
+            echo 'Debian-Installer reported a blocking error; preserving console diagnostics' >&2
+            kill "$install_pid" 2>/dev/null || true
+            wait "$install_pid" || true
+            exit 1
+        fi
         current_size="$(stat -c %s "$work/install.log" 2>/dev/null || echo 0)"
         if [ "$current_size" != "$previous_size" ]; then
             last_output=$SECONDS
