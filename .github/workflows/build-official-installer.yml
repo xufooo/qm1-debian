@@ -1,0 +1,93 @@
+name: build-official-installer
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - scripts/**
+      - overlay/**
+      - patches/**
+      - .github/workflows/build-official-installer.yml
+
+permissions:
+  contents: read
+concurrency:
+  group: official-installer-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  installer:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    container:
+      image: debian:trixie-slim
+      options: --privileged
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install official installer build and test tools
+        run: |
+          set -eux
+          apt-get update -qq
+          apt-get install -y -qq --no-install-recommends \
+            ca-certificates curl gpgv debian-keyring debian-archive-keyring \
+            xorriso mtools dosfstools grub2-common file cpio gzip python3 \
+            build-essential patch git kmod dpkg-dev qemu-system-x86 ovmf ovmf-ia32 \
+            openssh-client openssl expect util-linux initramfs-tools
+          printf 'deb http://deb.debian.org/debian trixie main non-free-firmware\ndeb http://deb.debian.org/debian trixie-proposed-updates main non-free-firmware\n' \
+            > /etc/apt/sources.list.d/qm1-installer.list
+          apt-get update -qq
+      - name: Authenticate the complete upstream ISO
+        run: |
+          bash scripts/fetch-debian-installer.sh build/source
+          mkdir -p build/kernel-probe
+          xorriso -osirrox on -indev "$(cat build/source/iso-path.txt)" \
+            -extract /install.amd/vmlinuz build/kernel-probe/vmlinuz
+          abi="$(file -b build/kernel-probe/vmlinuz | sed -nE 's/.*version ([^ ]+).*/\1/p')"
+          [[ "$abi" =~ ^[0-9]+\.[0-9]+\.[0-9]+\+deb[0-9]+-amd64$ ]]
+          echo "QM1_INSTALLER_ABI=$abi" >> "$GITHUB_ENV"
+          apt-get install -y -qq --no-install-recommends "linux-headers-$abi"
+      - name: Build the reviewed driver for the official installer kernel
+        run: |
+          bash scripts/build-rtw88-8723bs-module.sh --kver "$QM1_INSTALLER_ABI" \
+            --out-dir build/wifi --source upstream-full
+      - name: Build the full Debian installer with QM1 board support
+        run: |
+          bash scripts/build-official-installer.sh --source-dir build/source \
+            --wifi-deb "$(find build/wifi -maxdepth 1 -name '*.deb' -print -quit)" \
+            --out-dir build/official
+      - name: Full official installer VM acceptance
+        run: |
+          bash scripts/test-official-installer.sh build/official
+      - name: Publish only after installation acceptance passes
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-official-installer
+          path: |
+            build/official/qm1-debian-installer-amd64.iso
+            build/official/SHA512SUMS
+            build/official/boot-layout.txt
+            build/official/efi-files.txt
+            build/official/installer-module-closure.txt
+            build/official/wifi-import-crcs.txt
+            build/source/source.json
+            build/source/SHA512SUMS
+            build/source/SHA512SUMS.sign
+            build/source/signature-status.txt
+          retention-days: 7
+      - name: Preserve build and installer diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qm1-official-installer-diagnostics
+          path: |
+            build/official/*.log
+            build/official/*.txt
+            build/official/tests/**
+            build/source/source.json
+            build/source/signature-status.txt
+          if-no-files-found: ignore
+          retention-days: 7

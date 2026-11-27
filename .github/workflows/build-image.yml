@@ -1,4 +1,4 @@
-name: build-image
+name: build-image-legacy
 
 # QM1 / Atom Z3735F: Debian amd64 with IA32 + x64 GRUB EFI loaders.
 # eMMC/SD: sdhci_acpi + mmc_block; graphics: i915; HDMI: LPE or HDA.
@@ -26,19 +26,9 @@ on:
         description: "手动构建是否上传完整镜像（main 推送始终上传）"
         type: boolean
         default: false
-  push:
-    branches: [main]
-    paths:
-      - "scripts/**"
-      - "hooks/**"
-      - "overlay/**"
-      # 树外模块的本地补丁（patches/rtw88/）直接进到镜像里的 rtw88 模块，
-      # 只改补丁不改脚本时也必须重建镜像。
-      - "patches/**"
-      - ".github/workflows/build-image.yml"
-  schedule:
-    # 每周一 03:00 UTC —— 验证 Debian 仓库侧变化没有把构建打断
-    - cron: "0 3 * * 1"
+
+# Legacy predeployed disk: retained only for explicit diagnostic builds.
+# The default deliverable is build-official-installer.yml.
 
 permissions:
   contents: read
