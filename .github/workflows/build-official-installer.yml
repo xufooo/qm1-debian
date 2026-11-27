@@ -35,7 +35,7 @@ jobs:
           apt-get install -y -qq --no-install-recommends \
             ca-certificates curl gpgv debian-keyring debian-archive-keyring \
             xorriso mtools dosfstools grub2-common file cpio gzip python3 \
-            build-essential patch git kmod dpkg-dev qemu-system-x86 ovmf ovmf-ia32 \
+            build-essential patch git kmod dpkg-dev qemu-system-x86 qemu-utils ovmf ovmf-ia32 \
             openssh-client openssl expect util-linux initramfs-tools
           printf 'deb http://deb.debian.org/debian trixie main non-free-firmware\ndeb http://deb.debian.org/debian trixie-proposed-updates main non-free-firmware\n' \
             > /etc/apt/sources.list.d/qm1-installer.list
@@ -106,7 +106,8 @@ jobs:
           path: |
             build/official/*.log
             build/official/*.txt
-            build/official/tests/**
+            build/official/tests/**/*.log
+            build/official/tests/**/*.txt
             build/source/source.json
             build/source/signature-status.txt
             build/wifi/*.deb
