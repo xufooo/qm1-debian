@@ -55,6 +55,7 @@ EOF
     cat > "$work/ram/qm1-test-target.sh" <<'EOF'
 #!/bin/sh
 set -eu
+install -m 0755 /cdrom/qm1/verify-board-modules.sh /target/usr/local/sbin/qm1-ci-static
 /bin/sh /cdrom/qm1/install-target.sh
 # VM-only serial console; production UART stays available for Bluetooth.
 mkdir -p /target/etc/default/grub.d
@@ -65,6 +66,7 @@ cat > /target/usr/local/sbin/qm1-ci-check <<'CHECK'
 set -eu
 test -f /etc/qm1-installation
 dpkg-query -W qm1-board-support qm1-rtw88-8723bs
+/usr/local/sbin/qm1-ci-static /
 modprobe rtw88_qm1
 find /boot/efi/EFI -type f
 if dmesg | grep -E 'Unknown symbol|disagrees about version'; then exit 1; fi
@@ -105,7 +107,7 @@ EOF
         -drive "if=pflash,format=raw,readonly=on,file=$code"
         -drive "if=pflash,format=raw,file=$work/vars.fd"
         -drive "if=virtio,format=qcow2,file=$work/target.qcow2"
-        -device qemu-xhci -netdev user,id=n0 -device virtio-net-pci,netdev=n0)
+        -device qemu-xhci -netdev user,id=n0 -device "virtio-net-pci,netdev=n0")
     # A removable USB disk, not QEMU's easier CD-ROM boot route.
     timeout --signal=TERM 2400 "${vm[@]}" -serial "file:$work/install.log" \
         -drive "if=none,id=install,format=raw,readonly=on,file=$work/test.iso" \

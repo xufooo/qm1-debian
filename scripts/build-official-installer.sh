@@ -170,6 +170,7 @@ apt-get -y --download-only --no-install-recommends \
 rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"
 ( cd "$TREE/qm1/packages"; dpkg-scanpackages . /dev/null | gzip -n > Packages.gz )
 install -m 0755 "$SCRIPT_DIR/official-installer-target.sh" "$TREE/qm1/install-target.sh"
+install -m 0755 "$SCRIPT_DIR/verify-board-modules.sh" "$TREE/qm1/verify-board-modules.sh"
 printf 'Debian-Installer QM1 adaptation\nkernel=%s\n' "$KVER" > "$TREE/qm1/installer-version"
 cat > "$TREE/qm1/preseed.cfg" <<EOF
 # Hardware setup only: preserve normal interactive partition/account screens.

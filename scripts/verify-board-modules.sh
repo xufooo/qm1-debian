@@ -57,10 +57,10 @@ for pair in 8250_dw:SERIAL_8250_DW pinctrl-baytrail:PINCTRL_BAYTRAIL \
             intel_soc_dts_thermal:INTEL_SOC_DTS_THERMAL coretemp:SENSORS_CORETEMP \
             acpi-cpufreq:X86_ACPI_CPUFREQ rtc_cmos:RTC_DRV_CMOS \
             vfat:VFAT_FS ext4:EXT4_FS exfat:EXFAT_FS zram:ZRAM; do
+    IFS=: read -r module symbol <<<"$pair"
     grep -qE "^CONFIG_$symbol=(y|m)$" "$CONFIG" || {
         echo "missing required driver config: CONFIG_$symbol" >&2; exit 1;
     }
-    IFS=: read -r module symbol <<<"$pair"
     if grep -qx "CONFIG_$symbol=y" "$CONFIG"; then
         echo "OK built-in driver: $module ($symbol=y)"
         continue
