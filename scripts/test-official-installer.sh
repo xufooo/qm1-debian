@@ -41,7 +41,7 @@ d-i partman-auto/choose_recipe select atomic
 d-i partman-lvm/device_remove_lvm boolean true
 d-i partman-md/device_remove_md boolean true
 d-i partman/choose_partition select finish
-d-i partman/confirm_write_new_label boolean true
+d-i partman-partitioning/confirm_write_new_label boolean true
 d-i partman/confirm boolean true
 d-i partman/confirm_nooverwrite boolean true
 d-i apt-setup/cdrom/set-first boolean false
@@ -111,7 +111,26 @@ EOF
     # A removable USB disk, not QEMU's easier CD-ROM boot route.
     timeout --signal=TERM 2400 "${vm[@]}" -serial "file:$work/install.log" \
         -drive "if=none,id=install,format=raw,readonly=on,file=$work/test.iso" \
-        -device usb-storage,drive=install,bootindex=1
+        -device usb-storage,drive=install,bootindex=1 &
+    install_pid=$!
+    # A blocked interactive question must fail promptly and retain its log,
+    # rather than consume the whole outer installation deadline.
+    last_output=$SECONDS
+    previous_size=0
+    while kill -0 "$install_pid" 2>/dev/null; do
+        sleep 15
+        current_size="$(stat -c %s "$work/install.log" 2>/dev/null || echo 0)"
+        if [ "$current_size" != "$previous_size" ]; then
+            last_output=$SECONDS
+            previous_size="$current_size"
+        elif [ $((SECONDS - last_output)) -gt 180 ]; then
+            echo 'Installer console stopped producing output; preserving blocked-question diagnostics' >&2
+            kill "$install_pid" 2>/dev/null || true
+            wait "$install_pid" || true
+            exit 1
+        fi
+    done
+    wait "$install_pid"
     grep -q QM1_OFFICIAL_INSTALL_COMPLETE "$work/install.log"
     ! grep -Eq 'QM1_INSTALLER_WIFI_MODULE_FAILED|disagrees about version of symbol|Unknown symbol' "$work/install.log"
     grep -q QM1_INSTALLER_WIFI_MODULE_LOADED "$work/install.log"
