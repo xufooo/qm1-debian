@@ -15,7 +15,11 @@ b=pathlib.Path(os.environ['FIXTURE']); cmd=pathlib.Path(sys.argv[0]).name; a=sys
 with (b/'calls').open('a') as f: f.write(cmd+' '+' '.join(a)+'\n')
 if cmd=='readlink': print(a[-1]); sys.exit(0)
 if cmd=='id': print('0'); sys.exit(0)
-if cmd=='findmnt': print('/dev/sda2'); sys.exit(0)
+if cmd=='findmnt':
+    if '--source' in a:
+        if os.environ['CASE']=='mounted' or (b/'race').exists(): print(b/'usb')
+    else: print('/dev/sda2')
+    sys.exit(0)
 if cmd=='blkid':
     if a[-1]=='/dev/sda1': print('c12a7328-f81f-11d2-ba4b-00a0c93ec93b')
     else: print('0fc63daf-8483-4772-8e79-3d69d8477de4')
@@ -37,6 +41,7 @@ if cmd=='lsblk':
         print('c12a7328-f81f-11d2-ba4b-00a0c93ec93b /dev/sda1')
 elif cmd=='mountpoint': sys.exit(0 if (b/'mounted').exists() else 1)
 elif cmd=='mount':
+    if os.environ['CASE']=='race': (b/'race').touch(); sys.exit(1)
     if os.environ['CASE']=='mountfail': sys.exit(1)
     dest=pathlib.Path(a[-1]); dest.mkdir(parents=True,exist_ok=True)
     source=b/('usb' if a[-2]=='/dev/sda1' else 'void')
@@ -87,7 +92,11 @@ def run(case):
             assert applied.read_text() == 'qm1:' + HASH + '\n'
             assert marker.exists()
             assert HASH not in r.stdout+r.stderr
+        if case in ('mounted', 'race'):
+            assert 'umount ' not in calls, 'must preserve system-owned ESP mount'
+        if case == 'mounted':
+            assert 'mount -o' not in calls, 'must reuse existing ESP mount'
         print('PASS', case)
 
-for scenario in ('mixed', 'duplicate', 'missing', 'mountfail', 'whole', 'local'):
+for scenario in ('mixed', 'duplicate', 'missing', 'mountfail', 'whole', 'local', 'mounted', 'race'):
     run(scenario)

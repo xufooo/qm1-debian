@@ -1,7 +1,7 @@
 [Unit]
 Description=QM1 first-boot provisioning (Wi-Fi, SSH, hostname)
 Documentation=man:wpa_supplicant(8)
-After=local-fs.target systemd-remount-fs.service
+After=local-fs.target systemd-remount-fs.service boot-efi.mount
 Before=network-online.target qm1-wifi@wlan0.service systemd-user-sessions.service
 Wants=network-pre.target
 ConditionPathExists=!/var/lib/qm1/firstboot-done

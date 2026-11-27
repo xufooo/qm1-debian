@@ -24,6 +24,7 @@ set -euo pipefail
 PROV_DIR="/etc/qm1/provision"
 MARKER="/var/lib/qm1/firstboot-done"
 ESP_MOUNT="/run/qm1/firstboot-esp"
+ESP_OWN_MOUNT=0
 # EFI System partition type, restricted below to the running root disk.
 ESP_PARTTYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
@@ -41,7 +42,7 @@ warn() { printf '[qm1-firstboot][warn] %s\n' "$*" >&2; }
 # 启动分区是临时挂来读 provisioning 的 —— 读完必须卸掉：
 # 留着会让 /run 下的挂载点一直占着，而且 --force 重跑时挂载会失败。
 cleanup() {
-    if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
+    if [ "$ESP_OWN_MOUNT" = 1 ] && mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
         umount "$ESP_MOUNT" 2>/dev/null || true
     fi
 }
@@ -103,24 +104,29 @@ else
     fi
     esp_dev="$esp_candidates"
     log "同盘 ESP：$esp_dev"
-    if [ -n "$esp_dev" ]; then
+    # fstab normally mounted this ESP at /boot/efi already. Re-mounting the
+    # same FAT superblock read-only fails with "would change RO state".
+    # Reuse only a mount whose SOURCE is our root disk's ESP.
+    esp_read_path="$(findmnt -fnro TARGET --source "$esp_dev" 2>/dev/null || true)"
+    if [ -z "$esp_read_path" ]; then
         mkdir -p "$ESP_MOUNT"
-        if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
-            # 上一次运行挂过（--force 重跑）：先卸掉再挂，避免"设备已挂载"直接失败
-            umount "$ESP_MOUNT" 2>/dev/null || warn "卸载旧的 $ESP_MOUNT 失败"
-        fi
-        if mount -o ro "$esp_dev" "$ESP_MOUNT" 2>/dev/null; then
-            if [ -d "$ESP_MOUNT/qm1/provision" ]; then
-                SRC="$ESP_MOUNT/qm1/provision"
-                log "使用启动分区内的配置：$SRC"
-            else
-                warn "启动分区 $esp_dev 里没有 /qm1/provision"
-            fi
+        if mount_error="$(mount -o ro "$esp_dev" "$ESP_MOUNT" 2>&1)"; then
+            ESP_OWN_MOUNT=1
+            esp_read_path="$ESP_MOUNT"
         else
-            warn "挂载启动分区 $esp_dev 失败，首启配置未完成"; exit 1
+            # The fstab mount may have completed since the first lookup.
+            esp_read_path="$(findmnt -fnro TARGET --source "$esp_dev" 2>/dev/null || true)"
+            if [ -z "$esp_read_path" ]; then
+                warn "挂载启动分区 $esp_dev 失败：$mount_error"
+                exit 1
+            fi
         fi
+    fi
+    if [ -d "$esp_read_path/qm1/provision" ]; then
+        SRC="$esp_read_path/qm1/provision"
+        log "使用启动分区内的配置：$SRC"
     else
-        warn "没找到当前根磁盘的启动分区"
+        log "当前根磁盘 ESP 没有 /qm1/provision；没有私有首启配置"
     fi
 fi
 
