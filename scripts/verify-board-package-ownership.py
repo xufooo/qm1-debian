@@ -20,6 +20,8 @@ def paths(package):
                     name = new + name[len(old):]
                     break
             result.add(name)
+    while process.stdout.read(1024 * 1024):
+        pass
     process.stdout.close()
     if process.wait():
         raise RuntimeError('cannot inspect Debian archive: ' + package.name)

@@ -194,7 +194,7 @@ bash "$SCRIPT_DIR/package-board-support.sh" "$TREE/qm1/packages"
 cp "$WIFI_DEB" "${kernel_debs[0]}" "$TREE/qm1/packages/"
 apt-get -y --download-only --no-install-recommends \
     -o Dir::State::status=/dev/null -o Dir::Cache::archives="$TREE/qm1/packages" \
-    install firmware-realtek intel-microcode bluez zram-tools systemd-oomd alsa-utils iw rfkill kmod iproute2 \
+    install firmware-realtek intel-microcode bluez zram-tools systemd-oomd alsa-utils wpasupplicant wireless-regdb iw rfkill kmod iproute2 \
     pciutils usbutils python3 python3-venv curl ca-certificates openssh-server sudo init-system-helpers \
     "linux-image-$KVER=$(dpkg-deb -f "${kernel_debs[0]}" Version)"
 rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"

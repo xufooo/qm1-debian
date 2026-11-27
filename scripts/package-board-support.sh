@@ -53,7 +53,7 @@ Version: 1.0
 Section: admin
 Priority: optional
 Architecture: all
-Depends: qm1-rtw88-8723bs, firmware-realtek, intel-microcode, bluez, zram-tools, systemd-oomd, alsa-utils, iw, rfkill, kmod, iproute2, pciutils, usbutils, python3, python3-venv, curl, ca-certificates, openssh-server, sudo, init-system-helpers
+Depends: qm1-rtw88-8723bs, firmware-realtek, intel-microcode, bluez, zram-tools, systemd-oomd, alsa-utils, wpasupplicant, wireless-regdb, iw, rfkill, kmod, iproute2, pciutils, usbutils, python3, python3-venv, curl, ca-certificates, openssh-server, sudo, init-system-helpers
 Maintainer: QM1 installer build
 Description: QM1 board support for systems installed with Debian-Installer
  Applies the reviewed eMMC power, Bay Trail idle, audio, Bluetooth and memory
