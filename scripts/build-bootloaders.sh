@@ -27,10 +27,12 @@ source "$SCRIPT_DIR/lib/common.sh"
 
 OUT_DIR="${1:-build/bootloaders}"
 
+# Include diagnostic commands in the EFI itself: the ESP intentionally has no
+# external .mod directory, so a missing command cannot be loaded after failure.
 # 精简模块集：足以完成"读 ESP → 找内核 → 加载内核 → 进菜单"。
 # 注意：不存在独立的 linuxefi 模块 —— EFI handover 支持已并入 linux 模块
 #（Debian trixie grub2 的 i386-efi 模块集共 270 个，其中无 linuxefi.mod）。
-MODS="part_gpt part_msdos fat ext2 normal linux search search_fs_uuid search_label chain terminal"
+MODS="part_gpt part_msdos fat ext2 normal linux search search_fs_uuid search_label chain terminal echo cat configfile probe sleep reboot halt efifwsetup efi_gop efi_uga video videoinfo"
 ALL_MODULES="${ALL_MODULES:-0}"
 PREFIX="/EFI/BOOT"                 # 运行时 GRUB 寻找自身模块/配置的目录前缀
 DEB_SUITE="${DEB_SUITE:-trixie}"

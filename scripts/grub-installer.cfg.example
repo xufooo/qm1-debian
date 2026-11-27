@@ -66,3 +66,13 @@ menuentry "③ GRUB 命令行（救援）" {
     echo "装到 eMMC（带备份目录）的手工示例："
     echo "  linux  /vmlinuz root=UUID=<root_uuid> ro qm1.install=1 qm1.install.mode=emmc qm1.install.yes=1 qm1.install.backup_dir=/media/backup"
 }
+
+# Keep this entry only when the running firmware supports returning to Setup.
+# efifwsetup is embedded in both EFI binaries; no external module is required.
+if [ "$grub_platform" = "efi" ]; then
+    if fwsetup --is-supported; then
+menuentry "UEFI Firmware Settings" --id firmware {
+    fwsetup
+}
+    fi
+fi

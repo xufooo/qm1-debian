@@ -37,6 +37,13 @@ jobs:
             echo "ok: $f"
           done
 
+      - name: GRUB menu syntax
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends grub-common
+          grub-script-check scripts/grub.cfg.example
+          grub-script-check scripts/grub-installer.cfg.example
+
       - name: ShellCheck
         run: |
           set -euo pipefail
@@ -221,6 +228,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq openssl util-linux
           sudo bash scripts/test-firstboot-identity.sh
+          python3 scripts/test-firstboot-discovery.py
 
       - name: modversions CRC comparison (synthetic symbol tables)
         run: |

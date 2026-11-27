@@ -46,3 +46,13 @@ menuentry "QM1 @SUITE_I386@ (32-bit i386)" {
     linux  /vmlinuz32 root=UUID=@ROOT32_UUID@ ro console=tty0 fsck.repair=yes intel_idle.max_cstate=1
     initrd /initrd32.img
 }
+
+# Keep this entry only when the running firmware supports returning to Setup.
+# efifwsetup is embedded in both EFI binaries; no external module is required.
+if [ "$grub_platform" = "efi" ]; then
+    if fwsetup --is-supported; then
+menuentry "UEFI Firmware Settings" --id firmware {
+    fwsetup
+}
+    fi
+fi

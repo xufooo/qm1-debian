@@ -23,10 +23,8 @@ set -euo pipefail
 
 PROV_DIR="/etc/qm1/provision"
 MARKER="/var/lib/qm1/firstboot-done"
-ESP_LABEL="QM1ESP"
 ESP_MOUNT="/run/qm1/firstboot-esp"
-# EFI System 分区的 GPT 类型 GUID（混合端序）—— 按它找启动分区比按卷标找更稳：
-# 卷标是构建时可配的（QM1_ESP_LABEL），写死在这里就会和实际卷标悄悄对不上。
+# EFI System partition type, restricted below to the running root disk.
 ESP_PARTTYPE="c12a7328-f81f-11d2-ba4b-00a0c93ec93b"
 
 FORCE=0
@@ -66,16 +64,33 @@ if [ -d "$PROV_DIR" ] && [ -n "$(ls -A "$PROV_DIR" 2>/dev/null || true)" ]; then
     SRC="$PROV_DIR"
     log "使用根文件系统内的配置：$SRC"
 else
-    # 尝试从启动分区（ESP）读：先按卷标找，再按分区类型找
-    esp_dev=""
-    if command -v lsblk >/dev/null 2>&1; then
-        esp_dev="$(lsblk -no LABEL,PATH 2>/dev/null | awk -v l="$ESP_LABEL" '$1==l{print $2; exit}' || true)"
-        if [ -z "$esp_dev" ]; then
-            esp_dev="$(lsblk -no PARTTYPE,PATH 2>/dev/null \
-                | awk -v t="$ESP_PARTTYPE" '$1==t{print $2; exit}' || true)"
-            [ -n "$esp_dev" ] && log "没找到卷标 ${ESP_LABEL}，改按分区类型找到启动分区：$esp_dev"
-        fi
+    # Only inspect the disk backing this running root filesystem. A global
+    # label/type search can pick the old Void ESP while booted from USB.
+    root_dev="$(findmnt -nro SOURCE / 2>/dev/null || true)"
+    root_dev="$(readlink -f "$root_dev" 2>/dev/null || true)"
+    root_disk=""
+    if [ -n "$root_dev" ]; then
+        root_disk="$(lsblk -npro PKNAME "$root_dev" 2>/dev/null || true)"
     fi
+    # The rootfs-only QEMU smoke test boots an unpartitioned filesystem.
+    # It has no sibling ESP; do not fall back to any other attached disk.
+    if [ -n "$root_dev" ] && [ -z "$root_disk" ] \
+        && [ "$(lsblk -dnro TYPE "$root_dev" 2>/dev/null || true)" = disk ]; then
+        log "根文件系统直接位于整盘，无独立 ESP；没有发现 provisioning 文件"
+        exit 0
+    fi
+    case "$root_disk" in
+        /dev/*) ;;
+        *) warn "无法确定当前根分区所在磁盘，不读取其他磁盘的配置"; exit 1 ;;
+    esac
+    esp_candidates="$(lsblk -nrpo PATH,PARTTYPE "$root_disk" 2>/dev/null \
+        | awk -v t="$ESP_PARTTYPE" '$2==t{print $1}' || true)"
+    esp_count="$(printf '%s\n' "$esp_candidates" | awk 'NF{n++} END{print n+0}')"
+    if [ "$esp_count" -ne 1 ]; then
+        warn "根磁盘 $root_disk 上需要唯一的 EFI 分区，实际为 ${esp_count}；首启配置未完成"
+        exit 1
+    fi
+    esp_dev="$esp_candidates"
     if [ -n "$esp_dev" ]; then
         mkdir -p "$ESP_MOUNT"
         if mountpoint -q "$ESP_MOUNT" 2>/dev/null; then
@@ -90,10 +105,10 @@ else
                 warn "启动分区 $esp_dev 里没有 /qm1/provision"
             fi
         else
-            warn "挂载启动分区 $esp_dev 失败"
+            warn "挂载启动分区 $esp_dev 失败，首启配置未完成"; exit 1
         fi
     else
-        warn "没找到启动分区（卷标 $ESP_LABEL 或 EFI System 分区类型都没匹配上）"
+        warn "没找到当前根磁盘的启动分区"
     fi
 fi
 
