@@ -194,10 +194,11 @@ bash "$SCRIPT_DIR/package-board-support.sh" "$TREE/qm1/packages"
 cp "$WIFI_DEB" "${kernel_debs[0]}" "$TREE/qm1/packages/"
 apt-get -y --download-only --no-install-recommends \
     -o Dir::State::status=/dev/null -o Dir::Cache::archives="$TREE/qm1/packages" \
-    install firmware-realtek bluez zram-tools systemd-oomd alsa-utils iw rfkill kmod iproute2 \
+    install firmware-realtek intel-microcode bluez zram-tools systemd-oomd alsa-utils iw rfkill kmod iproute2 \
     pciutils usbutils python3 python3-venv curl ca-certificates openssh-server sudo init-system-helpers \
     "linux-image-$KVER=$(dpkg-deb -f "${kernel_debs[0]}" Version)"
 rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"
+python3 "$SCRIPT_DIR/verify-board-package-ownership.py" "$TREE/qm1/packages" | tee "$OUT/package-ownership.txt"
 ( cd "$TREE/qm1/packages"; dpkg-scanpackages . /dev/null | gzip -n > Packages.gz )
 install -m 0755 "$SCRIPT_DIR/official-installer-target.sh" "$TREE/qm1/install-target.sh"
 install -m 0755 "$SCRIPT_DIR/verify-board-modules.sh" "$TREE/qm1/verify-board-modules.sh"
