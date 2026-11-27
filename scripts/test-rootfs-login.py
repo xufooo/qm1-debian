@@ -9,6 +9,19 @@ import signal
 import sys
 import time
 
+def terminal_text(data):
+    data = re.sub(rb'\x1b\[[0-?]*[ -/]*[@-~]', b'', bytes(data))
+    return data.replace(b'\r', b'')
+
+if sys.argv[1:] == ['--self-test']:
+    # Captured failure: Bash's bracketed-paste controls hid a successful id.
+    sample = b'id -un\r\n\x1b[?2004l\rqm1\r\n\x1b[?2004hqm1@ci:~$ '
+    assert re.search(rb'(?m)^qm1$', terminal_text(sample))
+    for sample in (b'root\r\n', b'echo qm1\r\n', b'qm1@ci:~$ '):
+        assert not re.search(rb'(?m)^qm1$', terminal_text(sample))
+    print('PASS console ANSI/CR parsing accepts actual identity output only')
+    sys.exit(0)
+
 password = sys.stdin.readline().rstrip('\n')
 assert password, 'fixture password missing'
 pid, fd = pty.fork()
@@ -22,7 +35,7 @@ def wait_for(pattern, timeout=20):
     global child_reaped
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if re.search(pattern, output):
+        if re.search(pattern, terminal_text(output)):
             return
         ready, _, _ = select.select([fd], [], [], 0.2)
         if ready:
