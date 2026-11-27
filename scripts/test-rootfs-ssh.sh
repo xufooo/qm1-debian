@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # CI-only real key login and sudo authentication inside a disposable rootfs.
 set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "${1:?usage: test-rootfs-ssh.sh ROOTFS}" && pwd)"
 if [ "${2:-}" != --mount-namespace ]; then
     exec unshare --mount --propagation private "$BASH" "$0" "$ROOT" --mount-namespace
@@ -31,6 +32,7 @@ mkdir -p "$TARGET"/{proc,dev/pts,run/sshd,tmp/qm1-bootstrap,etc/qm1/provision}
 for pair in null:3 zero:5 random:8 urandom:9; do
     mknod -m 666 "$TARGET/dev/${pair%%:*}" c 1 "${pair#*:}"
 done
+mknod -m 666 "$TARGET/dev/tty" c 5 0
 mount -t proc -o nosuid,nodev,noexec proc "$TARGET/proc"
 proc_mounted=1
 mount -t devpts -o newinstance,ptmxmode=0666,mode=0620,gid=5 devpts "$TARGET/dev/pts"
@@ -46,6 +48,8 @@ FIXTURE_PASSWORD='qm1-ci-bootstrap-fixture'
 printf '%s\n' "$FIXTURE_PASSWORD" | chroot "$TARGET" openssl passwd -6 -stdin \
     > "$TARGET/etc/qm1/provision/ssh_password_hash"
 chroot "$TARGET" /usr/local/sbin/qm1-firstboot --force
+cp "$SCRIPT_DIR/test-rootfs-login.py" "$TARGET/tmp/qm1-bootstrap/console-test.py"
+printf '%s\n' "$FIXTURE_PASSWORD" | chroot "$TARGET" python3 /tmp/qm1-bootstrap/console-test.py
 chroot "$TARGET" ssh-keygen -q -t ed25519 -N '' -f /tmp/qm1-bootstrap/host
 PORT=22279
 chroot "$TARGET" /usr/sbin/sshd -D -e -p "$PORT" \
