@@ -60,8 +60,8 @@ if [ "${1:-}" = configure ]; then
         deb-systemd-helper enable "$unit" >/dev/null
     done
     install -d -m 0750 /var/log/qm1-health
-    command -v update-initramfs >/dev/null && update-initramfs -u -k all
-    command -v update-grub >/dev/null && update-grub
+    if command -v update-initramfs >/dev/null; then update-initramfs -u -k all; fi
+    if command -v update-grub >/dev/null; then update-grub; fi
 fi
 EOF
 chmod 0755 "$PKG/DEBIAN/postinst"

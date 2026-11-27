@@ -128,6 +128,15 @@ for module in rtw88_qm1 i915 sdhci_acpi sdhci_pci mmc_block 8250_dw hci_uart btr
     modprobe -d "$WORK/kernel" -S "$KVER" --show-depends "$module" >> "$OUT/installer-module-closure.txt"
 done
 
+mkdir -p "$TREE/qm1"
+cat > "$TREE/qm1/preseed.cfg" <<EOF
+# Hardware setup only: preserve normal interactive partition/account screens.
+d-i base-installer/kernel/image string linux-image-$KVER
+d-i grub-installer/force-efi-extra-removable boolean true
+d-i apt-setup/non-free-firmware boolean true
+d-i preseed/late_command string /bin/sh /cdrom/qm1/install-target.sh
+EOF
+
 # Add the same driver and firmware to both text and GTK installer RAM disks.
 for image in "$TREE/install.amd/initrd.gz" "$TREE/install.amd/gtk/initrd.gz"; do
     ram="$(mktemp -d "$WORK/initrd.XXXXXX")"
@@ -172,6 +181,7 @@ EOF
     chmod 0755 "$ram/lib/debian-installer-startup.d/S55qm1-wifi"
     cp "$MODULE_ROOT/modules.builtin" "$MODULE_ROOT/modules.builtin.modinfo" "$ram/usr/lib/modules/$KVER/"
     depmod -b "$ram" "$KVER"
+    cp "$TREE/qm1/preseed.cfg" "$ram/preseed.cfg"
     ( cd "$ram"; find . -print0 | cpio --null -o -H newc --quiet | gzip -n -9 ) > "$image.new"
     mv "$image.new" "$image"
     rm -rf "$ram"
@@ -192,21 +202,6 @@ rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"
 install -m 0755 "$SCRIPT_DIR/official-installer-target.sh" "$TREE/qm1/install-target.sh"
 install -m 0755 "$SCRIPT_DIR/verify-board-modules.sh" "$TREE/qm1/verify-board-modules.sh"
 printf 'Debian-Installer QM1 adaptation\nkernel=%s\n' "$KVER" > "$TREE/qm1/installer-version"
-cat > "$TREE/qm1/preseed.cfg" <<EOF
-# Hardware setup only: preserve normal interactive partition/account screens.
-d-i base-installer/kernel/image string linux-image-$KVER
-d-i grub-installer/force-efi-extra-removable boolean true
-d-i apt-setup/non-free-firmware boolean true
-d-i preseed/late_command string /bin/sh /cdrom/qm1/install-target.sh
-EOF
-# Embed this limited preseed in the installer initrd, which loads preseed.cfg
-# before its normal main menu. It contains no disk selection or passwords.
-for image in "$TREE/install.amd/initrd.gz" "$TREE/install.amd/gtk/initrd.gz"; do
-    preseed_root="$(mktemp -d "$WORK/preseed.XXXXXX")"
-    cp "$TREE/qm1/preseed.cfg" "$preseed_root/preseed.cfg"
-    ( cd "$preseed_root"; find . -print0 | cpio --null -o -H newc --quiet | gzip -n ) >> "$image"
-    rm -rf "$preseed_root"
-done
 ! grep -Eq 'partman/(confirm|confirm_nooverwrite)|partman-auto/disk|passwd/.*password' "$TREE/qm1/preseed.cfg"
 ( cd "$TREE"; find . -type f ! -path './md5sum.txt' ! -path './md5sum.txt.new' ! -path './isolinux/boot.cat' -print0 | sort -z | xargs -0 md5sum > md5sum.txt.new; mv md5sum.txt.new md5sum.txt )
 OUTPUT="$OUT/qm1-debian-installer-amd64.iso"
