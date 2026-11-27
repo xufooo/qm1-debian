@@ -192,11 +192,14 @@ done
 mkdir -p "$TREE/qm1/packages/partial"
 bash "$SCRIPT_DIR/package-board-support.sh" "$TREE/qm1/packages"
 cp "$WIFI_DEB" "${kernel_debs[0]}" "$TREE/qm1/packages/"
+board_packages=()
+while IFS= read -r package; do
+    [[ "$package" =~ ^[a-z0-9][a-z0-9+.-]+$ ]] || { echo 'invalid board Debian package manifest entry' >&2; exit 1; }
+    board_packages+=("$package")
+done < "$SCRIPT_DIR/board-debian-packages.txt"
 apt-get -y --download-only --no-install-recommends \
     -o Dir::State::status=/dev/null -o Dir::Cache::archives="$TREE/qm1/packages" \
-    install firmware-realtek intel-microcode bluez zram-tools systemd-oomd alsa-utils wpasupplicant wireless-regdb iw rfkill kmod iproute2 \
-    pciutils usbutils python3 python3-venv curl ca-certificates openssh-server sudo init-system-helpers \
-    "linux-image-$KVER=$(dpkg-deb -f "${kernel_debs[0]}" Version)"
+    install "${board_packages[@]}" "linux-image-$KVER=$(dpkg-deb -f "${kernel_debs[0]}" Version)"
 rm -rf "$TREE/qm1/packages/partial" "$TREE/qm1/packages/lock"
 python3 "$SCRIPT_DIR/verify-board-package-ownership.py" "$TREE/qm1/packages" | tee "$OUT/package-ownership.txt"
 ( cd "$TREE/qm1/packages"; dpkg-scanpackages . /dev/null | gzip -n > Packages.gz )

@@ -32,7 +32,9 @@ mkdir -p "$PKG/usr/share/qm1"
 install -m 0644 "$REPO/overlay/etc/default/zramswap" "$PKG/usr/share/qm1/zramswap.conf"
 mkdir -p "$PKG/etc/default/grub.d" "$PKG/usr/share/initramfs-tools/hooks"
 cat > "$PKG/etc/default/grub.d/60-qm1.cfg" <<'EOF'
-GRUB_CMDLINE_LINUX_DEFAULT="${GRUB_CMDLINE_LINUX_DEFAULT:-} intel_idle.max_cstate=1"
+GRUB_CMDLINE_LINUX="${GRUB_CMDLINE_LINUX:-} intel_idle.max_cstate=1"
+GRUB_TERMINAL_OUTPUT=console
+GRUB_GFXPAYLOAD_LINUX=text
 EOF
 cat > "$PKG/usr/share/initramfs-tools/hooks/qm1-emmc-power" <<'EOF'
 #!/bin/sh
@@ -47,13 +49,14 @@ EOF
 chmod 0755 "$PKG/usr/share/initramfs-tools/hooks/qm1-emmc-power"
 mkdir -p "$PKG/etc/modules-load.d"
 printf '%s\n' i915 snd_hda_intel snd_hdmi_lpe_audio hci_uart btrtl rtw88_qm1 > "$PKG/etc/modules-load.d/qm1-hardware.conf"
-cat > "$PKG/DEBIAN/control" <<'EOF'
+dependencies="$(paste -sd, "$REPO/scripts/board-debian-packages.txt" | sed 's/,/, /g')"
+cat > "$PKG/DEBIAN/control" <<EOF
 Package: qm1-board-support
 Version: 1.0
 Section: admin
 Priority: optional
 Architecture: all
-Depends: qm1-rtw88-8723bs, firmware-realtek, intel-microcode, bluez, zram-tools, systemd-oomd, alsa-utils, wpasupplicant, wireless-regdb, iw, rfkill, kmod, iproute2, pciutils, usbutils, python3, python3-venv, curl, ca-certificates, openssh-server, sudo, init-system-helpers
+Depends: qm1-rtw88-8723bs, $dependencies
 Maintainer: QM1 installer build
 Description: QM1 board support for systems installed with Debian-Installer
  Applies the reviewed eMMC power, Bay Trail idle, audio, Bluetooth and memory
