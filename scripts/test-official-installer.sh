@@ -153,6 +153,10 @@ EOF
 set timeout 300
 log_file -noappend "$env(QM1_CI_WORK)/installed-login.log"
 spawn {*}$argv
+expect_after {
+    timeout {puts stderr "installed-system interaction timed out"; exit 1}
+    eof {puts stderr "installed-system exited unexpectedly"; exit 1}
+}
 expect {
     -re {login: $} {send "qm1fixture\r"}
     timeout {exit 1}
@@ -171,7 +175,7 @@ expect -re {qm1fixture[\r\n]+QM1_PAM_LOGIN_OK}
 send "sudo -k; sudo -S /usr/local/sbin/qm1-ci-check\r"
 expect -re {password for qm1fixture:}
 send "qm1-ci-fixture\r"
-expect "QM1_SUDO_DRIVER_OK\r\n"
+expect -re {QM1_SUDO_DRIVER_OK\r+\n}
 send "sudo poweroff\r"
 expect eof
 set result [wait]
