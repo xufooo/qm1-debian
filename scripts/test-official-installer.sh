@@ -143,7 +143,10 @@ EOF
     done
     wait "$install_pid"
     grep -q QM1_OFFICIAL_INSTALL_COMPLETE "$work/install.log"
-    ! grep -Eq 'QM1_INSTALLER_WIFI_MODULE_FAILED|disagrees about version of symbol|Unknown symbol' "$work/install.log"
+    if grep -Eq 'QM1_INSTALLER_WIFI_MODULE_FAILED|disagrees about version of symbol|Unknown symbol' "$work/install.log"; then
+        echo 'installer driver error found in the boot log' >&2
+        exit 1
+    fi
     grep -q QM1_INSTALLER_WIFI_MODULE_LOADED "$work/install.log"
     # Fresh firmware variables and no USB: requires the installed disk's EFI
     # fallback path as well as the normal user's real PAM password and sudo.
@@ -185,7 +188,10 @@ EOF
     grep -q QM1_SUDO_DRIVER_OK "$work/installed-login.log"
     if [ "$arch" = ia32 ]; then loader=BOOTIA32.EFI; else loader=BOOTX64.EFI; fi
     grep -qi "$loader" "$work/installed-login.log"
-    ! grep -Eq 'Unknown symbol|disagrees about version' "$work/installed-login.log"
+    if grep -Eq 'Unknown symbol|disagrees about version' "$work/installed-login.log"; then
+        echo 'installed driver symbol error found' >&2
+        exit 1
+    fi
     rm -f "$work/test.iso" "$work/test-initrd.gz" "$work/target.qcow2"
     echo "PASS $arch USB EFI -> complete Debian installation -> USB removed -> normal password/sudo/driver"
 done

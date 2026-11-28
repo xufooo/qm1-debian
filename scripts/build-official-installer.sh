@@ -206,7 +206,10 @@ python3 "$SCRIPT_DIR/verify-board-package-ownership.py" "$TREE/qm1/packages" | t
 install -m 0755 "$SCRIPT_DIR/official-installer-target.sh" "$TREE/qm1/install-target.sh"
 install -m 0755 "$SCRIPT_DIR/verify-board-modules.sh" "$TREE/qm1/verify-board-modules.sh"
 printf 'Debian-Installer QM1 adaptation\nkernel=%s\n' "$KVER" > "$TREE/qm1/installer-version"
-! grep -Eq 'partman/(confirm|confirm_nooverwrite)|partman-auto/disk|passwd/' "$TREE/qm1/preseed.cfg"
+if grep -Eq 'partman/(confirm|confirm_nooverwrite)|partman-auto/disk|passwd/' "$TREE/qm1/preseed.cfg"; then
+    echo 'generic installer must leave accounts and disk confirmation interactive' >&2
+    exit 1
+fi
 [ ! -e "$TREE/qm1/private" ] || { echo 'private provisioning is forbidden in the generic installer' >&2; exit 1; }
 ( cd "$TREE"; find . -type f ! -path './md5sum.txt' ! -path './md5sum.txt.new' ! -path './isolinux/boot.cat' -print0 | sort -z | xargs -0 md5sum > md5sum.txt.new; mv md5sum.txt.new md5sum.txt )
 OUTPUT="$OUT/qm1-debian-installer-amd64.iso"
