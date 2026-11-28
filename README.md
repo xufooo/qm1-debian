@@ -5,6 +5,7 @@
 - 目标硬件：Atom Z3735F / 2 GB 内存 / 32 GB eMMC / RTL8723BS SDIO Wi-Fi 与 UART 蓝牙。
 - 官方 ISO 的签名与 SHA512 必须验证；EFI 同时提供官方 IA32 CD loader 和原有 x64 loader。
 - 官方安装内核与树外 Wi-Fi 模块按 ABI、包版本和符号 CRC 配对；驱动及固件同时进入安装环境和目标系统。
+- 通用安装盘不预置用户名、密码或个人密钥，账号和网络由用户在官方安装器中设置。
 - 安装菜单默认文字模式，保留图形安装、专家安装及救援选项；安装盘不会自动分区或擦除 eMMC。
 - 系统不预装 Hermes / Chrome。板级支持包含内存、eMMC 电源、Bay Trail idle、音频和蓝牙设置；应用组合负载需要实机验收。
 - CI：`build-official-installer` 构建完整安装盘，并在 IA32 / x64 UEFI 下从 USB 完成虚拟安装，再移除 USB 验证目标盘启动、正常账号密码、sudo 和驱动。只有通过后才发布安装 ISO。

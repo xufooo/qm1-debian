@@ -20,15 +20,5 @@ in-target --pass-stdout apt-get -o Dir::Etc::sourcelist=sources.list.d/qm1-insta
 in-target --pass-stdout env DEBIAN_FRONTEND=noninteractive apt-get -y --no-install-recommends \
     -o Dir::Etc::sourcelist=sources.list.d/qm1-installer-local.list \
     -o Dir::Etc::sourceparts=- install qm1-board-support
-if [ -s "$MEDIA/qm1/private/authorized_keys" ]; then
-    user="$(cat "$MEDIA/qm1/private/ssh_user")"
-    home="$(chroot "$TARGET" getent passwd "$user" | cut -d: -f6)"
-    case "$home" in /home/*) ;; *) echo 'unexpected target login home' >&2; exit 1 ;; esac
-    install -d -m 0700 "$TARGET$home/.ssh"
-    install -m 0600 "$MEDIA/qm1/private/authorized_keys" "$TARGET$home/.ssh/authorized_keys"
-    in-target chown -R "$user:" "$home/.ssh"
-    printf 'PermitRootLogin no\nPasswordAuthentication no\nPubkeyAuthentication yes\n' \
-        > "$TARGET/etc/ssh/sshd_config.d/qm1-private.conf"
-fi
 printf 'source=Debian-Installer\n' > "$TARGET/etc/qm1-installation"
 echo 'QM1 board support installed through Debian-Installer'
